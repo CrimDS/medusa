@@ -22,3 +22,5 @@ unsuccessfulbuild
 *.dll
 Release/
 ReleaseLinux/
+*.recipe
+*.ilk

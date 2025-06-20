@@ -19,11 +19,7 @@
 #include "Standard/Types.h"
 
 #include <map>	
-#ifdef WIN32
-#include <typeinfo.h>
-#else
 #include <typeinfo>
-#endif
 
 #include "MedusaDll.h"
 
