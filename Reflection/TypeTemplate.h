@@ -11,6 +11,9 @@
 #include "Standard/Reference.h"
 #include "Reflection/TypeCopy.h"
 
+#include <new>
+#include <malloc.h>
+
 //---------------------------------------------------------------------------------------------------
 
 // Template class to create a Type, this type cannot be serialized by read/write
@@ -23,14 +26,49 @@ public:
 	{}
 
 	// Type interface
+	#pragma warning(push)
+	#pragma warning(disable:4316)
 	virtual void * allocate()
 	{
+#if defined(_MSC_VER)
+		const size_t alignment = alignof(T);
+		if ( alignment >= 16 )
+		{
+			void * mem = _aligned_malloc( sizeof(T), alignment );
+			if ( mem == NULL )
+				throw std::bad_alloc();
+			return ::new (mem) T();
+		}
+		else
+		{
+			return new T();
+		}
+#else
+		// Fallback: rely on standard new
 		return new T();
+#endif
 	}
 	virtual void free( void * p )
 	{
+		if ( p == NULL )
+			return;
+#if defined(_MSC_VER)
+		const size_t alignment = alignof(T);
+		if ( alignment >= 16 )
+		{
+			T * obj = reinterpret_cast<T *>( p );
+			obj->~T();
+			_aligned_free( p );
+		}
+		else
+		{
+			delete ((T *)p);
+		}
+#else
 		delete ((T *)p);
+#endif
 	}
+	#pragma warning(pop)
 
 	// Static
 	static Type * instance()		// This is the prefered method to get a Type, it will create the type if it doesn't exist..
@@ -81,14 +119,48 @@ public:
 	{}
 
 	// Type interface
+	#pragma warning(push)
+	#pragma warning(disable:4316)
 	virtual void * allocate()
 	{
+#if defined(_MSC_VER)
+		const size_t alignment = alignof(T);
+		if ( alignment >= 16 )
+		{
+			void * mem = _aligned_malloc( sizeof(T), alignment );
+			if ( mem == NULL )
+				throw std::bad_alloc();
+			return ::new (mem) T();
+		}
+		else
+		{
+			return new T();
+		}
+#else
 		return new T();
+#endif
 	}
 	virtual void free( void * p )
 	{
+		if ( p == NULL )
+			return;
+#if defined(_MSC_VER)
+		const size_t alignment = alignof(T);
+		if ( alignment >= 16 )
+		{
+			T * obj = reinterpret_cast<T *>( p );
+			obj->~T();
+			_aligned_free( p );
+		}
+		else
+		{
+			delete ((T *)p);
+		}
+#else
 		delete ((T *)p);
+#endif
 	}
+	#pragma warning(pop)
 
 	virtual bool read( const InStream & input, void * pData )
 	{

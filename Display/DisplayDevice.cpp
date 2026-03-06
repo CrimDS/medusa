@@ -31,10 +31,12 @@ void LoadDisplayLibs()
 {
 #ifdef _DEBUG
 	static Library		LIB_DISPLAYD3D( "DisplayD3DD.dll" );			// Direct3D
-	static Library		LIB_DISPLAYGL( "DisplayGLD.dll" );				// OpenGL
+	static Library		LIB_DISPLAYD3D12( "DisplayD3D12D.dll" );	// Direct3D12 (debug)
+	static Library		LIB_DISPLAYGL( "DisplayGLD.dll" );			// OpenGL
 #else
 	static Library		LIB_DISPLAYD3D( "DisplayD3D.dll" );			// Direct3D
-	static Library		LIB_DISPLAYGL( "DisplayGL.dll" );				// OpenGL
+	static Library		LIB_DISPLAYD3D12( "DisplayD3D12.dll" );	// Direct3D12 (release)
+	static Library		LIB_DISPLAYGL( "DisplayGL.dll" );			// OpenGL
 #endif
 }
 

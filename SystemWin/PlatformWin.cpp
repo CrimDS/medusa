@@ -298,8 +298,10 @@ bool PlatformWin::initialize( Config & context )
 	// create the display device
 	if (! m_Display.valid() )
 	{
-		// create a D3D display device for Windows 
-		m_Display = DisplayDevice::create( "DisplayDeviceD3D" );
+		// create a D3D12 display device for Windows, fall back to D3D9 if unavailable
+		m_Display = DisplayDevice::create( "DisplayDeviceD3D12" );
+		if (! m_Display.valid() )
+			m_Display = DisplayDevice::create( "DisplayDeviceD3D" );
 		if (! m_Display.valid() )
 		{
 			MessageBox( NULL, "Failed to create display class!", "Display Failure", MB_OK );
