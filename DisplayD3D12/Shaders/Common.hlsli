@@ -30,6 +30,7 @@ cbuffer CBPerFrame : register(b0)
     float2      szShadowMap;
     float       fShadowDistance;
     float       fShadowDepthRange;  // far - near of shadow projection (world units)
+    float4      vShadowFocus;       // xyz = world-space shadow focus position
 };
 
 cbuffer CBPerObject : register(b1)
@@ -64,8 +65,8 @@ cbuffer CBPerLight : register(b3)
     float4      vLightDirection;
     float4      vAttenuation;
     float4      vSpot;
-    float4x4    mLightView;
-    float4x4    mLightProj;
+    float4x4    mCascadeViewProj[4];    // combined view*proj per shadow cascade
+    float4      vCascadeSplits;         // cascade split distances (world units)
 };
 
 //-----------------------------------------------------------------------------

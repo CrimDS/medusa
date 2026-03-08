@@ -99,7 +99,7 @@ bool PrimitiveSurfaceD3D12::execute()
 		if ( sm_bEnableBumpMaps )
 		{
 			pDevice->m_CurrentMatCB.bEnableBumpMap = 1;
-			pDevice->m_CurrentMatCB.fBumpDepth = ( m_fParams[0] > 0.0f ) ? m_fParams[0] : 1.0f;
+			pDevice->m_CurrentMatCB.fBumpDepth = ( m_fParams[0] > 0.0f ) ? m_fParams[0] * 1.5f : 1.5f;
 		}
 		break;
 	default:

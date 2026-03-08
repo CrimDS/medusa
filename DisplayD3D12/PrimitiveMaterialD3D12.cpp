@@ -177,17 +177,27 @@ bool PrimitiveMaterialD3D12::execute()
 				if ( light.type == 1 )	// point light
 					lightCB.vAttenuation = ShaderFloat4( light.att0, light.att1, light.att2, 0.0f );
 
-				// Shadow map binding — copy shadow map SRV into slot t7
+				// Shadow map binding — fill cascade view-proj matrices and copy SRV into t7
 				if ( iShadowPass != pDevice->m_ShadowPassList.end() && pDevice->m_pShadowMapDepth
 					&& pDevice->m_nShadowMapSRVStagingIndex != UINT(-1) )
 				{
-					DisplayDeviceD3D12::ShadowPass & pass = *iShadowPass;
 					pDevice->m_CurrentMatCB.bEnableShadowMap = 1;
 
-					XMMATRIX lv = XMLoadFloat4x4( &pass.m_LightView );
-					XMMATRIX lp = XMLoadFloat4x4( &pass.m_LightProj );
-					lightCB.mLightView = ShaderMatrix( lv );
-					lightCB.mLightProj = ShaderMatrix( lp );
+					// Consume all cascade passes for this light
+					for ( int c = 0; c < NUM_SHADOW_CASCADES && iShadowPass != pDevice->m_ShadowPassList.end(); ++c, ++iShadowPass )
+					{
+						DisplayDeviceD3D12::ShadowPass & pass = *iShadowPass;
+						XMMATRIX lv = XMLoadFloat4x4( &pass.m_LightView );
+						XMMATRIX lp = XMLoadFloat4x4( &pass.m_LightProj );
+						lightCB.mCascadeViewProj[c] = ShaderMatrix( lv * lp );
+					}
+
+					// Fill cascade split distances
+					lightCB.vCascadeSplits = ShaderFloat4(
+						pDevice->m_fShadowRadius * 0.08f,
+						pDevice->m_fShadowRadius * 0.24f,
+						pDevice->m_fShadowRadius * 0.60f,
+						pDevice->m_fShadowRadius * 1.0f );
 
 					// Copy shadow map SRV into slot t7
 					UINT smDestSlot = pDevice->m_nSRVTextureBase + 7;
@@ -199,8 +209,6 @@ bool PrimitiveMaterialD3D12::execute()
 					ID3D12GraphicsCommandList * cl = pDevice->getCommandList();
 					if ( cl )
 						cl->SetGraphicsRootDescriptorTable( 4, pDevice->getSRVGPUHandle( pDevice->m_nSRVTextureBase ) );
-
-					++iShadowPass;
 				}
 				else
 				{

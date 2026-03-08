@@ -25,6 +25,7 @@ using namespace DirectX;
 
 #define SAFE_RELEASE(p)		do { if (p) { (p)->Release(); (p) = nullptr; } } while(0)
 #define FRAME_COUNT			2
+#define NUM_SHADOW_CASCADES	4
 
 //----------------------------------------------------------------------------
 
@@ -94,6 +95,7 @@ struct CBPerFrame
 	ShaderFloat2	szShadowMap;
 	float			fShadowDistance;
 	float			fShadowDepthRange;	// far - near of shadow map projection (world units)
+	ShaderFloat4	vShadowFocus;		// xyz = world-space shadow focus position, w = unused
 };
 
 struct CBPerObject
@@ -128,8 +130,8 @@ struct CBPerLight
 	ShaderFloat4	vLightDirection;// xyz = dir, w = unused
 	ShaderFloat4	vAttenuation;	// xyz = att, w = unused
 	ShaderFloat4	vSpot;			// xyz = spot params, w = unused
-	ShaderMatrix	mLightView;
-	ShaderMatrix	mLightProj;
+	ShaderMatrix	mCascadeViewProj[NUM_SHADOW_CASCADES];	// combined view*proj per cascade
+	ShaderFloat4	vCascadeSplits;	// cascade split distances (world units from shadow focus)
 };
 
 //----------------------------------------------------------------------------

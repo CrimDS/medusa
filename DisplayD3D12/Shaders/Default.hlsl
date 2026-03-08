@@ -1,7 +1,7 @@
 //-----------------------------------------------------------------------------
 // File: Default.hlsl
 // Desc: Medusa Uber Shader for DX12.
-//       Single-light Phong shader with shadow mapping, bump mapping,
+//       Single-light Phong shader with cascaded shadow mapping, bump mapping,
 //       hemisphere ambient, Fresnel rim lighting, and lightmap support.
 //       Geometry is rendered once per light.
 // (c)2024 Palestar
@@ -13,7 +13,9 @@
 // Shadow tuning
 //-----------------------------------------------------------------------------
 
-#define SHADOW_BIAS_WORLD   5.0f
+#define SHADOW_BIAS_WORLD       3.0f
+#define NUM_CASCADES            4
+#define CASCADE_BLEND_RANGE     0.15f   // fraction of cascade radius used for blending
 
 //-----------------------------------------------------------------------------
 // Vertex Shader
@@ -41,57 +43,127 @@ VS_OUTPUT vs_main(VS_INPUT v)
         rv.vBinormal = mul(normalize(cross(v.vNormal, tangent)), (float3x3)mWorld);
     }
 
-    // Project to light space for shadow mapping
+    // vLightPos unused with CSM — projection done per-pixel in PS
     rv.vLightPos = float4(0, 0, 0, 1);
-    if (bEnableShadowMap)
-    {
-        rv.vLightPos = mul(rv.vWorldPos, mLightView);
-        rv.vLightPos = mul(rv.vLightPos, mLightProj);
-    }
 
     return rv;
 }
 
 //-----------------------------------------------------------------------------
-// Shadow map sampling — distance-based attenuation (matches DX9 approach)
+// Cascaded shadow map sampling
+// Atlas layout: 2x2 grid, each quadrant = szShadowMap/2
+//   Cascade 0: top-left     Cascade 1: top-right
+//   Cascade 2: bottom-left  Cascade 3: bottom-right
 //-----------------------------------------------------------------------------
 
-float calculateLightAmount(VS_OUTPUT input)
-{
-    float2 vShadowUV = (input.vLightPos.xy / input.vLightPos.w) * float2(0.5f, -0.5f) + 0.5f;
+// 16-tap Poisson disk for smooth soft shadows
+static const float2 poissonDisk[16] = {
+    float2(-0.9420f, -0.3990f), float2( 0.9456f, -0.7685f),
+    float2(-0.0942f, -0.9294f), float2( 0.3448f,  0.2935f),
+    float2(-0.9159f,  0.4579f), float2(-0.8154f, -0.8796f),
+    float2(-0.3826f,  0.2768f), float2( 0.9748f,  0.7562f),
+    float2( 0.4432f, -0.4032f), float2(-0.5067f, -0.0876f),
+    float2( 0.0592f,  0.8639f), float2(-0.2370f,  0.8855f),
+    float2( 0.3942f,  0.7170f), float2( 0.7413f, -0.1150f),
+    float2(-0.6667f,  0.6773f), float2( 0.1584f, -0.6624f)
+};
 
-    if (any(vShadowUV < 0.0f) || any(vShadowUV > 1.0f))
+// Interleaved gradient noise for per-pixel rotation (no banding)
+float interleavedGradientNoise(float2 screenPos)
+{
+    float3 magic = float3(0.06711056f, 0.00583715f, 52.9829189f);
+    return frac(magic.z * frac(dot(screenPos, magic.xy)));
+}
+
+float sampleShadowCascade(int cascade, float3 worldPos, float2 screenPos)
+{
+    static const float2 cascadeOffsets[NUM_CASCADES] = {
+        float2(0.0f, 0.0f), float2(0.5f, 0.0f),
+        float2(0.0f, 0.5f), float2(0.5f, 0.5f)
+    };
+
+    // Project to cascade's light space
+    float4 lightPos = mul(float4(worldPos, 1.0f), mCascadeViewProj[cascade]);
+
+    float2 vLocalUV = (lightPos.xy / lightPos.w) * float2(0.5f, -0.5f) + 0.5f;
+    if (any(vLocalUV < 0.0f) || any(vLocalUV > 1.0f))
         return 1.0f;
 
-    float fRefDepth = input.vLightPos.z / input.vLightPos.w;
+    // Map to atlas quadrant
+    float2 vAtlasUV = vLocalUV * 0.5f + cascadeOffsets[cascade];
+
+    float fRefDepth = lightPos.z / lightPos.w;
     float fBiasNDC = (fShadowDepthRange > 0.0f) ? (SHADOW_BIAS_WORLD / fShadowDepthRange) : 0.001f;
     float fInvShadowDist = 1.0f / max(fShadowDistance, 0.001f);
 
     float2 vTexel = 1.0f / szShadowMap;
-    float fLightAmount = 4.0f;
+
+    // PCF bounds clamped to cascade quadrant
+    float2 quadMin = cascadeOffsets[cascade] + vTexel;
+    float2 quadMax = cascadeOffsets[cascade] + 0.5f - vTexel;
+
+    // Per-pixel rotation angle from interleaved gradient noise
+    float angle = interleavedGradientNoise(screenPos) * 6.2831853f;
+    float sa = sin(angle);
+    float ca = cos(angle);
+
+    // Poisson disk PCF — 16 taps with per-pixel rotation
+    float fShadow = 0.0f;
+    float filterRadius = 2.5f;     // in texels
 
     [unroll]
-    for (int x = -1; x <= 1; x++)
+    for (int i = 0; i < 16; i++)
     {
-        [unroll]
-        for (int y = -1; y <= 1; y++)
-        {
-            float fStoredDepth = tShadowMap.SampleLevel(sLinear, vShadowUV + float2(x, y) * vTexel, 0).r;
+        // Rotate the Poisson sample
+        float2 offset = float2(
+            poissonDisk[i].x * ca - poissonDisk[i].y * sa,
+            poissonDisk[i].x * sa + poissonDisk[i].y * ca
+        );
+        float2 sampleUV = clamp(vAtlasUV + offset * filterRadius * vTexel, quadMin, quadMax);
+        float fStoredDepth = tShadowMap.SampleLevel(sLinear, sampleUV, 0).r;
 
-            if (fStoredDepth < 0.999f)
+        if (fStoredDepth < 0.999f)
+        {
+            float fBiasedDepth = fStoredDepth + fBiasNDC;
+            float fDepthDiff = fRefDepth - fBiasedDepth;
+            if (fDepthDiff > 0.0f)
             {
-                float fBiasedDepth = fStoredDepth + fBiasNDC;
-                float fDepthDiff = fRefDepth - fBiasedDepth;
-                if (fDepthDiff > 0.0f)
-                {
-                    float fDistanceScale = 1.0f - (fDepthDiff * fShadowDepthRange * fInvShadowDist);
-                    fLightAmount -= max(fDistanceScale, 0.0f);
-                }
+                float fDistanceScale = 1.0f - (fDepthDiff * fShadowDepthRange * fInvShadowDist);
+                fShadow += max(fDistanceScale, 0.0f);
             }
         }
     }
 
-    return saturate(fLightAmount * 0.25f);
+    return saturate(1.0f - fShadow * 0.0625f);  // 1/16
+}
+
+float calculateLightAmount(VS_OUTPUT input)
+{
+    float dist = distance(input.vWorldPos.xyz, vShadowFocus.xyz);
+    float2 screenPos = input.vPosition.xy;
+
+    // Select primary cascade
+    int cascade = 3;
+    if (dist < vCascadeSplits.x) cascade = 0;
+    else if (dist < vCascadeSplits.y) cascade = 1;
+    else if (dist < vCascadeSplits.z) cascade = 2;
+
+    float shadowA = sampleShadowCascade(cascade, input.vWorldPos.xyz, screenPos);
+
+    // Blend between cascades at boundaries for smooth transitions
+    if (cascade < 3)
+    {
+        float splitDist = vCascadeSplits[cascade];
+        float blendStart = splitDist * (1.0f - CASCADE_BLEND_RANGE);
+        if (dist > blendStart)
+        {
+            float blendFactor = saturate((dist - blendStart) / (splitDist - blendStart));
+            float shadowB = sampleShadowCascade(cascade + 1, input.vWorldPos.xyz, screenPos);
+            shadowA = lerp(shadowA, shadowB, blendFactor);
+        }
+    }
+
+    return shadowA;
 }
 
 //-----------------------------------------------------------------------------

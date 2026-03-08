@@ -196,13 +196,14 @@ public:
 
 	struct ShadowPass
 	{
-		ShadowPass() : m_bOrthoProj(false), m_fShadowDepthRange(0.0f) {}
+		ShadowPass() : m_nCascadeIndex(0), m_bOrthoProj(false), m_fShadowDepthRange(0.0f) {}
 
 		Array< DevicePrimitive::Ref >	m_Primitives;
 		Transform						m_LightTransform;
 		XMFLOAT4X4						m_LightView;		// stored as XMFLOAT4X4 to avoid alignment issues
 		XMFLOAT4X4						m_LightProj;
 		float							m_fShadowDepthRange;	// far - near of shadow projection (world units)
+		int								m_nCascadeIndex;	// which cascade (0..NUM_SHADOW_CASCADES-1)
 		bool							m_bOrthoProj;
 	};
 	typedef std::list< ShadowPass >		ShadowPassList;
@@ -346,6 +347,7 @@ public:
 	UINT							m_nCurrentBlend;		// set by setupBlending(): 0=none,1=alpha,2=alpha_inv,3=additive,4=additive_inv
 	bool							m_bCurrentDoubleSided;	// set by setupBlending()
 	bool							m_bRenderingShadowMap;	// true during shadow map geometry rendering
+	bool							m_bShadowMapInRTState;	// true when shadow map resource is in RENDER_TARGET state
 
 	// FXAA post-process
 	ComPtr<ID3D12Resource>			m_pSceneRT;				// intermediate render target for FXAA

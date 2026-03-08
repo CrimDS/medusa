@@ -37,7 +37,8 @@ DisplayDeviceD3D12::DeviceList	DisplayDeviceD3D12::sm_DeviceList;
 //---------------------------------------------------------------------------------------------------
 
 const float DEFAULT_SHADOW_RADIUS = 5000.0f;
-const int	DEFAULT_SHADOW_MAP_SIZE = 2048;
+const int	DEFAULT_SHADOW_MAP_SIZE = 4096;
+static const float CASCADE_SPLIT_RATIOS[NUM_SHADOW_CASCADES] = { 0.08f, 0.24f, 0.60f, 1.0f };
 
 //---------------------------------------------------------------------------------------------------
 
@@ -76,6 +77,7 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_nCurrentBlend( 0 ),
 	m_bCurrentDoubleSided( false ),
 	m_bRenderingShadowMap( false ),
+	m_bShadowMapInRTState( false ),
 	m_bFirstShadowPass( true ),
 	m_vShadowFocus( 0, 0, 1.0f ),
 	m_fShadowRadius( DEFAULT_SHADOW_RADIUS ),
@@ -610,10 +612,11 @@ bool DisplayDeviceD3D12::beginShadowPass( Transform & a_LightTransform )
 	if ( m_bFirstShadowPass )
 	{
 		m_bFirstShadowPass = false;
-		// Limit to 1 shadow light — we have a single shadow map texture that gets overwritten each pass
-		int nPasses = m_nMaxShadowLights < (int)m_Lights.size() ? m_nMaxShadowLights : (int)m_Lights.size();
-		if ( nPasses > 1 )
-			nPasses = 1;
+		// Limit to 1 shadow light — atlas holds cascades for one light
+		int nLights = m_nMaxShadowLights < (int)m_Lights.size() ? m_nMaxShadowLights : (int)m_Lights.size();
+		if ( nLights > 1 )
+			nLights = 1;
+		int nPasses = nLights * NUM_SHADOW_CASCADES;
 		m_ShadowPassList.resize( nPasses );
 		m_iCurrentShadowPass = m_ShadowPassList.begin();
 		m_iCurrentShadowLight = m_Lights.begin();
@@ -669,10 +672,13 @@ bool DisplayDeviceD3D12::beginShadowPass( Transform & a_LightTransform )
 	sphere.intersect( vClippedLightPos, m_vShadowFocus - vClippedLightPos, vClippedLightPos );
 	vLightViewPosition = m_Proj.m_vPosition + (m_Proj.m_mFrame % vClippedLightPos);
 
+	int cascadeIndex = m_nShadowMapPass % NUM_SHADOW_CASCADES;
+
 	ShadowPass & pass = *m_iCurrentShadowPass;
 	pass.m_LightTransform.m_mFrame = Matrix33( vLightViewDirection );
 	pass.m_LightTransform.m_vTranslate = vLightViewPosition;
 	pass.m_bOrthoProj = bOrthoProj;
+	pass.m_nCascadeIndex = cascadeIndex;
 	pass.m_Primitives.release();
 
 	a_LightTransform = pass.m_LightTransform;
@@ -691,20 +697,14 @@ bool DisplayDeviceD3D12::endShadowPass()
 	m_bShadowPass = false;
 
 	ShadowPass & pass = *m_iCurrentShadowPass;
-
-	static int s_nEndLog = 0;
-	if ( s_nEndLog < 30 )
-	{
-		TRACE( "endShadowPass: primitives=%d, shadowMapReady=%d, hasShadowMap=%d",
-			pass.m_Primitives.size(), (int)m_bShadowMapReady, (int)(m_pShadowMapDepth != nullptr) );
-		++s_nEndLog;
-	}
+	int cascadeIndex = pass.m_nCascadeIndex;
 
 	// Save current projection
 	Projection savedProjection( m_Proj );
 
 	// Set the projection for the light
-	m_Proj.m_rWindow = RectInt( PointInt(0, 0), m_szShadowMap );
+	int quadSize = m_szShadowMap.width / 2;
+	m_Proj.m_rWindow = RectInt( PointInt(0, 0), SizeInt(quadSize, quadSize) );
 	m_Proj.m_mFrame = pass.m_LightTransform.m_mFrame;
 	m_Proj.m_vPosition = pass.m_LightTransform.m_vTranslate;
 
@@ -717,8 +717,9 @@ bool DisplayDeviceD3D12::endShadowPass()
 	m_Proj.m_fBack = fLightToFocus + m_fShadowRadius * 4.0f;
 	updateProjection();
 
-	// --- Single shadow map: ortho projection centered on focus ---
-	float fOrthoSize = m_fShadowRadius * 2.0f;
+	// Cascade-specific ortho projection — each cascade covers a different radius
+	float fCascadeRadius = m_fShadowRadius * CASCADE_SPLIT_RATIOS[cascadeIndex];
+	float fOrthoSize = fCascadeRadius * 2.0f;
 	float fShadowNear = Max( 1.0f, fLightToFocus - m_fShadowRadius * 4.0f );
 	float fShadowFar = fLightToFocus + m_fShadowRadius * 4.0f;
 	m_mProj = XMMatrixOrthographicLH( fOrthoSize, fOrthoSize, fShadowNear, fShadowFar );
@@ -728,15 +729,7 @@ bool DisplayDeviceD3D12::endShadowPass()
 	pass.m_fShadowDepthRange = fShadowFar - fShadowNear;
 	m_fShadowDepthRange = pass.m_fShadowDepthRange;
 
-	static int s_nProjLog = 0;
-	if ( s_nProjLog < 10 )
-	{
-		TRACE( "endShadowPass: ortho=%.0f near=%.1f far=%.1f lightToFocus=%.1f radius=%.1f",
-			fOrthoSize, fShadowNear, fShadowFar, fLightToFocus, m_fShadowRadius );
-		++s_nProjLog;
-	}
-
-	// Render shadow map (single pass, full texture)
+	// Render shadow map cascade to atlas quadrant
 	if ( m_pShadowMapDepth && m_bCommandListOpen )
 	{
 		ShaderD3D12::Ref savedMatShader = m_pMatShader;
@@ -747,21 +740,33 @@ bool DisplayDeviceD3D12::endShadowPass()
 		m_bCurrentDoubleSided = false;
 		m_bRenderingShadowMap = true;
 
-		float clearColor[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
-
-		TransitionResource( m_pCommandList.Get(), m_pShadowMapDepth.Get(),
-			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
-
 		D3D12_CPU_DESCRIPTOR_HANDLE smRTV = m_RTVHeap.GetCPUHandle( m_nShadowMapDSVIndex );
-		m_pCommandList->OMSetRenderTargets( 1, &smRTV, FALSE, nullptr );
-		m_pCommandList->ClearRenderTargetView( smRTV, clearColor, 0, nullptr );
 
+		// Transition to RT and clear on first cascade only
+		if ( cascadeIndex == 0 )
+		{
+			TransitionResource( m_pCommandList.Get(), m_pShadowMapDepth.Get(),
+				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+			m_bShadowMapInRTState = true;
+
+			float clearColor[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+			m_pCommandList->ClearRenderTargetView( smRTV, clearColor, 0, nullptr );
+		}
+
+		m_pCommandList->OMSetRenderTargets( 1, &smRTV, FALSE, nullptr );
+
+		// Set viewport to this cascade's atlas quadrant
+		int qx = cascadeIndex % 2;
+		int qy = cascadeIndex / 2;
 		D3D12_VIEWPORT vp = {};
-		vp.Width = (float)m_szShadowMap.width;
-		vp.Height = (float)m_szShadowMap.height;
+		vp.TopLeftX = (float)(qx * quadSize);
+		vp.TopLeftY = (float)(qy * quadSize);
+		vp.Width = (float)quadSize;
+		vp.Height = (float)quadSize;
 		vp.MinDepth = 0.0f;
 		vp.MaxDepth = 1.0f;
-		D3D12_RECT scissor = { 0, 0, (LONG)m_szShadowMap.width, (LONG)m_szShadowMap.height };
+		D3D12_RECT scissor = { (LONG)(qx * quadSize), (LONG)(qy * quadSize),
+			(LONG)((qx + 1) * quadSize), (LONG)((qy + 1) * quadSize) };
 
 		bindPerFrameCB();
 		m_pCommandList->RSSetViewports( 1, &vp );
@@ -770,8 +775,13 @@ bool DisplayDeviceD3D12::endShadowPass()
 		for ( int i = 0; i < pass.m_Primitives.size(); ++i )
 			pass.m_Primitives[i]->execute();
 
-		TransitionResource( m_pCommandList.Get(), m_pShadowMapDepth.Get(),
-			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+		// Transition back to SRV on last cascade
+		if ( cascadeIndex == NUM_SHADOW_CASCADES - 1 )
+		{
+			TransitionResource( m_pCommandList.Get(), m_pShadowMapDepth.Get(),
+				D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+			m_bShadowMapInRTState = false;
+		}
 
 		// Restore state
 		m_bRenderingShadowMap = false;
@@ -814,8 +824,10 @@ bool DisplayDeviceD3D12::endShadowPass()
 	}
 
 	++m_iCurrentShadowPass;
-	++m_iCurrentShadowLight;
 	++m_nShadowMapPass;
+	// Advance to next light after all cascades for the current light are done
+	if ( m_nShadowMapPass % NUM_SHADOW_CASCADES == 0 )
+		++m_iCurrentShadowLight;
 
 	return true;
 }
@@ -832,6 +844,14 @@ bool DisplayDeviceD3D12::endScene()
 	{
 		abortScene();
 		return false;
+	}
+
+	// Safety: ensure shadow map is back in PSR state before scene rendering
+	if ( m_bShadowMapInRTState && m_pShadowMapDepth )
+	{
+		TransitionResource( m_pCommandList.Get(), m_pShadowMapDepth.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+		m_bShadowMapInRTState = false;
 	}
 
 	// Bind per-frame constant buffer with final lighting data
@@ -880,6 +900,14 @@ bool DisplayDeviceD3D12::endScene()
 
 void DisplayDeviceD3D12::abortScene()
 {
+	// Safety: ensure shadow map is back in PSR state
+	if ( m_bShadowMapInRTState && m_pShadowMapDepth && m_bCommandListOpen )
+	{
+		TransitionResource( m_pCommandList.Get(), m_pShadowMapDepth.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+		m_bShadowMapInRTState = false;
+	}
+
 	for ( int i = 0; i < PASS_COUNT; i++ )
 	{
 		Array< PrimitiveMaterial::Ref > & materials = m_Stack[i];
@@ -1399,6 +1427,10 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 	m_CBPerFrame.szShadowMap = ShaderFloat2( (float)m_szShadowMap.width, (float)m_szShadowMap.height );
 	m_CBPerFrame.fShadowDistance = m_fShadowRadius;
 	m_CBPerFrame.fShadowDepthRange = m_fShadowDepthRange;
+
+	// Compute world-space shadow focus for cascade selection in shaders
+	Vector3 vWorldFocus( m_Proj.m_vPosition + (m_Proj.m_mFrame % m_vShadowFocus) );
+	m_CBPerFrame.vShadowFocus = ShaderFloat4( vWorldFocus.x, vWorldFocus.y, vWorldFocus.z, 0.0f );
 
 	UploadRingBuffer::Allocation alloc = allocateCB( sizeof(CBPerFrame) );
 	memcpy( alloc.cpuAddress, &m_CBPerFrame, sizeof(CBPerFrame) );
