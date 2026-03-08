@@ -25,7 +25,7 @@ IMPLEMENT_NAMED_ABSTRACT_FACTORY(FACTORY_RenderContextInstanceData, RenderContex
 //-------------------------------------------------------------------------------
 
 float	RenderContext::sm_fDefaultDetail = 0.5f;				// default detail level, should be initialized by client options..
-int		RenderContext::sm_nShadowMapSize = 2048;				// default shadow map size
+int		RenderContext::sm_nShadowMapSize = 4096;				// default shadow map size
 float	RenderContext::sm_fShadowMapRadius = 5000.0f;			// default shadow map radius
 
 																//---------------------------------------------------------------------------------------------------

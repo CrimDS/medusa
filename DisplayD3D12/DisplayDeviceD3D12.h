@@ -196,16 +196,13 @@ public:
 
 	struct ShadowPass
 	{
-		ShadowPass() : m_bOrthoProj(false) {}
+		ShadowPass() : m_bOrthoProj(false), m_fShadowDepthRange(0.0f) {}
 
 		Array< DevicePrimitive::Ref >	m_Primitives;
 		Transform						m_LightTransform;
-		XMMATRIX						m_LightView;
-		XMMATRIX						m_LightProj;
-		ComPtr<ID3D12Resource>			m_pShadowMap;
-		UINT							m_ShadowMapSRVIndex;
-		UINT							m_ShadowMapRTVIndex;
-		UINT							m_ShadowMapDSVIndex;
+		XMFLOAT4X4						m_LightView;		// stored as XMFLOAT4X4 to avoid alignment issues
+		XMFLOAT4X4						m_LightProj;
+		float							m_fShadowDepthRange;	// far - near of shadow projection (world units)
 		bool							m_bOrthoProj;
 	};
 	typedef std::list< ShadowPass >		ShadowPassList;
@@ -316,6 +313,7 @@ public:
 	EffectList						m_EffectList;
 
 	// Shadow mapping
+	float							m_fShadowDepthRange;	// far - near of shadow projection (world units)
 	bool							m_bShadowMapReady;
 	bool							m_bShadowMapSupported;
 	Vector3							m_vShadowFocus;
@@ -330,6 +328,11 @@ public:
 	LightMap::iterator				m_iCurrentShadowLight;
 	ShadowPassList::iterator		m_iCurrentShadowPass;
 
+	// Shadow map GPU resources (R32_FLOAT color RT)
+	ComPtr<ID3D12Resource>			m_pShadowMapDepth;		// R32_FLOAT color RT
+	UINT							m_nShadowMapDSVIndex;	// RTV index in m_RTVHeap (reused name)
+	UINT							m_nShadowMapSRVStagingIndex;	// SRV index in m_SRVStagingHeap
+
 	// Command list open state — true between resetCommandList() and flushCommandList()
 	bool							m_bCommandListOpen;
 
@@ -342,6 +345,16 @@ public:
 	int								m_nTextureStage;
 	UINT							m_nCurrentBlend;		// set by setupBlending(): 0=none,1=alpha,2=alpha_inv,3=additive,4=additive_inv
 	bool							m_bCurrentDoubleSided;	// set by setupBlending()
+	bool							m_bRenderingShadowMap;	// true during shadow map geometry rendering
+
+	// FXAA post-process
+	ComPtr<ID3D12Resource>			m_pSceneRT;				// intermediate render target for FXAA
+	UINT							m_nSceneRTVIndex;		// RTV index in m_RTVHeap
+	UINT							m_nSceneSRVIndex;		// SRV index in m_SRVStagingHeap
+	ShaderD3D12::Ref				m_pFXAAShader;
+	ComPtr<ID3D12PipelineState>		m_pFXAAPSO;
+	ComPtr<ID3D12RootSignature>		m_pFXAARootSig;
+	bool							m_bFXAAEnabled;
 
 	// Static
 	static ModeList					sm_ModeList;
@@ -359,6 +372,8 @@ public:
 	bool							createDefaultShaders();
 	void							freeD3D12();
 	bool							readyShadowMap();
+	bool							createFXAA();
+	void							applyFXAA();
 
 	void							waitForGPU();
 	void							moveToNextFrame();

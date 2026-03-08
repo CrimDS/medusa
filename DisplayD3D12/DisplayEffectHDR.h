@@ -1,5 +1,6 @@
 /*
 	DisplayEffectHDR.h - D3D12 version
+	Bloom post-processing effect.
 	(c)2024 Palestar
 */
 
@@ -23,17 +24,39 @@ public:
 	virtual bool			postRender( DisplayDevice * pDevice );
 	virtual void			release();
 
-	int						m_nBloomLevels;
-	int						m_nBloomSize;
+	// Tuning parameters
+	int						m_nBloomLevels;			// number of blur iterations
+	int						m_nBloomSize;			// bloom RT divisor (e.g. 4 = 1/4 screen)
+	float					m_fBloomScale;			// bloom intensity
+	float					m_fBrightThreshold;		// luminance threshold for bright pass
 
-	ComPtr<ID3D12Resource>	m_pHDRRenderTarget;
+private:
+	bool					initBloom( DisplayDeviceD3D12 * pDevice );
+	void					drawFullscreenTriangle( DisplayDeviceD3D12 * pDevice );
+
+	// Compiled shader blobs (from PostProcess.hlsl with different entry points)
+	ComPtr<ID3DBlob>		m_pVSBlob;
+	ComPtr<ID3DBlob>		m_pPSBrightPass;
+	ComPtr<ID3DBlob>		m_pPSHorzBlur;
+	ComPtr<ID3DBlob>		m_pPSVertBlur;
+	ComPtr<ID3DBlob>		m_pPSScale;
+
+	// Root signature and PSOs for bloom passes
+	ComPtr<ID3D12RootSignature>		m_pBloomRootSig;
+	ComPtr<ID3D12PipelineState>		m_pBrightPassPSO;
+	ComPtr<ID3D12PipelineState>		m_pHorzBlurPSO;
+	ComPtr<ID3D12PipelineState>		m_pVertBlurPSO;
+	ComPtr<ID3D12PipelineState>		m_pAdditivePSO;		// additive composite
+
+	// Bloom render targets (ping-pong, 1/N screen size)
 	ComPtr<ID3D12Resource>	m_pBloomTextures[2];
-	UINT					m_nHDRRTVIndex;
-	UINT					m_nHDRSRVIndex;
 	UINT					m_nBloomRTVIndex[2];
-	UINT					m_nBloomSRVIndex[2];
+	UINT					m_nBloomSRVIndex[2];		// staging heap indices
+
 	SizeInt					m_LastSize;
+	SizeInt					m_BloomSize;
 	bool					m_bInitialized;
+	bool					m_bBloomFailed;
 };
 
 //---------------------------------------------------------------------------------------------------

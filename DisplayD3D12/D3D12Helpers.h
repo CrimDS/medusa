@@ -93,7 +93,7 @@ struct CBPerFrame
 	ShaderFloat4	vGlobalAmbient;
 	ShaderFloat2	szShadowMap;
 	float			fShadowDistance;
-	float			pad0;
+	float			fShadowDepthRange;	// far - near of shadow map projection (world units)
 };
 
 struct CBPerObject

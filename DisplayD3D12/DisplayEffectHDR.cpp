@@ -1,21 +1,41 @@
 /*
 	DisplayEffectHDR.cpp - D3D12 version
+	Bloom post-processing: bright pass → Gaussian blur → additive composite.
+	Operates on m_pSceneRT (FXAA intermediate RT) after materials render.
 	(c)2024 Palestar
 */
 
+#define MEDUSA_TRACE_ON
+
 #include "DisplayEffectHDR.h"
+#include "Debug/Trace.h"
 
 //---------------------------------------------------------------------------------------------------
 
 IMPLEMENT_FACTORY( DisplayEffectHDRD3D12, DisplayEffect );
 
+//---------------------------------------------------------------------------------------------------
+
+// Post-process constant buffer layout — must match PostProcess.hlsl CBPostProcess
+struct CBPostProcess
+{
+	float	texelSizeX;
+	float	texelSizeY;
+	float	fScale;
+	float	fBrightThreshold;
+};
+
+//---------------------------------------------------------------------------------------------------
+
 DisplayEffectHDRD3D12::DisplayEffectHDRD3D12() :
-	m_nBloomLevels( 4 ),
-	m_nBloomSize( 256 ),
-	m_nHDRRTVIndex( UINT(-1) ),
-	m_nHDRSRVIndex( UINT(-1) ),
+	m_nBloomLevels( 1 ),
+	m_nBloomSize( 4 ),
+	m_fBloomScale( 0.6f ),
+	m_fBrightThreshold( 0.65f ),
 	m_LastSize( 0, 0 ),
-	m_bInitialized( false )
+	m_BloomSize( 0, 0 ),
+	m_bInitialized( false ),
+	m_bBloomFailed( false )
 {
 	memset( m_nBloomRTVIndex, 0xff, sizeof(m_nBloomRTVIndex) );
 	memset( m_nBloomSRVIndex, 0xff, sizeof(m_nBloomSRVIndex) );
@@ -26,26 +46,465 @@ DisplayEffectHDRD3D12::~DisplayEffectHDRD3D12()
 	release();
 }
 
-bool DisplayEffectHDRD3D12::preRender( DisplayDevice * pDevice )
+//---------------------------------------------------------------------------------------------------
+
+static bool compileShaderEntry( const wchar_t * pPath, const char * pEntry, const char * pTarget,
+	ComPtr<ID3DBlob> & blobOut )
 {
-	// TODO: Implement HDR pre-render for D3D12
-	// This should redirect rendering to an HDR render target
+	UINT flags = 0;
+#if defined(_DEBUG)
+	flags |= D3DCOMPILE_DEBUG;
+#endif
+
+	ComPtr<ID3DBlob> errors;
+	HRESULT hr = D3DCompileFromFile( pPath, nullptr, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+		pEntry, pTarget, flags, 0, &blobOut, &errors );
+	if ( FAILED(hr) )
+	{
+		if ( errors )
+			TRACE( "Bloom shader compile error (%s): %s", pEntry, (const char *)errors->GetBufferPointer() );
+		return false;
+	}
 	return true;
 }
+
+//---------------------------------------------------------------------------------------------------
+
+bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
+{
+	if ( m_bBloomFailed )
+		return false;
+
+	RectInt rw = pDevice->renderWindow();
+	UINT width  = (UINT)rw.width();
+	UINT height = (UINT)rw.height();
+	if ( width == 0 || height == 0 )
+		return false;
+
+	SizeInt currentSize( width, height );
+	if ( m_bInitialized && m_LastSize == currentSize )
+		return true;		// already initialized at this size
+
+	// Release old resources
+	release();
+	m_bBloomFailed = true;		// assume failure until we succeed
+
+	m_LastSize = currentSize;
+	m_BloomSize = SizeInt( width / m_nBloomSize, height / m_nBloomSize );
+	if ( m_BloomSize.width < 1 ) m_BloomSize.width = 1;
+	if ( m_BloomSize.height < 1 ) m_BloomSize.height = 1;
+
+	// --- Compile PostProcess.hlsl with different entry points ---
+	// Resolve shader path the same way the shader system does
+	CharString sPath = DisplayDevice::sm_sShadersPath + "Shaders/PostProcess.hlsl";
+	wchar_t wszPath[MAX_PATH];
+	MultiByteToWideChar( CP_ACP, 0, sPath, -1, wszPath, MAX_PATH );
+
+	if ( !compileShaderEntry( wszPath, "vs_main", "vs_5_1", m_pVSBlob ) )
+	{
+		TRACE( "Bloom: Failed to compile VS" );
+		return false;
+	}
+	if ( !compileShaderEntry( wszPath, "PS_BrightPass", "ps_5_1", m_pPSBrightPass ) )
+	{
+		TRACE( "Bloom: Failed to compile PS_BrightPass" );
+		return false;
+	}
+	if ( !compileShaderEntry( wszPath, "PS_HorzBlur", "ps_5_1", m_pPSHorzBlur ) )
+	{
+		TRACE( "Bloom: Failed to compile PS_HorzBlur" );
+		return false;
+	}
+	if ( !compileShaderEntry( wszPath, "PS_VertBlur", "ps_5_1", m_pPSVertBlur ) )
+	{
+		TRACE( "Bloom: Failed to compile PS_VertBlur" );
+		return false;
+	}
+	if ( !compileShaderEntry( wszPath, "PS_Scale", "ps_5_1", m_pPSScale ) )
+	{
+		TRACE( "Bloom: Failed to compile PS_Scale" );
+		return false;
+	}
+
+	// --- Create bloom root signature ---
+	// [0] CBV at b0 (post-process constants)
+	// [1] SRV table: 1 SRV at t0
+	// [2] Sampler table: 1 sampler at s0
+	D3D12_ROOT_PARAMETER params[3] = {};
+
+	params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+	params[0].Descriptor.ShaderRegister = 0;
+	params[0].Descriptor.RegisterSpace = 0;
+	params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+	D3D12_DESCRIPTOR_RANGE srvRange = {};
+	srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	srvRange.NumDescriptors = 1;
+	srvRange.BaseShaderRegister = 0;
+	srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+	params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	params[1].DescriptorTable.NumDescriptorRanges = 1;
+	params[1].DescriptorTable.pDescriptorRanges = &srvRange;
+	params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+	D3D12_DESCRIPTOR_RANGE samplerRange = {};
+	samplerRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+	samplerRange.NumDescriptors = 1;
+	samplerRange.BaseShaderRegister = 0;
+	samplerRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+	params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	params[2].DescriptorTable.NumDescriptorRanges = 1;
+	params[2].DescriptorTable.pDescriptorRanges = &samplerRange;
+	params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+	D3D12_ROOT_SIGNATURE_DESC rsDesc = {};
+	rsDesc.NumParameters = 3;
+	rsDesc.pParameters = params;
+	rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+	ComPtr<ID3DBlob> sig, err;
+	HRESULT hr = D3D12SerializeRootSignature( &rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err );
+	if ( FAILED(hr) )
+	{
+		if ( err ) TRACE( "Bloom root sig error: %s", (const char *)err->GetBufferPointer() );
+		return false;
+	}
+
+	hr = pDevice->getDevice()->CreateRootSignature( 0, sig->GetBufferPointer(), sig->GetBufferSize(),
+		IID_PPV_ARGS(&m_pBloomRootSig) );
+	if ( FAILED(hr) )
+	{
+		TRACE( "Bloom: Failed to create root signature" );
+		return false;
+	}
+
+	// --- Create PSOs ---
+	// Base PSO desc shared by all bloom passes
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+	psoDesc.pRootSignature = m_pBloomRootSig.Get();
+	psoDesc.VS = { m_pVSBlob->GetBufferPointer(), m_pVSBlob->GetBufferSize() };
+	psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+	psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	psoDesc.RasterizerState.DepthClipEnable = FALSE;
+	psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+	psoDesc.DepthStencilState.DepthEnable = FALSE;
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = 1;
+	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	psoDesc.SampleDesc.Count = 1;
+	psoDesc.SampleMask = UINT_MAX;
+
+	// Bright pass PSO
+	psoDesc.PS = { m_pPSBrightPass->GetBufferPointer(), m_pPSBrightPass->GetBufferSize() };
+	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pBrightPassPSO) );
+	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create BrightPass PSO" ); return false; }
+
+	// Horz blur PSO
+	psoDesc.PS = { m_pPSHorzBlur->GetBufferPointer(), m_pPSHorzBlur->GetBufferSize() };
+	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pHorzBlurPSO) );
+	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create HorzBlur PSO" ); return false; }
+
+	// Vert blur PSO
+	psoDesc.PS = { m_pPSVertBlur->GetBufferPointer(), m_pPSVertBlur->GetBufferSize() };
+	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pVertBlurPSO) );
+	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create VertBlur PSO" ); return false; }
+
+	// Additive composite PSO (writes bloom onto scene RT with additive blending)
+	psoDesc.PS = { m_pPSScale->GetBufferPointer(), m_pPSScale->GetBufferSize() };
+	psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
+	psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+	psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
+	psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+	psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+	psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
+	psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pAdditivePSO) );
+	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create Additive PSO" ); return false; }
+
+	// --- Create bloom render targets (2 ping-pong textures at 1/N screen size) ---
+	D3D12_RESOURCE_DESC rtDesc = {};
+	rtDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	rtDesc.Width = m_BloomSize.width;
+	rtDesc.Height = m_BloomSize.height;
+	rtDesc.DepthOrArraySize = 1;
+	rtDesc.MipLevels = 1;
+	rtDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	rtDesc.SampleDesc.Count = 1;
+	rtDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+	D3D12_CLEAR_VALUE clearValue = {};
+	clearValue.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+	for ( int i = 0; i < 2; ++i )
+	{
+		hr = pDevice->getDevice()->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
+			&rtDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clearValue,
+			IID_PPV_ARGS(&m_pBloomTextures[i]) );
+		if ( FAILED(hr) )
+		{
+			TRACE( "Bloom: Failed to create bloom RT %d", i );
+			return false;
+		}
+
+		// Allocate RTV
+		m_nBloomRTVIndex[i] = pDevice->m_RTVHeap.Allocate();
+		if ( m_nBloomRTVIndex[i] == UINT(-1) )
+		{
+			TRACE( "Bloom: Failed to allocate RTV %d", i );
+			return false;
+		}
+		pDevice->getDevice()->CreateRenderTargetView( m_pBloomTextures[i].Get(), nullptr,
+			pDevice->m_RTVHeap.GetCPUHandle( m_nBloomRTVIndex[i] ) );
+
+		// Allocate SRV in staging heap
+		m_nBloomSRVIndex[i] = pDevice->m_SRVStagingHeap.Allocate();
+		if ( m_nBloomSRVIndex[i] == UINT(-1) )
+		{
+			TRACE( "Bloom: Failed to allocate SRV %d", i );
+			return false;
+		}
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Texture2D.MipLevels = 1;
+		pDevice->getDevice()->CreateShaderResourceView( m_pBloomTextures[i].Get(), &srvDesc,
+			pDevice->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[i] ) );
+	}
+
+	m_bInitialized = true;
+	m_bBloomFailed = false;
+
+	TRACE( "Bloom initialized: screen=%dx%d, bloom=%dx%d, levels=%d, scale=%.2f, threshold=%.2f",
+		width, height, m_BloomSize.width, m_BloomSize.height,
+		m_nBloomLevels, m_fBloomScale, m_fBrightThreshold );
+
+	return true;
+}
+
+//---------------------------------------------------------------------------------------------------
+
+bool DisplayEffectHDRD3D12::preRender( DisplayDevice * pDevice )
+{
+	// No preRender needed — bloom operates as pure post-process on m_pSceneRT
+	return true;
+}
+
+//---------------------------------------------------------------------------------------------------
+
+void DisplayEffectHDRD3D12::drawFullscreenTriangle( DisplayDeviceD3D12 * pDevice )
+{
+	ID3D12GraphicsCommandList * cl = pDevice->getCommandList();
+	cl->IASetPrimitiveTopology( D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
+	cl->IASetVertexBuffers( 0, 0, nullptr );
+	cl->DrawInstanced( 3, 1, 0, 0 );
+}
+
+//---------------------------------------------------------------------------------------------------
 
 bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 {
-	// TODO: Implement HDR post-render for D3D12
-	// This should perform bright pass extraction, gaussian blur, and bloom combine
+	DisplayDeviceD3D12 * pDev = (DisplayDeviceD3D12 *)pDevice;
+	if ( !pDev || !pDev->isCommandListOpen() )
+		return false;
+
+	// Bloom requires m_pSceneRT (created by FXAA)
+	if ( !pDev->m_bFXAAEnabled || !pDev->m_pSceneRT )
+		return true;		// silently skip — no error
+
+	if ( DisplayDevice::sm_bUseFixedFunction )
+		return true;
+
+	// Initialize bloom resources if needed
+	if ( !m_bInitialized )
+	{
+		if ( !initBloom( pDev ) )
+			return true;	// failed, skip bloom silently
+	}
+
+	ID3D12GraphicsCommandList * cl = pDev->getCommandList();
+	ID3D12Device * dev = pDev->getDevice();
+
+	// --- Setup bloom pipeline ---
+	cl->SetGraphicsRootSignature( m_pBloomRootSig.Get() );
+
+	ID3D12DescriptorHeap * heaps[] = { pDev->m_SRVHeap.Get(), pDev->m_SamplerHeap.Get() };
+	cl->SetDescriptorHeaps( _countof(heaps), heaps );
+
+	// Bind sampler table (slot 2)
+	cl->SetGraphicsRootDescriptorTable( 2, pDev->m_SamplerHeap.GetGPUHandle( 0 ) );
+
+	// --- Step 1: Bright pass (m_pSceneRT → bloom[0]) ---
+	TransitionResource( cl, pDev->m_pSceneRT.Get(),
+		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+	TransitionResource( cl, m_pBloomTextures[0].Get(),
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+
+	// Upload bright pass constants
+	CBPostProcess cbBright = {};
+	cbBright.texelSizeX = 1.0f / (float)m_BloomSize.width;
+	cbBright.texelSizeY = 1.0f / (float)m_BloomSize.height;
+	cbBright.fScale = 1.0f;
+	cbBright.fBrightThreshold = m_fBrightThreshold;
+
+	UploadRingBuffer::Allocation cbAlloc = pDev->allocateCB( sizeof(CBPostProcess) );
+	memcpy( cbAlloc.cpuAddress, &cbBright, sizeof(cbBright) );
+	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
+
+	// Bind scene SRV (copy from staging to shader-visible heap)
+	UINT sceneSRVSlot = pDev->m_nSRVFrameOffset++;
+	dev->CopyDescriptorsSimple( 1,
+		pDev->m_SRVHeap.GetCPUHandle( sceneSRVSlot ),
+		pDev->m_SRVStagingHeap.GetCPUHandle( pDev->m_nSceneSRVIndex ),
+		D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+	cl->SetGraphicsRootDescriptorTable( 1, pDev->m_SRVHeap.GetGPUHandle( sceneSRVSlot ) );
+
+	// Set bloom[0] as render target
+	D3D12_CPU_DESCRIPTOR_HANDLE bloomRTV0 = pDev->m_RTVHeap.GetCPUHandle( m_nBloomRTVIndex[0] );
+	cl->OMSetRenderTargets( 1, &bloomRTV0, FALSE, nullptr );
+	float clearColor[4] = { 0, 0, 0, 0 };
+	cl->ClearRenderTargetView( bloomRTV0, clearColor, 0, nullptr );
+
+	D3D12_VIEWPORT bloomVP = { 0, 0, (float)m_BloomSize.width, (float)m_BloomSize.height, 0, 1 };
+	D3D12_RECT bloomScissor = { 0, 0, (LONG)m_BloomSize.width, (LONG)m_BloomSize.height };
+	cl->RSSetViewports( 1, &bloomVP );
+	cl->RSSetScissorRects( 1, &bloomScissor );
+
+	cl->SetPipelineState( m_pBrightPassPSO.Get() );
+	drawFullscreenTriangle( pDev );
+
+	// --- Step 2: Gaussian blur (ping-pong between bloom[0] and bloom[1]) ---
+	CBPostProcess cbBlur = {};
+	cbBlur.texelSizeX = 1.0f / (float)m_BloomSize.width;
+	cbBlur.texelSizeY = 1.0f / (float)m_BloomSize.height;
+	cbBlur.fScale = 1.0f;
+	cbBlur.fBrightThreshold = 0.0f;
+
+	for ( int level = 0; level < m_nBloomLevels; ++level )
+	{
+		// Horizontal blur: bloom[0] → bloom[1]
+		TransitionResource( cl, m_pBloomTextures[0].Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+		TransitionResource( cl, m_pBloomTextures[1].Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+
+		UINT bloomSRV0 = pDev->m_nSRVFrameOffset++;
+		dev->CopyDescriptorsSimple( 1,
+			pDev->m_SRVHeap.GetCPUHandle( bloomSRV0 ),
+			pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[0] ),
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+		cl->SetGraphicsRootDescriptorTable( 1, pDev->m_SRVHeap.GetGPUHandle( bloomSRV0 ) );
+
+		D3D12_CPU_DESCRIPTOR_HANDLE bloomRTV1 = pDev->m_RTVHeap.GetCPUHandle( m_nBloomRTVIndex[1] );
+		cl->OMSetRenderTargets( 1, &bloomRTV1, FALSE, nullptr );
+
+		cbAlloc = pDev->allocateCB( sizeof(CBPostProcess) );
+		memcpy( cbAlloc.cpuAddress, &cbBlur, sizeof(cbBlur) );
+		cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
+
+		cl->SetPipelineState( m_pHorzBlurPSO.Get() );
+		drawFullscreenTriangle( pDev );
+
+		// Vertical blur: bloom[1] → bloom[0]
+		TransitionResource( cl, m_pBloomTextures[1].Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+		TransitionResource( cl, m_pBloomTextures[0].Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+
+		UINT bloomSRV1 = pDev->m_nSRVFrameOffset++;
+		dev->CopyDescriptorsSimple( 1,
+			pDev->m_SRVHeap.GetCPUHandle( bloomSRV1 ),
+			pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[1] ),
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+		cl->SetGraphicsRootDescriptorTable( 1, pDev->m_SRVHeap.GetGPUHandle( bloomSRV1 ) );
+
+		cl->OMSetRenderTargets( 1, &bloomRTV0, FALSE, nullptr );
+
+		cbAlloc = pDev->allocateCB( sizeof(CBPostProcess) );
+		memcpy( cbAlloc.cpuAddress, &cbBlur, sizeof(cbBlur) );
+		cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
+
+		cl->SetPipelineState( m_pVertBlurPSO.Get() );
+		drawFullscreenTriangle( pDev );
+	}
+
+	// --- Step 3: Additive composite (bloom[0] → m_pSceneRT with additive blending) ---
+	TransitionResource( cl, m_pBloomTextures[0].Get(),
+		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+	TransitionResource( cl, pDev->m_pSceneRT.Get(),
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+
+	// Bind bloom[0] as input
+	UINT bloomSRVFinal = pDev->m_nSRVFrameOffset++;
+	dev->CopyDescriptorsSimple( 1,
+		pDev->m_SRVHeap.GetCPUHandle( bloomSRVFinal ),
+		pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[0] ),
+		D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+	cl->SetGraphicsRootDescriptorTable( 1, pDev->m_SRVHeap.GetGPUHandle( bloomSRVFinal ) );
+
+	// Set scene RT as render target (full screen viewport)
+	D3D12_CPU_DESCRIPTOR_HANDLE sceneRTV = pDev->m_RTVHeap.GetCPUHandle( pDev->m_nSceneRTVIndex );
+	cl->OMSetRenderTargets( 1, &sceneRTV, FALSE, nullptr );
+
+	RectInt rw = pDev->renderWindow();
+	D3D12_VIEWPORT sceneVP = { 0, 0, (float)rw.width(), (float)rw.height(), 0, 1 };
+	D3D12_RECT sceneScissor = { 0, 0, (LONG)rw.width(), (LONG)rw.height() };
+	cl->RSSetViewports( 1, &sceneVP );
+	cl->RSSetScissorRects( 1, &sceneScissor );
+
+	// Upload composite constants (fScale controls bloom intensity)
+	CBPostProcess cbComposite = {};
+	cbComposite.texelSizeX = 1.0f / (float)rw.width();
+	cbComposite.texelSizeY = 1.0f / (float)rw.height();
+	cbComposite.fScale = m_fBloomScale;
+	cbComposite.fBrightThreshold = 0.0f;
+
+	cbAlloc = pDev->allocateCB( sizeof(CBPostProcess) );
+	memcpy( cbAlloc.cpuAddress, &cbComposite, sizeof(cbComposite) );
+	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
+
+	cl->SetPipelineState( m_pAdditivePSO.Get() );
+	drawFullscreenTriangle( pDev );
+
+	// --- Restore main pipeline state ---
+	// Re-bind main root signature and heaps so subsequent operations work correctly
+	cl->SetGraphicsRootSignature( pDev->getRootSignature() );
+	cl->SetDescriptorHeaps( _countof(heaps), heaps );
+	cl->SetGraphicsRootDescriptorTable( 4, pDev->m_SRVHeap.GetGPUHandle( 0 ) );
+	cl->SetGraphicsRootDescriptorTable( 5, pDev->m_SamplerHeap.GetGPUHandle( 0 ) );
+
+	// Restore render target with depth stencil
+	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = pDev->m_DSVHeap.GetCPUHandle( 0 );
+	cl->OMSetRenderTargets( 1, &sceneRTV, FALSE, &dsvHandle );
+
 	return true;
 }
 
+//---------------------------------------------------------------------------------------------------
+
 void DisplayEffectHDRD3D12::release()
 {
-	m_pHDRRenderTarget.Reset();
 	m_pBloomTextures[0].Reset();
 	m_pBloomTextures[1].Reset();
+	m_pBrightPassPSO.Reset();
+	m_pHorzBlurPSO.Reset();
+	m_pVertBlurPSO.Reset();
+	m_pAdditivePSO.Reset();
+	m_pBloomRootSig.Reset();
+	m_pVSBlob.Reset();
+	m_pPSBrightPass.Reset();
+	m_pPSHorzBlur.Reset();
+	m_pPSVertBlur.Reset();
+	m_pPSScale.Reset();
+
 	m_bInitialized = false;
+	m_bBloomFailed = false;
 }
 
 //---------------------------------------------------------------------------------------------------

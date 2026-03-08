@@ -24,6 +24,8 @@
 #include "PrimitiveSurfaceD3D12.h"
 #include "PrimitiveMaterialD3D12.h"
 #include "PrimitiveWindowD3D12.h"
+#include "DisplayEffectHDR.h"
+#include "DisplayEffectBlur.h"
 
 #include <math.h>
 
@@ -34,7 +36,7 @@ DisplayDeviceD3D12::DeviceList	DisplayDeviceD3D12::sm_DeviceList;
 
 //---------------------------------------------------------------------------------------------------
 
-const float DEFAULT_SHADOW_RADIUS = 1500.0f;
+const float DEFAULT_SHADOW_RADIUS = 5000.0f;
 const int	DEFAULT_SHADOW_MAP_SIZE = 2048;
 
 //---------------------------------------------------------------------------------------------------
@@ -64,6 +66,7 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_nFrameIndex( 0 ),
 	m_hFenceEvent( NULL ),
 	m_cAmbientLight( BLACK ),
+	m_fShadowDepthRange( 0.0f ),
 	m_bShadowMapReady( false ),
 	m_bShadowMapSupported( true ),
 	m_bShadowPass( false ),
@@ -72,10 +75,16 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_bUsingFixedFunction( false ),
 	m_nCurrentBlend( 0 ),
 	m_bCurrentDoubleSided( false ),
+	m_bRenderingShadowMap( false ),
 	m_bFirstShadowPass( true ),
 	m_vShadowFocus( 0, 0, 1.0f ),
 	m_fShadowRadius( DEFAULT_SHADOW_RADIUS ),
-	m_szShadowMap( DEFAULT_SHADOW_MAP_SIZE, DEFAULT_SHADOW_MAP_SIZE )
+	m_szShadowMap( DEFAULT_SHADOW_MAP_SIZE, DEFAULT_SHADOW_MAP_SIZE ),
+	m_nSceneRTVIndex( UINT(-1) ),
+	m_nSceneSRVIndex( UINT(-1) ),
+	m_bFXAAEnabled( true ),
+	m_nShadowMapDSVIndex( UINT(-1) ),
+	m_nShadowMapSRVStagingIndex( UINT(-1) )
 {
 	TRACE( "DisplayDeviceD3D12 created!" );
 
@@ -88,6 +97,10 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	lock();
 	enumerateModes();
 	unlock();
+
+	// Register supported effects
+	registerEffect( "HDR", DisplayEffectHDRD3D12::staticFactory() );
+	registerEffect( "BLUR", DisplayEffectBlurD3D12::staticFactory() );
 }
 
 DisplayDeviceD3D12::~DisplayDeviceD3D12()
@@ -328,6 +341,12 @@ void DisplayDeviceD3D12::clearZ( float fDepth )
 
 void DisplayDeviceD3D12::setAmbient( Color nColor )
 {
+	static int s_nAmbLog = 0;
+	if ( s_nAmbLog < 10 )
+	{
+		TRACE( "setAmbient: color=(%d,%d,%d,%d)", (int)nColor.m_R, (int)nColor.m_G, (int)nColor.m_B, (int)nColor.m_A );
+		++s_nAmbLog;
+	}
 	m_cAmbientLight = nColor;
 }
 
@@ -350,6 +369,16 @@ int DisplayDeviceD3D12::addDirectionalLight( int nPriority, Color nColor, const 
 	light.specA = light.a = 1.0f;
 
 	m_Lights.insert( std::pair<int, LightInfo>( nPriority, light ) );
+
+	static int s_nDirLog = 0;
+	if ( s_nDirLog < 10 )
+	{
+		TRACE( "addDirectionalLight: priority=%d, color=(%d,%d,%d), dir=(%.2f,%.2f,%.2f), totalLights=%d",
+			nPriority, (int)nColor.r, (int)nColor.g, (int)nColor.b,
+			vDirection.x, vDirection.y, vDirection.z, (int)m_Lights.size() );
+		++s_nDirLog;
+	}
+
 	return (int)m_Lights.size();
 }
 
@@ -426,6 +455,7 @@ void DisplayDeviceD3D12::setShadowPass( int a_nMaxLights, const Vector3 & a_vFoc
 		m_szShadowMap = a_szShadowMap;
 		m_ShadowPassList.clear();
 		m_bShadowMapReady = false;
+		m_pShadowMapDepth.Reset();
 	}
 }
 
@@ -440,11 +470,14 @@ bool DisplayDeviceD3D12::beginScene()
 	m_pCurrentTransform = NULL;
 	m_pCurrentMaterial = NULL;
 
+	// Reset shadow state for each scene — prevents stale shadow data
+	// when views that don't use shadows (e.g. engineering view) render
+	m_bFirstShadowPass = true;
+	m_nShadowMapPass = 0;
+	m_ShadowPassList.clear();
+
 	if ( !m_bCommandListOpen )
 	{
-		// First beginScene() this frame — reset allocator + command list, issue PRESENT→RT barrier
-		m_bFirstShadowPass = true;
-		m_nShadowMapPass = 0;
 
 		resetCommandList();
 
@@ -459,6 +492,16 @@ bool DisplayDeviceD3D12::beginScene()
 			D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
 			float black[4] = { 0, 0, 0, 1 };
 			m_pCommandList->ClearRenderTargetView( rtv, black, 0, nullptr );
+
+			// Also clear the FXAA scene RT if enabled
+			if ( m_bFXAAEnabled && m_pSceneRT )
+			{
+				// Transition scene RT to render target for clearing
+				TransitionResource( m_pCommandList.Get(), m_pSceneRT.Get(),
+					D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+				D3D12_CPU_DESCRIPTOR_HANDLE sceneRTV = m_RTVHeap.GetCPUHandle( m_nSceneRTVIndex );
+				m_pCommandList->ClearRenderTargetView( sceneRTV, black, 0, nullptr );
+			}
 
 			if ( m_pDepthStencil )
 			{
@@ -530,7 +573,12 @@ bool DisplayDeviceD3D12::beginScene()
 	// else: sub-render call — command list is already open, reuse it
 
 	// Set render targets (must be set for each sub-render as shadow passes change them)
-	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
+	// When FXAA is enabled, render to the intermediate scene RT instead of the swap chain
+	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
+	if ( m_bFXAAEnabled && m_pSceneRT )
+		rtvHandle = m_RTVHeap.GetCPUHandle( m_nSceneRTVIndex );
+	else
+		rtvHandle = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
 	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_DSVHeap.GetCPUHandle( 0 );
 	m_pCommandList->OMSetRenderTargets( 1, &rtvHandle, FALSE, &dsvHandle );
 
@@ -562,7 +610,10 @@ bool DisplayDeviceD3D12::beginShadowPass( Transform & a_LightTransform )
 	if ( m_bFirstShadowPass )
 	{
 		m_bFirstShadowPass = false;
+		// Limit to 1 shadow light — we have a single shadow map texture that gets overwritten each pass
 		int nPasses = m_nMaxShadowLights < (int)m_Lights.size() ? m_nMaxShadowLights : (int)m_Lights.size();
+		if ( nPasses > 1 )
+			nPasses = 1;
 		m_ShadowPassList.resize( nPasses );
 		m_iCurrentShadowPass = m_ShadowPassList.begin();
 		m_iCurrentShadowLight = m_Lights.begin();
@@ -641,28 +692,126 @@ bool DisplayDeviceD3D12::endShadowPass()
 
 	ShadowPass & pass = *m_iCurrentShadowPass;
 
+	static int s_nEndLog = 0;
+	if ( s_nEndLog < 30 )
+	{
+		TRACE( "endShadowPass: primitives=%d, shadowMapReady=%d, hasShadowMap=%d",
+			pass.m_Primitives.size(), (int)m_bShadowMapReady, (int)(m_pShadowMapDepth != nullptr) );
+		++s_nEndLog;
+	}
+
 	// Save current projection
 	Projection savedProjection( m_Proj );
 
-	// Set the projection matrix for the light
+	// Set the projection for the light
 	m_Proj.m_rWindow = RectInt( PointInt(0, 0), m_szShadowMap );
 	m_Proj.m_mFrame = pass.m_LightTransform.m_mFrame;
 	m_Proj.m_vPosition = pass.m_LightTransform.m_vTranslate;
+
+	// Compute distance from light to shadow focus
+	Vector3 vWorldFocus( savedProjection.m_vPosition + (savedProjection.m_mFrame % m_vShadowFocus) );
+	float fLightToFocus = (vWorldFocus - pass.m_LightTransform.m_vTranslate).magnitude();
+
+	// Build view matrix from light's position and frame
+	m_Proj.m_fFront = 1.0f;
+	m_Proj.m_fBack = fLightToFocus + m_fShadowRadius * 4.0f;
 	updateProjection();
 
-	// Store light view/proj matrices
-	pass.m_LightView = m_mView;
-	pass.m_LightProj = m_mProj;
+	// --- Single shadow map: ortho projection centered on focus ---
+	float fOrthoSize = m_fShadowRadius * 2.0f;
+	float fShadowNear = Max( 1.0f, fLightToFocus - m_fShadowRadius * 4.0f );
+	float fShadowFar = fLightToFocus + m_fShadowRadius * 4.0f;
+	m_mProj = XMMatrixOrthographicLH( fOrthoSize, fOrthoSize, fShadowNear, fShadowFar );
 
-	// TODO: Render shadow map pass
-	// For now, execute shadow primitives with the shadow map shader
-	for ( int i = 0; i < pass.m_Primitives.size(); ++i )
-		pass.m_Primitives[i]->execute();
+	XMStoreFloat4x4( &pass.m_LightView, m_mView );
+	XMStoreFloat4x4( &pass.m_LightProj, m_mProj );
+	pass.m_fShadowDepthRange = fShadowFar - fShadowNear;
+	m_fShadowDepthRange = pass.m_fShadowDepthRange;
+
+	static int s_nProjLog = 0;
+	if ( s_nProjLog < 10 )
+	{
+		TRACE( "endShadowPass: ortho=%.0f near=%.1f far=%.1f lightToFocus=%.1f radius=%.1f",
+			fOrthoSize, fShadowNear, fShadowFar, fLightToFocus, m_fShadowRadius );
+		++s_nProjLog;
+	}
+
+	// Render shadow map (single pass, full texture)
+	if ( m_pShadowMapDepth && m_bCommandListOpen )
+	{
+		ShaderD3D12::Ref savedMatShader = m_pMatShader;
+		m_pMatShader = m_pShadowMapShader;
+		UINT savedBlend = m_nCurrentBlend;
+		bool savedDoubleSided = m_bCurrentDoubleSided;
+		m_nCurrentBlend = 0;
+		m_bCurrentDoubleSided = false;
+		m_bRenderingShadowMap = true;
+
+		float clearColor[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+
+		TransitionResource( m_pCommandList.Get(), m_pShadowMapDepth.Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+
+		D3D12_CPU_DESCRIPTOR_HANDLE smRTV = m_RTVHeap.GetCPUHandle( m_nShadowMapDSVIndex );
+		m_pCommandList->OMSetRenderTargets( 1, &smRTV, FALSE, nullptr );
+		m_pCommandList->ClearRenderTargetView( smRTV, clearColor, 0, nullptr );
+
+		D3D12_VIEWPORT vp = {};
+		vp.Width = (float)m_szShadowMap.width;
+		vp.Height = (float)m_szShadowMap.height;
+		vp.MinDepth = 0.0f;
+		vp.MaxDepth = 1.0f;
+		D3D12_RECT scissor = { 0, 0, (LONG)m_szShadowMap.width, (LONG)m_szShadowMap.height };
+
+		bindPerFrameCB();
+		m_pCommandList->RSSetViewports( 1, &vp );
+		m_pCommandList->RSSetScissorRects( 1, &scissor );
+
+		for ( int i = 0; i < pass.m_Primitives.size(); ++i )
+			pass.m_Primitives[i]->execute();
+
+		TransitionResource( m_pCommandList.Get(), m_pShadowMapDepth.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+
+		// Restore state
+		m_bRenderingShadowMap = false;
+		m_pMatShader = savedMatShader;
+		m_nCurrentBlend = savedBlend;
+		m_bCurrentDoubleSided = savedDoubleSided;
+	}
 	pass.m_Primitives.release();
 
 	// Restore projection
 	m_Proj = savedProjection;
 	updateProjection();
+
+	// Restore main render target and viewport
+	if ( m_bCommandListOpen )
+	{
+		D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
+		if ( m_bFXAAEnabled && m_pSceneRT )
+			rtvHandle = m_RTVHeap.GetCPUHandle( m_nSceneRTVIndex );
+		else
+			rtvHandle = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
+		D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_DSVHeap.GetCPUHandle( 0 );
+		m_pCommandList->OMSetRenderTargets( 1, &rtvHandle, FALSE, &dsvHandle );
+
+		D3D12_VIEWPORT viewport = {};
+		viewport.TopLeftX = (float)m_Proj.m_rWindow.left;
+		viewport.TopLeftY = (float)m_Proj.m_rWindow.top;
+		viewport.Width = (float)m_Proj.m_rWindow.width();
+		viewport.Height = (float)m_Proj.m_rWindow.height();
+		viewport.MinDepth = 0.0f;
+		viewport.MaxDepth = 1.0f;
+		m_pCommandList->RSSetViewports( 1, &viewport );
+
+		D3D12_RECT scissor = { m_Proj.m_rWindow.left, m_Proj.m_rWindow.top,
+			m_Proj.m_rWindow.right, m_Proj.m_rWindow.bottom };
+		m_pCommandList->RSSetScissorRects( 1, &scissor );
+
+		// Re-bind per-frame CB with the restored camera matrices
+		bindPerFrameCB();
+	}
 
 	++m_iCurrentShadowPass;
 	++m_iCurrentShadowLight;
@@ -688,16 +837,18 @@ bool DisplayDeviceD3D12::endScene()
 	// Bind per-frame constant buffer with final lighting data
 	bindPerFrameCB();
 
-	// Diagnostic: log light count once per frame
+	// Pre-render effects (e.g. redirect rendering to an offscreen target)
+	for ( EffectList::iterator iEffect = m_EffectList.begin();
+		iEffect != m_EffectList.end(); )
 	{
-		static int s_nFrameLog = 0;
-		if ( s_nFrameLog < 30 || (s_nFrameLog % 300) == 0 )
+		DisplayEffect * pEffect = *iEffect;
+		if ( !pEffect->preRender( this ) )
 		{
-			TRACE( "endScene: %d lights, ambient=(%d,%d,%d)",
-				(int)m_Lights.size(),
-				(int)m_cAmbientLight.m_R, (int)m_cAmbientLight.m_G, (int)m_cAmbientLight.m_B );
+			TRACE( "ERROR: Effect preRender() failed." );
+			m_EffectList.erase( iEffect++ );
 		}
-		++s_nFrameLog;
+		else
+			++iEffect;
 	}
 
 	// Execute all material stacks in order
@@ -713,7 +864,7 @@ bool DisplayDeviceD3D12::endScene()
 		materials.release();
 	}
 
-	// Process effects
+	// Post-render effects (e.g. bloom, blur — processed in reverse order)
 	for ( EffectList::reverse_iterator iEffect = m_EffectList.rbegin();
 		iEffect != m_EffectList.rend(); ++iEffect )
 	{
@@ -746,6 +897,10 @@ void DisplayDeviceD3D12::present()
 
 	if ( m_bCommandListOpen )
 	{
+		// Apply FXAA: resolve scene RT → swap chain back buffer
+		if ( m_bFXAAEnabled && m_pSceneRT )
+			applyFXAA();
+
 		// Transition render target to present state and close the command list
 		TransitionResource( m_pCommandList.Get(), m_pRenderTargets[m_nFrameIndex].Get(),
 			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT );
@@ -923,7 +1078,7 @@ void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::T
 	key.doubleSided = m_bCurrentDoubleSided;
 	key.wireframe = (m_eFillMode == FILL_WIREFRAME);
 	key.sampleCount = 1;
-	key.rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+	key.rtvFormat = m_bRenderingShadowMap ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
 
 	// Resolve the effective shader for this draw so the PSO cache key
 	// correctly distinguishes different shader programs.
@@ -956,9 +1111,21 @@ void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::T
 	}
 	else
 	{
-		key.depthEnable = true;
-		key.depthWrite = (m_nCurrentBlend == 0);	// depth write only for fully opaque geometry
-		key.dsvFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+		if ( m_bRenderingShadowMap )
+		{
+			// Shadow pass: render to R32_FLOAT color RT, no depth buffer
+			// Use MIN blend to keep closest depth (blend mode 5)
+			key.depthEnable = false;
+			key.depthWrite = false;
+			key.dsvFormat = DXGI_FORMAT_UNKNOWN;
+			key.blendMode = 5;	// MIN blend for shadow map
+		}
+		else
+		{
+			key.depthEnable = true;
+			key.depthWrite = (m_nCurrentBlend == 0);
+			key.dsvFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
+		}
 		pShader = m_pMatShader.valid() ? m_pMatShader.pointer() : nullptr;
 	}
 
@@ -990,6 +1157,7 @@ void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::T
 	ID3D12PipelineState * pPSO = getOrCreatePSO( key, pShader );
 	if ( pPSO )
 		m_pCommandList->SetPipelineState( pPSO );
+
 }
 
 //---------------------------------------------------------------------------------------------------
@@ -1123,6 +1291,15 @@ ID3D12PipelineState * DisplayDeviceD3D12::getOrCreatePSO( const PSOKey & key, Sh
 		rtBlend.DestBlendAlpha = D3D12_BLEND_ZERO;
 		rtBlend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
 		break;
+	case 5:	// MIN — shadow map: keep closest depth
+		rtBlend.BlendEnable = TRUE;
+		rtBlend.SrcBlend = D3D12_BLEND_ONE;
+		rtBlend.DestBlend = D3D12_BLEND_ONE;
+		rtBlend.BlendOp = D3D12_BLEND_OP_MIN;
+		rtBlend.SrcBlendAlpha = D3D12_BLEND_ONE;
+		rtBlend.DestBlendAlpha = D3D12_BLEND_ONE;
+		rtBlend.BlendOpAlpha = D3D12_BLEND_OP_MIN;
+		break;
 	}
 
 	// Depth stencil state
@@ -1136,8 +1313,15 @@ ID3D12PipelineState * DisplayDeviceD3D12::getOrCreatePSO( const PSOKey & key, Sh
 		D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 
 	// Render target and depth formats
-	psoDesc.NumRenderTargets = 1;
-	psoDesc.RTVFormats[0] = key.rtvFormat;
+	if ( key.rtvFormat != DXGI_FORMAT_UNKNOWN )
+	{
+		psoDesc.NumRenderTargets = 1;
+		psoDesc.RTVFormats[0] = key.rtvFormat;
+	}
+	else
+	{
+		psoDesc.NumRenderTargets = 0;	// depth-only pass (shadow map)
+	}
 	psoDesc.DSVFormat = key.dsvFormat;
 	psoDesc.SampleDesc.Count = key.sampleCount;
 	psoDesc.SampleMask = UINT_MAX;
@@ -1204,7 +1388,9 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 
 	m_CBPerFrame.mView = ShaderMatrix( m_mView );
 	m_CBPerFrame.mProj = ShaderMatrix( m_mProj );
-	m_CBPerFrame.vCameraPos = ShaderFloat4( m_Proj.m_vPosition.x, m_Proj.m_vPosition.y, m_Proj.m_vPosition.z, 0.0f );
+	static ULONGLONG s_nStartTick = GetTickCount64();
+	float fElapsedSeconds = (float)(GetTickCount64() - s_nStartTick) / 1000.0f;
+	m_CBPerFrame.vCameraPos = ShaderFloat4( m_Proj.m_vPosition.x, m_Proj.m_vPosition.y, m_Proj.m_vPosition.z, fElapsedSeconds );
 
 	const float inv = 1.0f / 255.0f;
 	m_CBPerFrame.vGlobalAmbient = ShaderFloat4(
@@ -1212,6 +1398,7 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 		m_cAmbientLight.m_B * inv, m_cAmbientLight.m_A * inv );
 	m_CBPerFrame.szShadowMap = ShaderFloat2( (float)m_szShadowMap.width, (float)m_szShadowMap.height );
 	m_CBPerFrame.fShadowDistance = m_fShadowRadius;
+	m_CBPerFrame.fShadowDepthRange = m_fShadowDepthRange;
 
 	UploadRingBuffer::Allocation alloc = allocateCB( sizeof(CBPerFrame) );
 	memcpy( alloc.cpuAddress, &m_CBPerFrame, sizeof(CBPerFrame) );
@@ -1449,6 +1636,10 @@ bool DisplayDeviceD3D12::initializeD3D12()
 	D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
 	m_pDevice->CheckFeatureSupport( D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options) );
 
+	// Create FXAA post-process resources
+	if ( m_bFXAAEnabled )
+		createFXAA();
+
 	updateClientArea( false );
 
 	return true;
@@ -1577,7 +1768,7 @@ bool DisplayDeviceD3D12::createRootSignatures()
 	// SRV descriptor table
 	D3D12_DESCRIPTOR_RANGE srvRange = {};
 	srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-	srvRange.NumDescriptors = 8;
+	srvRange.NumDescriptors = 8;	// t0-t7: diffuse, lightmap, bumpmap, ..., shadowMap(t7)
 	srvRange.BaseShaderRegister = 0;
 	srvRange.RegisterSpace = 0;
 	srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
@@ -1600,9 +1791,24 @@ bool DisplayDeviceD3D12::createRootSignatures()
 	rootParams[5].DescriptorTable.pDescriptorRanges = &samplerRange;
 	rootParams[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+	// Static comparison sampler for shadow map (register s2)
+	D3D12_STATIC_SAMPLER_DESC shadowSampler = {};
+	shadowSampler.Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+	shadowSampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	shadowSampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	shadowSampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+	shadowSampler.ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	shadowSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;	// outside shadow map = fully lit
+	shadowSampler.MaxLOD = D3D12_FLOAT32_MAX;
+	shadowSampler.ShaderRegister = 2;	// register(s2)
+	shadowSampler.RegisterSpace = 0;
+	shadowSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
 	D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
 	rootSigDesc.NumParameters = _countof(rootParams);
 	rootSigDesc.pParameters = rootParams;
+	rootSigDesc.NumStaticSamplers = 1;
+	rootSigDesc.pStaticSamplers = &shadowSampler;
 	rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
 	ComPtr<ID3DBlob> signature;
@@ -1680,8 +1886,15 @@ void DisplayDeviceD3D12::freeD3D12()
 
 	m_ShadowPassList.clear();
 	m_bShadowMapReady = false;
+	m_pShadowMapDepth.Reset();
 
 	m_PSOCache.clear();
+
+	// FXAA cleanup
+	m_pSceneRT.Reset();
+	m_pFXAAPSO.Reset();
+	m_pFXAARootSig.Reset();
+	m_pFXAAShader = NULL;
 
 	for ( UINT i = 0; i < FRAME_COUNT; i++ )
 	{
@@ -1722,6 +1935,73 @@ bool DisplayDeviceD3D12::readyShadowMap()
 
 	if ( !m_pShadowMapShader.valid() || !m_pShadowMapShader->valid() )
 		return false;
+	if ( !m_pDevice )
+		return false;
+
+	// Release previous shadow map resources if size changed
+	m_pShadowMapDepth.Reset();
+
+	D3D12_RESOURCE_DESC rtDesc = {};
+	rtDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	rtDesc.DepthOrArraySize = 1;
+	rtDesc.MipLevels = 1;
+	rtDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	rtDesc.SampleDesc.Count = 1;
+	rtDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+	D3D12_CLEAR_VALUE rtClear = {};
+	rtClear.Format = DXGI_FORMAT_R32_FLOAT;
+	rtClear.Color[0] = 1.0f;
+	rtClear.Color[1] = 0.0f;
+	rtClear.Color[2] = 0.0f;
+	rtClear.Color[3] = 1.0f;
+
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+	// Single shadow map texture
+	rtDesc.Width = m_szShadowMap.width;
+	rtDesc.Height = m_szShadowMap.height;
+
+	if ( FAILED(m_pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
+		&rtDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &rtClear, IID_PPV_ARGS(&m_pShadowMapDepth) )) )
+	{
+		TRACE( "readyShadowMap: Failed to create cascade 0 RT" );
+		return false;
+	}
+
+	m_nShadowMapDSVIndex = m_RTVHeap.Allocate();
+	if ( m_nShadowMapDSVIndex == UINT(-1) )
+	{
+		TRACE( "readyShadowMap: Failed to allocate cascade 0 RTV" );
+		m_pShadowMapDepth.Reset();
+		return false;
+	}
+
+	D3D12_RENDER_TARGET_VIEW_DESC rtvDesc = {};
+	rtvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+	m_pDevice->CreateRenderTargetView( m_pShadowMapDepth.Get(), &rtvDesc,
+		m_RTVHeap.GetCPUHandle( m_nShadowMapDSVIndex ) );
+
+	m_nShadowMapSRVStagingIndex = m_SRVStagingHeap.Allocate();
+	if ( m_nShadowMapSRVStagingIndex == UINT(-1) )
+	{
+		TRACE( "readyShadowMap: Failed to allocate cascade 0 SRV" );
+		m_pShadowMapDepth.Reset();
+		return false;
+	}
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Texture2D.MipLevels = 1;
+	m_pDevice->CreateShaderResourceView( m_pShadowMapDepth.Get(), &srvDesc,
+		m_SRVStagingHeap.GetCPUHandle( m_nShadowMapSRVStagingIndex ) );
+
+	TRACE( "readyShadowMap: Created %dx%d R32_FLOAT shadow map",
+		m_szShadowMap.width, m_szShadowMap.height );
 
 	m_bShadowMapSupported = true;
 	m_bShadowMapReady = true;
@@ -1847,6 +2127,234 @@ void DisplayDeviceD3D12::updateProjection()
 		m_pCommandList->RSSetScissorRects( 1, &scissor );
 	}
 }
+
+//---------------------------------------------------------------------------------------------------
+// FXAA post-process
+//---------------------------------------------------------------------------------------------------
+
+bool DisplayDeviceD3D12::createFXAA()
+{
+	RectInt rw = renderWindow();
+	UINT width  = (UINT)rw.width();
+	UINT height = (UINT)rw.height();
+	if ( width == 0 || height == 0 )
+		return false;
+
+	// Release old resources if resizing
+	m_pSceneRT.Reset();
+	m_pFXAAPSO.Reset();
+	m_pFXAARootSig.Reset();
+
+	// Create intermediate render target (same format as swap chain)
+	D3D12_RESOURCE_DESC rtDesc = {};
+	rtDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	rtDesc.Width = width;
+	rtDesc.Height = height;
+	rtDesc.DepthOrArraySize = 1;
+	rtDesc.MipLevels = 1;
+	rtDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	rtDesc.SampleDesc.Count = 1;
+	rtDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+	D3D12_CLEAR_VALUE clearValue = {};
+	clearValue.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+	HRESULT hr = m_pDevice->CreateCommittedResource(
+		&heapProps, D3D12_HEAP_FLAG_NONE, &rtDesc,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clearValue,
+		IID_PPV_ARGS(&m_pSceneRT) );
+	if ( FAILED(hr) )
+	{
+		TRACE( "createFXAA: Failed to create scene render target!" );
+		m_bFXAAEnabled = false;
+		return false;
+	}
+
+	// Create RTV for scene RT (use slot after the swap chain RTVs)
+	if ( m_nSceneRTVIndex == UINT(-1) )
+		m_nSceneRTVIndex = FRAME_COUNT;		// slots 0..FRAME_COUNT-1 are swap chain
+	m_pDevice->CreateRenderTargetView( m_pSceneRT.Get(), nullptr,
+		m_RTVHeap.GetCPUHandle( m_nSceneRTVIndex ) );
+
+	// Create SRV for scene RT in the shader-visible heap
+	if ( m_nSceneSRVIndex == UINT(-1) )
+		m_nSceneSRVIndex = m_SRVStagingHeap.Allocate();
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Texture2D.MipLevels = 1;
+	m_pDevice->CreateShaderResourceView( m_pSceneRT.Get(), &srvDesc,
+		m_SRVStagingHeap.GetCPUHandle( m_nSceneSRVIndex ) );
+
+	// Load FXAA shader
+	m_pFXAAShader = getShader( "Shaders/FXAA.hlsl" );
+	if ( !m_pFXAAShader.valid() || !m_pFXAAShader->valid() )
+	{
+		TRACE( "createFXAA: Failed to compile FXAA shader!" );
+		m_bFXAAEnabled = false;
+		return false;
+	}
+
+	// Create FXAA root signature:
+	// [0] CBV  - FXAA constants (rcpFrame, thresholds)
+	// [1] Table - SRV (scene texture)
+	// [2] Table - Sampler
+	D3D12_ROOT_PARAMETER fxaaParams[3] = {};
+
+	fxaaParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+	fxaaParams[0].Descriptor.ShaderRegister = 0;
+	fxaaParams[0].Descriptor.RegisterSpace = 0;
+	fxaaParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+	D3D12_DESCRIPTOR_RANGE srvRange = {};
+	srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	srvRange.NumDescriptors = 1;
+	srvRange.BaseShaderRegister = 0;
+	srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+	fxaaParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	fxaaParams[1].DescriptorTable.NumDescriptorRanges = 1;
+	fxaaParams[1].DescriptorTable.pDescriptorRanges = &srvRange;
+	fxaaParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+	D3D12_DESCRIPTOR_RANGE samplerRange = {};
+	samplerRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+	samplerRange.NumDescriptors = 1;
+	samplerRange.BaseShaderRegister = 0;
+	samplerRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+	fxaaParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	fxaaParams[2].DescriptorTable.NumDescriptorRanges = 1;
+	fxaaParams[2].DescriptorTable.pDescriptorRanges = &samplerRange;
+	fxaaParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+	D3D12_ROOT_SIGNATURE_DESC rsDesc = {};
+	rsDesc.NumParameters = 3;
+	rsDesc.pParameters = fxaaParams;
+	rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+	ComPtr<ID3DBlob> sig, err;
+	hr = D3D12SerializeRootSignature( &rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err );
+	if ( FAILED(hr) )
+	{
+		if ( err ) TRACE( (const char *)err->GetBufferPointer() );
+		m_bFXAAEnabled = false;
+		return false;
+	}
+
+	hr = m_pDevice->CreateRootSignature( 0, sig->GetBufferPointer(), sig->GetBufferSize(),
+		IID_PPV_ARGS(&m_pFXAARootSig) );
+	if ( FAILED(hr) )
+	{
+		m_bFXAAEnabled = false;
+		return false;
+	}
+
+	// Create FXAA PSO — fullscreen triangle, no input layout, no depth
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+	psoDesc.pRootSignature = m_pFXAARootSig.Get();
+	psoDesc.VS = m_pFXAAShader->vertexShaderBytecode();
+	psoDesc.PS = m_pFXAAShader->pixelShaderBytecode();
+	psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+	psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	psoDesc.RasterizerState.DepthClipEnable = FALSE;
+	psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+	psoDesc.DepthStencilState.DepthEnable = FALSE;
+	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	psoDesc.NumRenderTargets = 1;
+	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	psoDesc.SampleDesc.Count = 1;
+	psoDesc.SampleMask = UINT_MAX;
+
+	hr = m_pDevice->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pFXAAPSO) );
+	if ( FAILED(hr) )
+	{
+		TRACE( "createFXAA: Failed to create FXAA PSO!" );
+		m_bFXAAEnabled = false;
+		return false;
+	}
+
+	TRACE( "FXAA initialized (%dx%d)", width, height );
+	return true;
+}
+
+void DisplayDeviceD3D12::applyFXAA()
+{
+	if ( !m_bFXAAEnabled || !m_pSceneRT || !m_pFXAAPSO || !m_bCommandListOpen )
+		return;
+
+	RectInt rw = renderWindow();
+	float width  = (float)rw.width();
+	float height = (float)rw.height();
+
+	// Transition scene RT from render target → shader resource
+	TransitionResource( m_pCommandList.Get(), m_pSceneRT.Get(),
+		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+
+	// Set the swap chain back buffer as render target
+	D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
+	m_pCommandList->OMSetRenderTargets( 1, &rtv, FALSE, nullptr );
+
+	// Set viewport and scissor for fullscreen
+	D3D12_VIEWPORT vp = { 0, 0, width, height, 0, 1 };
+	m_pCommandList->RSSetViewports( 1, &vp );
+	D3D12_RECT scissor = { 0, 0, (LONG)width, (LONG)height };
+	m_pCommandList->RSSetScissorRects( 1, &scissor );
+
+	// Set FXAA pipeline
+	m_pCommandList->SetGraphicsRootSignature( m_pFXAARootSig.Get() );
+	m_pCommandList->SetPipelineState( m_pFXAAPSO.Get() );
+
+	// Bind descriptor heaps
+	ID3D12DescriptorHeap * heaps[] = { m_SRVHeap.Get(), m_SamplerHeap.Get() };
+	m_pCommandList->SetDescriptorHeaps( _countof(heaps), heaps );
+
+	// Upload FXAA constant buffer
+	struct FXAACBuffer {
+		float rcpFrameX, rcpFrameY;
+		float fSubpix;
+		float fEdgeThreshold;
+		float fEdgeThresholdMin;
+		float pad[3];
+	};
+	FXAACBuffer cb;
+	cb.rcpFrameX = 1.0f / width;
+	cb.rcpFrameY = 1.0f / height;
+	cb.fSubpix = 0.75f;
+	cb.fEdgeThreshold = 0.166f;
+	cb.fEdgeThresholdMin = 0.0833f;
+
+	UploadRingBuffer::Allocation cbAlloc = allocateCB( sizeof(FXAACBuffer) );
+	memcpy( cbAlloc.cpuAddress, &cb, sizeof(cb) );
+	m_pCommandList->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
+
+	// Copy scene SRV to a slot in the shader-visible SRV heap
+	UINT fxaaSRVSlot = m_nSRVFrameOffset;
+	m_nSRVFrameOffset++;
+	m_pDevice->CopyDescriptorsSimple( 1,
+		m_SRVHeap.GetCPUHandle( fxaaSRVSlot ),
+		m_SRVStagingHeap.GetCPUHandle( m_nSceneSRVIndex ),
+		D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+
+	m_pCommandList->SetGraphicsRootDescriptorTable( 1, m_SRVHeap.GetGPUHandle( fxaaSRVSlot ) );
+	m_pCommandList->SetGraphicsRootDescriptorTable( 2, m_SamplerHeap.GetGPUHandle( 0 ) );
+
+	// Draw fullscreen triangle (3 vertices, no vertex buffer — generated in VS)
+	m_pCommandList->IASetPrimitiveTopology( D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
+	m_pCommandList->IASetVertexBuffers( 0, 0, nullptr );
+	m_pCommandList->DrawInstanced( 3, 1, 0, 0 );
+
+	// Transition scene RT back for next frame
+	TransitionResource( m_pCommandList.Get(), m_pSceneRT.Get(),
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+}
+
+//---------------------------------------------------------------------------------------------------
 
 void DisplayDeviceD3D12::enumerateTextures()
 {

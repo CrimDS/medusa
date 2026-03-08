@@ -42,31 +42,44 @@ bool PrimitiveMaterialD3D12::execute()
 
 	DisplayDeviceD3D12::LightMap & lights = pDevice->m_Lights;
 
-	// Determine if we use the passthrough or full lighting shader
-	bool bUsePassthrough = DisplayDevice::sm_bUseFixedFunction
-		|| !m_LightEnable
-		|| lights.size() == 0
-		|| m_Blending == PrimitiveMaterial::ADDITIVE;
+	// Determine if we use the passthrough or full lighting shader.
+	// If a custom shader is explicitly set, always use the full pipeline so it gets loaded.
+	bool bHasCustomShader = (m_sShader.length() > 0);
+	bool bUsePassthrough = !bHasCustomShader
+		&& (DisplayDevice::sm_bUseFixedFunction
+			|| !m_LightEnable
+			|| lights.size() == 0
+			|| m_Blending == PrimitiveMaterial::ADDITIVE);
 
-	// Diagnostic: log path choice for first few materials per frame
+	// Diagnostic: log custom shader materials
+	if ( bHasCustomShader )
 	{
-		static int s_nMatLog = 0;
-		if ( s_nMatLog < 60 )
+		static int s_nCustomLog = 0;
+		if ( s_nCustomLog < 30 )
 		{
-			TRACE( "Material::execute: pass=%d, passthrough=%d (ff=%d,lightEn=%d,lights=%d,blend=%d), children=%d",
-				m_nPass, bUsePassthrough ? 1 : 0,
-				DisplayDevice::sm_bUseFixedFunction ? 1 : 0,
+			TRACE( "Material::execute CUSTOM: shader='%s', pass=%d, passthrough=%d, lightEn=%d, lights=%d, blend=%d, children=%d, doubleSided=%d",
+				(const char *)m_sShader, m_nPass, bUsePassthrough ? 1 : 0,
 				m_LightEnable ? 1 : 0,
 				(int)lights.size(),
 				(int)m_Blending,
-				m_Children.size() );
+				m_Children.size(),
+				m_DoubleSided ? 1 : 0 );
+			++s_nCustomLog;
 		}
-		++s_nMatLog;
 	}
 
 	if ( bUsePassthrough )
 	{
 		pDevice->m_bUsingFixedFunction = true;
+
+		// Load custom shader if one was requested (e.g. Star.hlsl)
+		if ( m_bUpdateShaders )
+		{
+			m_bUpdateShaders = false;
+			m_pShader = NULL;
+			if ( m_sShader.length() > 0 )
+				m_pShader = pDevice->getShader( m_sShader );
+		}
 
 		// Use passthrough shader - just transforms and applies texture.
 		// Set m_pMatShader to null so bindPSO's getOrCreatePSO fallback switch
@@ -97,7 +110,8 @@ bool PrimitiveMaterialD3D12::execute()
 	else
 	{
 		// Per-light rendering with full shader pipeline
-		if ( m_bUpdateShaders || !m_pShader.valid() || m_pShader->released() )
+		if ( m_bUpdateShaders || !m_pShader.valid() || m_pShader->released()
+			|| (m_sShader.length() > 0 && m_pShader == pDevice->m_pDefaultShader) )
 		{
 			m_bUpdateShaders = false;
 			m_pShader = NULL;
@@ -128,54 +142,85 @@ bool PrimitiveMaterialD3D12::execute()
 
 		DisplayDeviceD3D12::ShadowPassList::iterator iShadowPass = pDevice->m_ShadowPassList.begin();
 
-		// Render once per light
+		// Render once per light (or once with no lights if there are none)
+		// Custom shaders that don't need lighting skip per-light rendering
 		int nLightCount = 0;
-		for ( DisplayDeviceD3D12::LightMap::iterator iLight = lights.begin();
-			iLight != lights.end(); ++iLight, ++nLightCount )
+		if ( lights.size() == 0 || (bHasCustomShader && !m_LightEnable) )
 		{
-			if ( nLightCount >= sm_nMaxLights )
-				break;
-
-			DisplayDeviceD3D12::LightInfo & light = iLight->second;
-
-			// Setup light constant buffer
+			// No lights — render once with an empty light CB
 			CBPerLight lightCB = {};
-			lightCB.nLightType = light.type;
-			lightCB.vLightDiffuse = ShaderFloat4( light.r, light.g, light.b, light.a );
-			lightCB.vLightSpecular = ShaderFloat4( light.specR, light.specG, light.specB, light.specA );
-			lightCB.vLightPosition = ShaderFloat4( light.posX, light.posY, light.posZ, 0.0f );
-			lightCB.vLightDirection = ShaderFloat4( light.dirX, light.dirY, light.dirZ, 0.0f );
-
-			if ( light.type == 1 )	// point light
-				lightCB.vAttenuation = ShaderFloat4( light.att0, light.att1, light.att2, 0.0f );
-
-			// Shadow map binding
-			if ( iShadowPass != pDevice->m_ShadowPassList.end() )
-			{
-				DisplayDeviceD3D12::ShadowPass & pass = *iShadowPass;
-				pDevice->m_CurrentMatCB.bEnableShadowMap = 1;
-				lightCB.mLightView = ShaderMatrix( pass.m_LightView );
-				lightCB.mLightProj = ShaderMatrix( pass.m_LightProj );
-				++iShadowPass;
-			}
-			else
-			{
-				pDevice->m_CurrentMatCB.bEnableShadowMap = 0;
-			}
-
+			pDevice->m_CurrentMatCB.bEnableShadowMap = 0;
 			pDevice->bindPerMaterialCB( pDevice->m_CurrentMatCB );
 			pDevice->bindPerLightCB( lightCB );
 
-			// Execute children (geometry)
 			if ( !executeChildren() )
 				return false;
-
-			// After the first light, switch to additive blending for subsequent passes
-			if ( nLightCount == 0 )
+		}
+		else
+		{
+			for ( DisplayDeviceD3D12::LightMap::iterator iLight = lights.begin();
+				iLight != lights.end(); ++iLight, ++nLightCount )
 			{
-				pDevice->m_CurrentMatCB.bEnableAmbient = 0;
-				pDevice->m_nCurrentBlend = 3;	// ADDITIVE: SRC_ALPHA + ONE
-				pDevice->m_bCurrentDoubleSided = m_DoubleSided;
+				if ( nLightCount >= sm_nMaxLights )
+					break;
+
+				DisplayDeviceD3D12::LightInfo & light = iLight->second;
+
+				// Setup light constant buffer
+				CBPerLight lightCB = {};
+				lightCB.nLightType = light.type;
+				lightCB.vLightDiffuse = ShaderFloat4( light.r, light.g, light.b, light.a );
+				lightCB.vLightSpecular = ShaderFloat4( light.specR, light.specG, light.specB, light.specA );
+				lightCB.vLightPosition = ShaderFloat4( light.posX, light.posY, light.posZ, 0.0f );
+				lightCB.vLightDirection = ShaderFloat4( light.dirX, light.dirY, light.dirZ, 0.0f );
+
+				if ( light.type == 1 )	// point light
+					lightCB.vAttenuation = ShaderFloat4( light.att0, light.att1, light.att2, 0.0f );
+
+				// Shadow map binding — copy shadow map SRV into slot t7
+				if ( iShadowPass != pDevice->m_ShadowPassList.end() && pDevice->m_pShadowMapDepth
+					&& pDevice->m_nShadowMapSRVStagingIndex != UINT(-1) )
+				{
+					DisplayDeviceD3D12::ShadowPass & pass = *iShadowPass;
+					pDevice->m_CurrentMatCB.bEnableShadowMap = 1;
+
+					XMMATRIX lv = XMLoadFloat4x4( &pass.m_LightView );
+					XMMATRIX lp = XMLoadFloat4x4( &pass.m_LightProj );
+					lightCB.mLightView = ShaderMatrix( lv );
+					lightCB.mLightProj = ShaderMatrix( lp );
+
+					// Copy shadow map SRV into slot t7
+					UINT smDestSlot = pDevice->m_nSRVTextureBase + 7;
+					D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = pDevice->m_SRVStagingHeap.GetCPUHandle( pDevice->m_nShadowMapSRVStagingIndex );
+					D3D12_CPU_DESCRIPTOR_HANDLE dstHandle = pDevice->getSRVCPUHandle( smDestSlot );
+					pDevice->getDevice()->CopyDescriptorsSimple( 1, dstHandle, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+
+					// Re-bind SRV table
+					ID3D12GraphicsCommandList * cl = pDevice->getCommandList();
+					if ( cl )
+						cl->SetGraphicsRootDescriptorTable( 4, pDevice->getSRVGPUHandle( pDevice->m_nSRVTextureBase ) );
+
+					++iShadowPass;
+				}
+				else
+				{
+					pDevice->m_CurrentMatCB.bEnableShadowMap = 0;
+				}
+
+				pDevice->bindPerMaterialCB( pDevice->m_CurrentMatCB );
+				pDevice->bindPerLightCB( lightCB );
+
+				// Execute children (geometry)
+				if ( !executeChildren() )
+					return false;
+
+				// After the first light, switch to additive blending for subsequent passes
+				if ( nLightCount == 0 )
+				{
+					pDevice->m_CurrentMatCB.bEnableAmbient = 0;
+					pDevice->m_nCurrentBlend = 3;	// ADDITIVE: SRC_ALPHA + ONE
+					pDevice->m_bCurrentDoubleSided = m_DoubleSided;
+				}
 			}
 		}
 	}
@@ -376,13 +421,14 @@ bool PrimitiveMaterialD3D12::setupTextures()
 	pDevice->m_CurrentMatCB.bEnableBumpMap  = 0;
 	pDevice->m_nTextureStage = 0;
 
-	// Allocate 3 fresh contiguous SRV slots for this material draw.
-	// Avoids aliasing when multiple materials overwrite the same fixed slots
-	// before the GPU actually executes any draw calls.
+	// Allocate 8 fresh contiguous SRV slots for this material draw (t0-t7).
+	// Slots 0-2 are diffuse/lightmap/bumpmap; slot 7 is shadow map.
+	// Must cover the full descriptor table range declared in the root signature (8 slots).
+	// Wrap BEFORE allocation to ensure all 8 slots fit within the heap.
+	if ( pDevice->m_nSRVFrameOffset + 8 > DisplayDeviceD3D12::MAX_SRV_DESCRIPTORS )
+		pDevice->m_nSRVFrameOffset = 8;
 	pDevice->m_nSRVTextureBase = pDevice->m_nSRVFrameOffset;
-	pDevice->m_nSRVFrameOffset += 3;
-	if ( pDevice->m_nSRVFrameOffset >= DisplayDeviceD3D12::MAX_SRV_DESCRIPTORS )
-		pDevice->m_nSRVFrameOffset = 8;	// wrap — should not happen in practice
+	pDevice->m_nSRVFrameOffset += 8;
 
 	for ( int i = 0; i < m_Surfaces.size(); i++ )
 	{

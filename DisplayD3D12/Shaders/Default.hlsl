@@ -1,14 +1,19 @@
 //-----------------------------------------------------------------------------
 // File: Default.hlsl
-// Desc: Medusa Uber Shader for DX12 - replaces Default.fx
+// Desc: Medusa Uber Shader for DX12.
 //       Single-light Phong shader with shadow mapping, bump mapping,
-//       and lightmap support. Geometry is rendered once per light.
+//       hemisphere ambient, Fresnel rim lighting, and lightmap support.
+//       Geometry is rendered once per light.
 // (c)2024 Palestar
 //-----------------------------------------------------------------------------
 
 #include "Common.hlsli"
 
-#define SHADOW_EPSILON  5.0f
+//-----------------------------------------------------------------------------
+// Shadow tuning
+//-----------------------------------------------------------------------------
+
+#define SHADOW_BIAS_WORLD   5.0f
 
 //-----------------------------------------------------------------------------
 // Vertex Shader
@@ -18,27 +23,22 @@ VS_OUTPUT vs_main(VS_INPUT v)
 {
     VS_OUTPUT rv;
 
-    rv.vWorldPos    = mul(v.vPosition, mWorld);         // to world space
-    rv.vPosition    = mul(rv.vWorldPos, mView);         // to view space
-    rv.vPosition    = mul(rv.vPosition, mProj);         // to clip space
+    rv.vWorldPos    = mul(v.vPosition, mWorld);
+    rv.vPosition    = mul(rv.vWorldPos, mView);
+    rv.vPosition    = mul(rv.vPosition, mProj);
     rv.vUV          = v.vUV;
     rv.vNormal      = mul(v.vNormal, (float3x3)mWorld);
 
-    // Compute tangent & binormal for bump mapping
+    // Tangent & binormal only needed for bump mapping
     rv.vTangent  = float3(0, 0, 0);
     rv.vBinormal = float3(0, 0, 0);
     if (bEnableBumpMap)
     {
         float3 c1 = cross(v.vNormal, float3(0.0, 0.0, 1.0));
         float3 c2 = cross(v.vNormal, float3(0.0, 1.0, 0.0));
-        if (length(c1) > length(c2))
-            rv.vTangent = normalize(c1);
-        else
-            rv.vTangent = normalize(c2);
-        rv.vBinormal = normalize(cross(v.vNormal, rv.vTangent));
-
-        rv.vTangent  = mul(rv.vTangent, (float3x3)mWorld);
-        rv.vBinormal = mul(rv.vBinormal, (float3x3)mWorld);
+        float3 tangent = dot(c1, c1) > dot(c2, c2) ? c1 : c2;
+        rv.vTangent  = mul(normalize(tangent), (float3x3)mWorld);
+        rv.vBinormal = mul(normalize(cross(v.vNormal, tangent)), (float3x3)mWorld);
     }
 
     // Project to light space for shadow mapping
@@ -53,48 +53,53 @@ VS_OUTPUT vs_main(VS_INPUT v)
 }
 
 //-----------------------------------------------------------------------------
-// Shadow map sampling - 3x3 PCF
+// Shadow map sampling — distance-based attenuation (matches DX9 approach)
 //-----------------------------------------------------------------------------
 
 float calculateLightAmount(VS_OUTPUT input)
 {
-    float fLightAmount = 4.0f;
-    float2 vShadowUV = ((input.vLightPos.xy * 0.5f) / input.vLightPos.w) + float2(0.5f, 0.5f);
-    vShadowUV.y = 1.0f - vShadowUV.y;
+    float2 vShadowUV = (input.vLightPos.xy / input.vLightPos.w) * float2(0.5f, -0.5f) + 0.5f;
+
+    if (any(vShadowUV < 0.0f) || any(vShadowUV > 1.0f))
+        return 1.0f;
+
+    float fRefDepth = input.vLightPos.z / input.vLightPos.w;
+    float fBiasNDC = (fShadowDepthRange > 0.0f) ? (SHADOW_BIAS_WORLD / fShadowDepthRange) : 0.001f;
+    float fInvShadowDist = 1.0f / max(fShadowDistance, 0.001f);
 
     float2 vTexel = 1.0f / szShadowMap;
-    float fSampleSize = 1.0f;
+    float fLightAmount = 4.0f;
 
-    for (int x = -fSampleSize; x <= fSampleSize; x++)
+    [unroll]
+    for (int x = -1; x <= 1; x++)
     {
-        for (int y = -fSampleSize; y <= fSampleSize; y++)
+        [unroll]
+        for (int y = -1; y <= 1; y++)
         {
-            float fSMZ = tShadowMap.Sample(sPoint, vShadowUV + (float2(x, y) * vTexel)).r;
-            if (fSMZ > 1.0f)
+            float fStoredDepth = tShadowMap.SampleLevel(sLinear, vShadowUV + float2(x, y) * vTexel, 0).r;
+
+            if (fStoredDepth < 0.999f)
             {
-                fSMZ += SHADOW_EPSILON;
-                if (fSMZ < input.vLightPos.z)
+                float fBiasedDepth = fStoredDepth + fBiasNDC;
+                float fDepthDiff = fRefDepth - fBiasedDepth;
+                if (fDepthDiff > 0.0f)
                 {
-                    float fDistance = input.vLightPos.z - fSMZ;
-                    float fDistanceScale = 1.0f - (fDistance / fShadowDistance);
-                    if (fDistanceScale > 0.0f)
-                        fLightAmount -= fDistanceScale;
+                    float fDistanceScale = 1.0f - (fDepthDiff * fShadowDepthRange * fInvShadowDist);
+                    fLightAmount -= max(fDistanceScale, 0.0f);
                 }
             }
         }
     }
 
-    fLightAmount /= 4.0f;
-    return saturate(fLightAmount);
+    return saturate(fLightAmount * 0.25f);
 }
 
 //-----------------------------------------------------------------------------
-// Phong lighting with Blinn half-angle specular
+// Phong lighting with energy-conserving Blinn specular + Fresnel rim
 //-----------------------------------------------------------------------------
 
 float4 applyDiffuseSpecular(float fLightAmount, VS_OUTPUT input)
 {
-    // Phong: I = Ia*ka*Oda + fatt*Ip[kd*Od(N.L) + ks(R.V)^n]
     float4 vPixel = 0.0f;
 
     float3 lightDir = vLightDirection.xyz;
@@ -106,32 +111,50 @@ float4 applyDiffuseSpecular(float fLightAmount, VS_OUTPUT input)
         fLightAmount *= 1.0f / (vAttenuation.x + (vAttenuation.y * fLightDistance));
     }
 
-    float fDiffuseLight = fLightAmount;
-    fDiffuseLight *= max(0.0f, dot(input.vNormal, -lightDir));
+    // Compute NdotL once, derive half-lambert from it
+    float fRawNdotL = dot(input.vNormal, -lightDir);
+    float NdotL = max(0.0f, fRawNdotL);
+    float fHalfLambert = fRawNdotL * 0.5f + 0.5f;
+    fHalfLambert *= fHalfLambert;
+    float fWrappedDiffuse = fLightAmount * lerp(NdotL, fHalfLambert, 0.3f);
+
+    // Compute view direction once for specular + rim
+    float3 viewDir = normalize(vCameraPos - input.vWorldPos.xyz);
 
     if (bEnableDiffuse)
     {
         float4 vTexel = tDiffuse.Sample(sLinear, input.vUV);
-        vPixel.xyz += (vTexel.xyz * vMatDiffuse.xyz * vLightDiffuse.xyz) * fDiffuseLight;
+        vPixel.xyz += (vTexel.xyz * vMatDiffuse.xyz * vLightDiffuse.xyz) * fWrappedDiffuse;
         vPixel.xyz += (vTexel.xyz * vMatEmissive.xyz);
         vPixel.w = vTexel.w * vMatDiffuse.w;
     }
     else
     {
-        vPixel.xyz += (vMatDiffuse.xyz * vLightDiffuse.xyz) * fDiffuseLight;
+        vPixel.xyz += (vMatDiffuse.xyz * vLightDiffuse.xyz) * fWrappedDiffuse;
         vPixel.xyz += vMatEmissive.xyz;
         vPixel.w = vMatDiffuse.w;
     }
 
-    // Specular (Blinn half-angle)
-    if (fMatSpecularPower > 0.0f)
+    // Energy-conserving Blinn-Phong specular + Fresnel rim (combined)
+    if (NdotL > 0.0f)
     {
-        float3 h = normalize(normalize(vCameraPos - input.vWorldPos.xyz) - lightDir);
-        float fSpecularLight = fLightAmount;
-        fSpecularLight *= pow(saturate(dot(h, input.vNormal)), fMatSpecularPower);
+        if (fMatSpecularPower > 0.0f)
+        {
+            float3 h = normalize(viewDir - lightDir);
+            float NdotH = saturate(dot(h, input.vNormal));
+            float normFactor = (fMatSpecularPower + 8.0f) * 0.039788736f;  // 1/25.13274
+            float fSpecularLight = fLightAmount * normFactor * pow(NdotH, fMatSpecularPower);
 
-        if (fSpecularLight > 0.0f)
-            vPixel.xyz += (vMatSpecular.xyz * vLightSpecular.xyz) * fSpecularLight;
+            float VdotH = saturate(dot(viewDir, h));
+            float fFresnel = 0.04f + 0.96f * pow(1.0f - VdotH, 5.0f);
+
+            vPixel.xyz += (vMatSpecular.xyz * vLightSpecular.xyz) * fSpecularLight * fFresnel;
+        }
+
+        // Fresnel rim lighting
+        float rim = 1.0f - saturate(dot(viewDir, input.vNormal));
+        rim = rim * rim * rim * 0.25f;    // pow(rim, 3) * 0.25
+        vPixel.xyz += vLightDiffuse.xyz * rim * fLightAmount * NdotL;
     }
 
     return vPixel;
@@ -143,10 +166,8 @@ float4 applyDiffuseSpecular(float fLightAmount, VS_OUTPUT input)
 
 float3 getBumpedNormal(VS_OUTPUT input)
 {
-    float3 vBump = fBumpDepth * (tBumpMap.Sample(sLinear, input.vUV).xyz - float3(0.5, 0.5, 0.5));
-    float3 vBumpNormal = input.vNormal + (vBump.x * input.vTangent + vBump.y * input.vBinormal);
-    vBumpNormal = normalize(vBumpNormal);
-    return vBumpNormal;
+    float3 vBump = fBumpDepth * (tBumpMap.Sample(sLinear, input.vUV).xyz - 0.5f);
+    return normalize(input.vNormal + (vBump.x * input.vTangent + vBump.y * input.vBinormal));
 }
 
 //-----------------------------------------------------------------------------
@@ -155,41 +176,38 @@ float3 getBumpedNormal(VS_OUTPUT input)
 
 float4 ps_main(VS_OUTPUT input) : SV_TARGET
 {
-    // Normalize interpolated normal
     input.vNormal = normalize(input.vNormal);
 
-    // Apply bump mapping if enabled
     if (bEnableBumpMap)
         input.vNormal = getBumpedNormal(input);
 
-    // Shadow factor (1.0 = fully lit)
     float fLightAmount = 1.0f;
     if (bEnableShadowMap)
         fLightAmount = calculateLightAmount(input);
 
-    // Diffuse + specular lighting
     float4 vPixel = applyDiffuseSpecular(fLightAmount, input);
 
-    // Add ambient contribution
+    // Hemisphere ambient
     if (bEnableAmbient)
     {
+        float3 ambientColor = vGlobalAmbient.xyz;
+        float fUp = input.vNormal.y * 0.5f + 0.5f;
+        float3 hemiAmbient = lerp(ambientColor * 0.6f, ambientColor, fUp);
+
         if (bEnableDiffuse)
         {
             float4 vTexel = tDiffuse.Sample(sLinear, input.vUV);
-            vPixel.xyz += vTexel.xyz * vMatAmbient.xyz * vGlobalAmbient.xyz;
+            vPixel.xyz += vTexel.xyz * vMatAmbient.xyz * hemiAmbient;
         }
         else
         {
-            vPixel.xyz += vMatAmbient.xyz * vGlobalAmbient.xyz;
+            vPixel.xyz += vMatAmbient.xyz * hemiAmbient;
         }
     }
 
-    // Lightmap - additive, matching DX9 Default.fx behavior
+    // Lightmap — additive
     if (bEnableLightMap)
-    {
-        float4 vLM = tLightMap.Sample(sLinear, input.vUV);
-        vPixel.xyz += vLM.xyz;
-    }
+        vPixel.xyz += tLightMap.Sample(sLinear, input.vUV).xyz;
 
     return saturate(vPixel);
 }

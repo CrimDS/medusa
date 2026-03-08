@@ -25,11 +25,11 @@ cbuffer CBPerFrame : register(b0)
     float4x4    mProj;
     float4x4    mProjOrtho;     // ortho matrix for screen-space (TL) vertices
     float3      vCameraPos;
-    float       pad0;
+    float       fTime;          // elapsed seconds since engine start
     float4      vGlobalAmbient;
     float2      szShadowMap;
     float       fShadowDistance;
-    float       pad1;
+    float       fShadowDepthRange;  // far - near of shadow projection (world units)
 };
 
 cbuffer CBPerObject : register(b1)
@@ -72,14 +72,14 @@ cbuffer CBPerLight : register(b3)
 // Textures and Samplers
 //-----------------------------------------------------------------------------
 
-Texture2D       tDiffuse    : register(t0);
-Texture2D       tLightMap   : register(t1);
-Texture2D       tBumpMap    : register(t2);
-Texture2D       tShadowMap  : register(t7);
+Texture2D           tDiffuse    : register(t0);
+Texture2D           tLightMap   : register(t1);
+Texture2D           tBumpMap    : register(t2);
+Texture2D<float>    tShadowMap  : register(t7);
 
-SamplerState    sLinear     : register(s0);
-SamplerState    sPoint      : register(s1);
-SamplerState    sShadow     : register(s2);
+SamplerState                sLinear     : register(s0);
+SamplerState                sPoint      : register(s1);
+SamplerComparisonState      sShadowCmp  : register(s2);
 
 //-----------------------------------------------------------------------------
 // Vertex Shader Input / Output structures
