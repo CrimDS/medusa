@@ -1,8 +1,9 @@
 //-----------------------------------------------------------------------------
 // File: FXAA.hlsl
 // Desc: Fast Approximate Anti-Aliasing (FXAA 3.11 quality preset)
+//       with filmic tone mapping and vignette.
 //       Fullscreen post-process pass — samples the scene render target and
-//       outputs anti-aliased pixels to the back buffer.
+//       outputs anti-aliased, tone-mapped pixels to the back buffer.
 // (c)2024 Palestar
 //-----------------------------------------------------------------------------
 
@@ -48,6 +49,21 @@ float FxaaLuma(float3 rgb)
 }
 
 //-----------------------------------------------------------------------------
+// ACES filmic tone mapping (fitted curve by Krzysztof Narkowicz)
+// Subtle on LDR input — smooths highlight clipping without crushing darks
+//-----------------------------------------------------------------------------
+
+float3 ACESFilm(float3 x)
+{
+    float a = 2.51f;
+    float b = 0.03f;
+    float c = 2.43f;
+    float d = 0.59f;
+    float e = 0.14f;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+}
+
+//-----------------------------------------------------------------------------
 // FXAA 3.11 — Quality preset
 //-----------------------------------------------------------------------------
 
@@ -76,7 +92,12 @@ float4 ps_main(VS_OUT input) : SV_TARGET
 
     // Skip FXAA if contrast is below threshold
     if (range < max(fEdgeThresholdMin, rangeMax * fEdgeThreshold))
-        return float4(rgbM, 1.0f);
+    {
+        float3 toned = ACESFilm(rgbM);
+        float2 d = posM - 0.5f;
+        float vignette = 1.0f - dot(d, d) * 0.35f;
+        return float4(toned * vignette, 1.0f);
+    }
 
     // Sample diagonal neighbors
     float3 rgbNW = tScene.Sample(sLinear, posM + float2(-1, -1) * rcpFrame).rgb;
@@ -193,5 +214,14 @@ float4 ps_main(VS_OUT input) : SV_TARGET
         finalPos.x += pixelOffsetSubpix * lengthSign;
 
     float3 rgbF = tScene.Sample(sLinear, finalPos).rgb;
+
+    // Filmic tone mapping — smooth highlight rolloff
+    rgbF = ACESFilm(rgbF);
+
+    // Subtle vignette — darken edges for cinematic look
+    float2 d = posM - 0.5f;
+    float vignette = 1.0f - dot(d, d) * 0.35f;
+    rgbF *= vignette;
+
     return float4(rgbF, 1.0f);
 }

@@ -333,6 +333,7 @@ public:
 	ComPtr<ID3D12Resource>			m_pShadowMapDepth;		// R32_FLOAT color RT
 	UINT							m_nShadowMapDSVIndex;	// RTV index in m_RTVHeap (reused name)
 	UINT							m_nShadowMapSRVStagingIndex;	// SRV index in m_SRVStagingHeap
+	UINT							m_nDepthSRVIndex;			// SRV index for depth buffer (SSAO)
 
 	// Command list open state — true between resetCommandList() and flushCommandList()
 	bool							m_bCommandListOpen;

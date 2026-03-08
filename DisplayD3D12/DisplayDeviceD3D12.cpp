@@ -1745,13 +1745,14 @@ bool DisplayDeviceD3D12::createDepthStencil()
 	DXGI_SWAP_CHAIN_DESC1 desc;
 	m_pSwapChain->GetDesc1( &desc );
 
+	// Use typeless format so we can create both DSV and SRV views (needed for SSAO)
 	D3D12_RESOURCE_DESC dsDesc = {};
 	dsDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	dsDesc.Width = desc.Width;
 	dsDesc.Height = desc.Height;
 	dsDesc.DepthOrArraySize = 1;
 	dsDesc.MipLevels = 1;
-	dsDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+	dsDesc.Format = DXGI_FORMAT_R24G8_TYPELESS;
 	dsDesc.SampleDesc.Count = 1;
 	dsDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
 
@@ -1772,6 +1773,19 @@ bool DisplayDeviceD3D12::createDepthStencil()
 
 	UINT dsvIndex = m_DSVHeap.Allocate();
 	m_pDevice->CreateDepthStencilView( m_pDepthStencil.Get(), &dsvDesc, m_DSVHeap.GetCPUHandle(dsvIndex) );
+
+	// Create SRV for depth buffer (for SSAO post-process)
+	m_nDepthSRVIndex = m_SRVStagingHeap.Allocate();
+	if ( m_nDepthSRVIndex != UINT(-1) )
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Texture2D.MipLevels = 1;
+		m_pDevice->CreateShaderResourceView( m_pDepthStencil.Get(), &srvDesc,
+			m_SRVStagingHeap.GetCPUHandle( m_nDepthSRVIndex ) );
+	}
 
 	return true;
 }
