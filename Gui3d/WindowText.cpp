@@ -177,9 +177,13 @@ static CommandLookup COMMAND_TABLE[] =
 
 void WindowText::updateCache( const RectInt & window )
 {
-	PROFILE_FUNCTION();
+	// Fast-out BEFORE PROFILE_FUNCTION: the common case is that the window
+	// rect is unchanged from the cache.  Taking the profiler's global critical
+	// section (start+end) just to no-op adds up at 7 text windows × 66 FPS.
 	if ( m_CacheWindow == window )
-		return;		// cache is up to date
+		return;
+
+	PROFILE_FUNCTION();
 	if ( m_CacheWindow.size() == window.size() )
 	{
 		// window size has not changed, update the positions and continue

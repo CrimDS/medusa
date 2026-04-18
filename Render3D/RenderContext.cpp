@@ -30,12 +30,13 @@ float	RenderContext::sm_fShadowMapRadius = 5000.0f;			// default shadow map radi
 
 																//---------------------------------------------------------------------------------------------------
 
-RenderContext::RenderContext()
+RenderContext::RenderContext() : m_nRenderPassGen( 0 )
 {}
 
 RenderContext::RenderContext(DisplayDevice * pDevice, AudioDevice * pAudioDevice,
 	float time, dword bits, const Matrix33 &frame, const Vector3 &position,
 	const RectInt & window, float fov, float front, float back)
+	: m_nRenderPassGen( 0 )
 {
 	m_Display = pDevice;
 	m_Audio = pAudioDevice;
@@ -233,11 +234,13 @@ void RenderContext::setDetail(float fDetail)
 void RenderContext::setFrame(const Matrix33 & frame)
 {
 	m_State.m_Frame = frame;
+	++m_nRenderPassGen;
 }
 
 void RenderContext::setPosition(const Vector3 & position)
 {
 	m_State.m_Position = position;
+	++m_nRenderPassGen;
 }
 
 void RenderContext::setProjection(const RectInt & window,
@@ -430,6 +433,7 @@ bool RenderContext::beginShadowPass()
 	m_State.m_bShadowPass = true;
 	m_State.m_Frame = lightTransform.m_mFrame;
 	m_State.m_Position = lightTransform.m_vTranslate;
+	++m_nRenderPassGen;		// view matrix swapped — invalidate per-zone view caches
 	m_Display->setProjection(m_State.m_Frame,
 		m_State.m_Position,
 		m_State.m_Window,
@@ -444,6 +448,7 @@ void RenderContext::endShadowPass()
 {
 	m_Display->endShadowPass();
 	popState();
+	++m_nRenderPassGen;		// view matrix restored — invalidate again
 }
 
 bool RenderContext::endScene()

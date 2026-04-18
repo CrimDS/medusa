@@ -98,7 +98,21 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_nDepthSRVIndex( UINT(-1) ),
 	m_nUploadFenceValue( 0 ),
 	m_hUploadFenceEvent( NULL ),
-	m_nDSVIndex( UINT(-1) )
+	m_nDSVIndex( UINT(-1) ),
+	m_nLastBoundSRVBase( 0 ),
+	m_bLastBoundSRVValid( false ),
+	m_nSRVBindCalls( 0 ),
+	m_nSRVBindSkipped( 0 ),
+	m_nMatCBUploads( 0 ),
+	m_nMatCBSkipped( 0 ),
+	m_nLightCBUploads( 0 ),
+	m_nLightCBSkipped( 0 ),
+	m_nSRVCopies( 0 ),
+	m_nSRVCopiesSkipped( 0 ),
+	m_bLastMatCBValid( false ),
+	m_nLastMatCBGpuVA( 0 ),
+	m_bLastLightCBValid( false ),
+	m_nLastLightCBGpuVA( 0 )
 {
 	memset( m_nRTVIndices, 0xff, sizeof(m_nRTVIndices) );
 	TRACE( "DisplayDeviceD3D12 created!" );
@@ -542,6 +556,31 @@ bool DisplayDeviceD3D12::beginScene()
 		m_nSRVFrameOffset = 8;
 		m_nSRVTextureBase = 8;
 
+		// Reset redundant-bind tracking for the new frame.  The command list is
+		// fresh, so any previously-tracked bindings are invalid.
+		m_bLastBoundSRVValid = false;
+		m_bLastMatCBValid = false;
+		m_bLastLightCBValid = false;
+		m_nLastMatCBGpuVA = 0;
+		m_nLastLightCBGpuVA = 0;
+
+		// Reset per-frame counters used by the ALT+P profiler overlay
+		m_nSRVBindCalls = 0;
+		m_nSRVBindSkipped = 0;
+		m_nMatCBUploads = 0;
+		m_nMatCBSkipped = 0;
+		m_nLightCBUploads = 0;
+		m_nLightCBSkipped = 0;
+		m_nSRVCopies = 0;
+		m_nSRVCopiesSkipped = 0;
+
+		// Per-slot cache of which staging index currently lives in each SRV slot.
+		// Size lazily, then blanket-invalidate each frame (UINT(-1) = empty).
+		if ( m_SRVSlotStagingIndex.size() != (int)MAX_SRV_DESCRIPTORS )
+			m_SRVSlotStagingIndex.allocate( MAX_SRV_DESCRIPTORS );
+		for ( int i = 0; i < m_SRVSlotStagingIndex.size(); ++i )
+			m_SRVSlotStagingIndex[i] = UINT(-1);
+
 		// Build screen-space ortho matrix for TL (pre-transformed) vertices.
 		// mProj is perspective for 3D; TL shaders use mProjOrtho instead.
 		// Use renderWindow() (0-based) because TL vertices are in client-local
@@ -922,7 +961,11 @@ void DisplayDeviceD3D12::present()
 		// applyFXAA() also binds the back buffer as the current RTV and leaves the
 		// scene RT in the PIXEL_SHADER_RESOURCE state.
 		if ( m_bFXAAEnabled && m_pSceneRT )
+		{
+			PROFILE_START( "present:applyFXAA" );
 			applyFXAA();
+			PROFILE_END();
+		}
 
 		// Render the OVERLAY pass on top of the post-processed image, so UI stays crisp.
 		// When FXAA is enabled, applyFXAA() already bound the back buffer as the RTV;
@@ -934,55 +977,99 @@ void DisplayDeviceD3D12::present()
 		// Only rebind when FXAA actually ran; if disabled, beginScene's bindings
 		// are still in effect.
 		{
+			PROFILE_START( "present:OVERLAY_execute" );
 			Array< PrimitiveMaterial::Ref > & materials = m_Stack[ OVERLAY ];
 
 			if ( materials.size() > 0 && m_bFXAAEnabled && m_pSceneRT )
 				bindMainRootDefaults();
 
 			static int s_nOverlayLog = 0;
-			for ( int j = 0; j < materials.size(); ++j )
+			static int s_nLastOverlayCount = 0;
+			s_nLastOverlayCount = materials.size();
 			{
-				PrimitiveMaterial * pMaterial = materials[j];
-
-				if ( s_nOverlayLog < 3 )
+				PROFILE_START( "present:OVERLAY_exec_loop" );
+				for ( int j = 0; j < materials.size(); ++j )
 				{
-					PrimitiveMaterialD3D12 * pMat12 = (PrimitiveMaterialD3D12 *)pMaterial;
-					TRACE( "OVERLAY exec[%d]: pass=%d, children=%d, blend=%d, lightEn=%d",
-						j, pMat12->pass(), pMat12->m_Children.size(),
-						(int)pMat12->m_Blending, pMat12->m_LightEnable ? 1 : 0 );
-					// Dump ortho matrix — if any value is huge/NaN, mProjOrtho is corrupted.
-					const DirectX::XMFLOAT4X4 & m = m_CBPerFrame.mProjOrtho.m;
-					TRACE( "  ortho row0: %.4f %.4f %.4f %.4f", m._11, m._12, m._13, m._14 );
-					TRACE( "  ortho row1: %.4f %.4f %.4f %.4f", m._21, m._22, m._23, m._24 );
-					TRACE( "  ortho row3: %.4f %.4f %.4f %.4f", m._41, m._42, m._43, m._44 );
-					TRACE( "  frameIdx=%d, rw=%dx%d", m_nFrameIndex,
-						renderWindow().width(), renderWindow().height() );
-					++s_nOverlayLog;
-				}
+					PrimitiveMaterial * pMaterial = materials[j];
 
-				pMaterial->execute();
-				pMaterial->clear();
+					if ( s_nOverlayLog < 3 )
+					{
+						PrimitiveMaterialD3D12 * pMat12 = (PrimitiveMaterialD3D12 *)pMaterial;
+						TRACE( "OVERLAY exec[%d]: pass=%d, children=%d, blend=%d, lightEn=%d",
+							j, pMat12->pass(), pMat12->m_Children.size(),
+							(int)pMat12->m_Blending, pMat12->m_LightEnable ? 1 : 0 );
+						const DirectX::XMFLOAT4X4 & m = m_CBPerFrame.mProjOrtho.m;
+						TRACE( "  ortho row0: %.4f %.4f %.4f %.4f", m._11, m._12, m._13, m._14 );
+						TRACE( "  ortho row1: %.4f %.4f %.4f %.4f", m._21, m._22, m._23, m._24 );
+						TRACE( "  ortho row3: %.4f %.4f %.4f %.4f", m._41, m._42, m._43, m._44 );
+						TRACE( "  frameIdx=%d, rw=%dx%d", m_nFrameIndex,
+							renderWindow().width(), renderWindow().height() );
+						++s_nOverlayLog;
+					}
+
+					pMaterial->execute();
+					pMaterial->clear();
+				}
+				PROFILE_END();	// "present:OVERLAY_exec_loop"
 			}
 			materials.release();
+#ifndef PROFILE_OFF
+			// Surface the per-frame overlay material count in the ALT+P overlay
+			// so we can see whether 6% goes into few-big-materials or many-small-ones.
+			PROFILE_LMESSAGE( 12, CharString().format(
+				"OVERLAY materials/frame: %d", s_nLastOverlayCount ) );
+#endif
+			PROFILE_END();	// close "present:OVERLAY_execute"
 		}
 
 		// Transition render target to present state and close the command list
 		TransitionResource( m_pCommandList.Get(), m_pRenderTargets[m_nFrameIndex].Get(),
 			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT );
+		PROFILE_START( "present:flushCommandList" );
 		flushCommandList();
+		PROFILE_END();
 	}
 
 	// Present the frame
 	if ( m_pSwapChain )
 	{
+		PROFILE_START( "present:SwapChain::Present" );
 		UINT syncInterval = sm_bWaitVB ? 1 : 0;
 		m_pSwapChain->Present( syncInterval, 0 );
+		PROFILE_END();
 	}
 
 	moveToNextFrame();
 	updateClientArea( true );
 
+	PROFILE_START( "present:drainInfoQueue" );
 	drainInfoQueue();
+	PROFILE_END();
+
+#ifndef PROFILE_OFF
+	// Surface per-frame redundant-bind counters in the ALT+P profiler overlay.
+	// Lines 8-11 keep a stable slot in the message list so they don't flap.
+	PROFILE_LMESSAGE( 8, CharString().format(
+		"D3D12 SRV binds: %u issued, %u skipped (%.0f%% skipped)",
+		m_nSRVBindCalls, m_nSRVBindSkipped,
+		(m_nSRVBindCalls + m_nSRVBindSkipped) > 0
+			? (100.0f * m_nSRVBindSkipped / (m_nSRVBindCalls + m_nSRVBindSkipped)) : 0.0f ) );
+	PROFILE_LMESSAGE( 9, CharString().format(
+		"D3D12 MatCB: %u uploaded, %u skipped (%.0f%% skipped)",
+		m_nMatCBUploads, m_nMatCBSkipped,
+		(m_nMatCBUploads + m_nMatCBSkipped) > 0
+			? (100.0f * m_nMatCBSkipped / (m_nMatCBUploads + m_nMatCBSkipped)) : 0.0f ) );
+	PROFILE_LMESSAGE( 10, CharString().format(
+		"D3D12 LightCB: %u uploaded, %u skipped (%.0f%% skipped)",
+		m_nLightCBUploads, m_nLightCBSkipped,
+		(m_nLightCBUploads + m_nLightCBSkipped) > 0
+			? (100.0f * m_nLightCBSkipped / (m_nLightCBUploads + m_nLightCBSkipped)) : 0.0f ) );
+	PROFILE_LMESSAGE( 11, CharString().format(
+		"D3D12 SRV copies: %u issued, %u skipped (%.0f%% skipped)",
+		m_nSRVCopies, m_nSRVCopiesSkipped,
+		(m_nSRVCopies + m_nSRVCopiesSkipped) > 0
+			? (100.0f * m_nSRVCopiesSkipped / (m_nSRVCopies + m_nSRVCopiesSkipped)) : 0.0f ) );
+#endif
 
 	PROFILE_END();
 }
@@ -1495,11 +1582,26 @@ void DisplayDeviceD3D12::bindPerMaterialCB( const CBPerMaterial & mat )
 	if ( !m_bCommandListOpen )
 		return;
 
+	// Byte-compare against last bound CB this frame.  When the struct is
+	// identical we reuse the previous GPU VA — saves the ring-buffer allocation,
+	// the memcpy, and the SetGraphicsRootConstantBufferView API call.
+	if ( m_bLastMatCBValid && memcmp( &mat, &m_LastMatCB, sizeof(CBPerMaterial) ) == 0 )
+	{
+		m_pCommandList->SetGraphicsRootConstantBufferView( 2, m_nLastMatCBGpuVA );
+		++m_nMatCBSkipped;
+		return;
+	}
+
 	UploadRingBuffer::Allocation alloc = allocateCB( sizeof(CBPerMaterial) );
 	memcpy( alloc.cpuAddress, &mat, sizeof(CBPerMaterial) );
 
 	// Root parameter 2 = CBV for per-material constants
 	m_pCommandList->SetGraphicsRootConstantBufferView( 2, alloc.gpuAddress );
+
+	m_LastMatCB = mat;
+	m_bLastMatCBValid = true;
+	m_nLastMatCBGpuVA = alloc.gpuAddress;
+	++m_nMatCBUploads;
 }
 
 void DisplayDeviceD3D12::bindPerLightCB( const CBPerLight & light )
@@ -1507,11 +1609,45 @@ void DisplayDeviceD3D12::bindPerLightCB( const CBPerLight & light )
 	if ( !m_bCommandListOpen )
 		return;
 
+	if ( m_bLastLightCBValid && memcmp( &light, &m_LastLightCB, sizeof(CBPerLight) ) == 0 )
+	{
+		m_pCommandList->SetGraphicsRootConstantBufferView( 3, m_nLastLightCBGpuVA );
+		++m_nLightCBSkipped;
+		return;
+	}
+
 	UploadRingBuffer::Allocation alloc = allocateCB( sizeof(CBPerLight) );
 	memcpy( alloc.cpuAddress, &light, sizeof(CBPerLight) );
 
 	// Root parameter 3 = CBV for per-light constants
 	m_pCommandList->SetGraphicsRootConstantBufferView( 3, alloc.gpuAddress );
+
+	m_LastLightCB = light;
+	m_bLastLightCBValid = true;
+	m_nLastLightCBGpuVA = alloc.gpuAddress;
+	++m_nLightCBUploads;
+}
+
+void DisplayDeviceD3D12::bindSRVTableIfChanged( UINT nBaseSlot )
+{
+	if ( !m_bCommandListOpen || !m_pCommandList )
+		return;
+
+	if ( m_bLastBoundSRVValid && m_nLastBoundSRVBase == nBaseSlot )
+	{
+		++m_nSRVBindSkipped;
+		return;
+	}
+
+	m_pCommandList->SetGraphicsRootDescriptorTable( 4, getSRVGPUHandle( nBaseSlot ) );
+	m_nLastBoundSRVBase = nBaseSlot;
+	m_bLastBoundSRVValid = true;
+	++m_nSRVBindCalls;
+}
+
+void DisplayDeviceD3D12::invalidateBoundSRVTable()
+{
+	m_bLastBoundSRVValid = false;
 }
 
 void DisplayDeviceD3D12::drainInfoQueue()
@@ -1564,8 +1700,18 @@ void DisplayDeviceD3D12::bindMainRootDefaults()
 	ID3D12DescriptorHeap * heaps[] = { m_SRVHeap.Get(), m_SamplerHeap.Get() };
 	m_pCommandList->SetDescriptorHeaps( _countof(heaps), heaps );
 
+	// Changing root signature / descriptor heaps clears all root parameter
+	// bindings in D3D12.  Drop the redundant-bind cache so the next draw
+	// re-issues its SetGraphicsRoot* calls instead of assuming they're still live.
+	m_bLastBoundSRVValid = false;
+	m_bLastMatCBValid = false;
+	m_bLastLightCBValid = false;
+
 	// Bind descriptor tables for SRVs [4] and samplers [5]
 	m_pCommandList->SetGraphicsRootDescriptorTable( 4, m_SRVHeap.GetGPUHandle( 0 ) );
+	m_nLastBoundSRVBase = 0;
+	m_bLastBoundSRVValid = true;
+	++m_nSRVBindCalls;
 	m_pCommandList->SetGraphicsRootDescriptorTable( 5, m_SamplerHeap.GetGPUHandle( 0 ) );
 
 	// Bind the per-frame constant buffer
@@ -2264,11 +2410,16 @@ void DisplayDeviceD3D12::moveToNextFrame()
 
 	m_nFrameIndex = m_pSwapChain->GetCurrentBackBufferIndex();
 
-	// Wait for the new frame's allocator to be free (its previous submission must be done)
+	// Wait for the new frame's allocator to be free (its previous submission must be done).
+	// This wait is where a GPU-bound frame shows up as CPU cost — if the GPU hasn't
+	// finished the frame that last used this allocator, we block here.  With VSync off,
+	// a persistent non-zero CPU% in this scope = GPU overbudget (not CPU-bound rendering).
 	if ( m_pFence->GetCompletedValue() < m_nAllocatorFence[m_nFrameIndex] )
 	{
+		PROFILE_START( "DisplayDeviceD3D12::GPU_fence_wait" );
 		m_pFence->SetEventOnCompletion( m_nAllocatorFence[m_nFrameIndex], m_hFenceEvent );
 		WaitForSingleObject( m_hFenceEvent, INFINITE );
+		PROFILE_END();
 	}
 
 	m_nFenceValues[m_nFrameIndex] = currentFenceValue + 1;
@@ -2767,7 +2918,9 @@ void DisplayDeviceD3D12::applyFXAA()
 	D3D12_RECT scissor = { 0, 0, (LONG)width, (LONG)height };
 	m_pCommandList->RSSetScissorRects( 1, &scissor );
 
-	// Set FXAA pipeline
+	// Set FXAA pipeline.  Root-sig swap clears root bindings — drop the cache
+	// so any later material draw re-issues instead of assuming stale state.
+	invalidateBoundSRVTable();
 	m_pCommandList->SetGraphicsRootSignature( m_pFXAARootSig.Get() );
 	m_pCommandList->SetPipelineState( m_pFXAAPSO.Get() );
 

@@ -9,15 +9,46 @@
 
 #include "WorldClient.h"
 #include "Debug/Assert.h"
+#include "Debug/Profile.h"
 #include "Standard/Time.h"
 
 //! Any messages that take longer than this amount in time in milliseconds generate an warning to the log..
 const dword MESSAGE_WARNING_TIME = 50;
 
+#ifndef PROFILE_OFF
+// Profiler names MUST be string literals — the profiler uses the pointer address
+// as a hash key.  Map the message byte to a fixed literal per type so each
+// message shows up on its own line in the ALT+P profile view.
+static const char * profileNameForMessage( u8 nMessage )
+{
+	switch( nMessage )
+	{
+	case WorldClient::CONTEXT_UPDATE_NOUN:	return "msg:CONTEXT_UPDATE_NOUN";
+	case WorldClient::CONTEXT_ADD_NOUN:		return "msg:CONTEXT_ADD_NOUN";
+	case WorldClient::CONTEXT_DEL_NOUN:		return "msg:CONTEXT_DEL_NOUN";
+	case WorldClient::CONTEXT_DESYNC_NOUN:	return "msg:CONTEXT_DESYNC_NOUN";
+	case WorldClient::CONTEXT_ADD_ZONE:		return "msg:CONTEXT_ADD_ZONE";
+	case WorldClient::CONTEXT_DEL_ZONE:		return "msg:CONTEXT_DEL_ZONE";
+	case WorldClient::CONTEXT_ADD_WORLD:	return "msg:CONTEXT_ADD_WORLD";
+	case WorldClient::CONTEXT_DEL_WORLD:	return "msg:CONTEXT_DEL_WORLD";
+	case WorldClient::CONTEXT_ADD_VERB:		return "msg:CONTEXT_ADD_VERB";
+	case WorldClient::CONTEXT_CRON:			return "msg:CONTEXT_CRON";
+	case WorldClient::CONTEXT_RUN_SCRIPT:	return "msg:CONTEXT_RUN_SCRIPT";
+	case WorldClient::CONTEXT_KILL_SCRIPT:	return "msg:CONTEXT_KILL_SCRIPT";
+	case WorldClient::CONTEXT_INIT:			return "msg:CONTEXT_INIT";
+	case WorldClient::CONTEXT_END:			return "msg:CONTEXT_END";
+	case WorldClient::PING:					return "msg:PING";
+	case WorldClient::PONG:					return "msg:PONG";
+	default:								return "msg:other";
+	}
+}
+#endif
+
 //---------------------------------------------------------------------------------------------------
 
 void WorldClient::receiveMessage( bool bUDP, u8 nMessage, const InStream & input )
 {
+	PROFILE_START( profileNameForMessage( nMessage ) );
 	dword nStart = Time::milliseconds();
 
 	switch( nMessage )
@@ -623,11 +654,18 @@ void WorldClient::receiveMessage( bool bUDP, u8 nMessage, const InStream & input
 
 			lock();
 
-			// Find any old version of the noun we are going to replace.. 
+			// Find any old version of the noun we are going to replace..
 			Noun::Ref pOldNoun = Noun::wRef( nNoun ).pointer();
 
 			// unwrap the noun from it's package
+			// NOTE: This unwrap runs under the lock because deserialization may
+			// mutate the shared Dictionary (new ClassKey/storage entries on
+			// unknown types) and the render thread reads that dictionary.
+			// A safe unlocked-unwrap would require confirming none of the
+			// factory reads touch shared mutable state — left as follow-up.
+			PROFILE_START( "CONTEXT_ADD_NOUN:unwrap_under_lock" );
 			Widget::Ref pUncasted = noun.unwrap();
+			PROFILE_END();
 			if ( pUncasted.valid() )
 			{
 				BaseNode::wRef pParent = nParent;
@@ -716,10 +754,20 @@ void WorldClient::receiveMessage( bool bUDP, u8 nMessage, const InStream & input
 						pNoun->setSyncronized( true );
 					}
 
-					LOG_DEBUG_HIGH( "WorldClient", "CONTEXT_UPDATE_NOUN, Noun = %s, Class = %s, Parent = %s, Bytes = %d", 
+					LOG_DEBUG_HIGH( "WorldClient", "CONTEXT_UPDATE_NOUN, Noun = %s, Class = %s, Parent = %s, Bytes = %d",
 						pNoun->name(), pNoun->propertyList()->className(), pParent->name(), update.size() );
 					// unwrap the noun from it's package
-					if ( update.unwrap( pNoun ) == NULL )
+					// HOT PATH: this mutates an existing in-scene noun, so it must run under
+					// the WorldClient lock — moving it outside the lock would race against
+					// the render thread reading pNoun's fields.  A safe optimization would
+					// require either a Noun copy+swap API or a two-phase unwrap (decode to
+					// a scratch buffer outside the lock, then apply fields under a short
+					// lock window).  Keep scoped profiling here so the cost is visible in
+					// the ALT+P overlay and the total message time from receiveMessage().
+					PROFILE_START( "CONTEXT_UPDATE_NOUN:unwrap_under_lock" );
+					Widget * pUnwrapped = update.unwrap( pNoun );
+					PROFILE_END();
+					if ( pUnwrapped == NULL )
 					{
 						LOG_ERROR( "WorldClient", "Failed to unwrap noun, requesting noun %llu", nNoun.m_Id );
 						// failed to unwrap, send a request to re-send the noun then..
@@ -943,7 +991,15 @@ void WorldClient::receiveMessage( bool bUDP, u8 nMessage, const InStream & input
 
 	dword nElapsed = Time::milliseconds() - nStart;
 	if ( nElapsed > MESSAGE_WARNING_TIME )
+	{
+#ifndef PROFILE_OFF
+		LOG_WARNING( "WorldClient", CharString().format( "WARNING: Message 0x%0.2x (%s) from server took %u ms",
+			nMessage, profileNameForMessage( nMessage ), nElapsed ) );
+#else
 		LOG_WARNING( "WorldClient", CharString().format( "WARNING: Message 0x%0.2x from server took %u ms", nMessage, nElapsed ) );
+#endif
+	}
+	PROFILE_END();
 }
 
 void WorldClient::onMessage( bool bUDP, u8 nMessage, const InStream & input )

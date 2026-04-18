@@ -691,7 +691,9 @@ void WorldClient::setTarget( Noun * pTarget, bool bForce /*= false*/ )
 
 void WorldClient::update()
 {
+	PROFILE_START( "WorldClient::Client::update" );
 	Client::update();
+	PROFILE_END();
 
 	if (! m_bProxy )
 	{
@@ -699,6 +701,7 @@ void WorldClient::update()
 		WorldContext * pContext = context();
 		if ( pContext != NULL )
 		{
+			PROFILE_START( "WorldClient::zone_lock_scan" );
 			// lock all zones intersecting with our focus area or containing our ship or target
 			for(int j=-1;j<pContext->worldCount();++j)
 			{
@@ -734,7 +737,9 @@ void WorldClient::update()
 				}
 			}
 
-			// update the worldContext
+			PROFILE_END();	// close "WorldClient::zone_lock_scan"
+
+			// update the worldContext (already has its own PROFILE_START inside)
 			pContext->update();
 		}
 	}

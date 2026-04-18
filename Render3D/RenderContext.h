@@ -107,6 +107,12 @@ public:
 	bool				isShadowPass() const;								// true if this is a shadow pass render
 	bool				isORenabled() const;								// true if Oculus Rift mode is enabled
 
+	// Monotonically-increasing counter bumped whenever the camera/view state
+	// changes (setFrame/setPosition/beginShadowPass/endShadowPass).  Render
+	// traversal code (e.g. NodeZone::preRender) can cache per-pass transforms
+	// and invalidate on generation-counter mismatch without comparing matrices.
+	qword				renderPassGeneration() const;
+
 	const Matrix33 &	frame() const;										// world space frame and position
 	const Vector3 &		position() const;
 
@@ -305,9 +311,17 @@ private:
 	StateList			m_StateList;
 
 	InstanceDataMap		m_InstanceDataMap;
+
+	// Bumped by every mutation that invalidates cached view-space transforms.
+	qword				m_nRenderPassGen;
 };
 
 //-------------------------------------------------------------------------------
+
+inline qword RenderContext::renderPassGeneration() const
+{
+	return m_nRenderPassGen;
+}
 
 inline DisplayDevice * RenderContext::display() const
 {

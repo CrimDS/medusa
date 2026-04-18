@@ -324,7 +324,9 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	ID3D12GraphicsCommandList * cl = pDev->getCommandList();
 	ID3D12Device * dev = pDev->getDevice();
 
-	// Setup SSAO pipeline
+	// Setup SSAO pipeline.  Swapping root signature clears root bindings — drop
+	// the device-side cache so later bindSRVTableIfChanged() calls re-issue.
+	pDev->invalidateBoundSRVTable();
 	cl->SetGraphicsRootSignature( m_pSSAORootSig.Get() );
 
 	ID3D12DescriptorHeap * heaps[] = { pDev->m_SRVHeap.Get(), pDev->m_SamplerHeap.Get() };
@@ -459,8 +461,11 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	drawFullscreenTriangle( pDev );
 
 	// --- Restore main pipeline state ---
+	// Root-sig/heap swaps cleared the GPU's root bindings; drop the device-side
+	// redundant-bind cache so the next material draw re-issues its bindings.
 	cl->SetGraphicsRootSignature( pDev->getRootSignature() );
 	cl->SetDescriptorHeaps( _countof(heaps), heaps );
+	pDev->invalidateBoundSRVTable();
 	cl->SetGraphicsRootDescriptorTable( 4, pDev->m_SRVHeap.GetGPUHandle( 0 ) );
 	cl->SetGraphicsRootDescriptorTable( 5, pDev->m_SamplerHeap.GetGPUHandle( 0 ) );
 

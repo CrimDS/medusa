@@ -199,16 +199,27 @@ bool PrimitiveMaterialD3D12::execute()
 						pDevice->m_fShadowRadius * 0.60f,
 						pDevice->m_fShadowRadius * 1.0f );
 
-					// Copy shadow map SRV into slot t7
+					// Copy shadow map SRV into slot t7, skipping the copy when that
+					// slot already holds this exact staging index.
 					UINT smDestSlot = pDevice->m_nSRVTextureBase + 7;
-					D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = pDevice->m_SRVStagingHeap.GetCPUHandle( pDevice->m_nShadowMapSRVStagingIndex );
-					D3D12_CPU_DESCRIPTOR_HANDLE dstHandle = pDevice->getSRVCPUHandle( smDestSlot );
-					pDevice->getDevice()->CopyDescriptorsSimple( 1, dstHandle, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+					if ( smDestSlot < (UINT)pDevice->m_SRVSlotStagingIndex.size()
+						&& pDevice->m_SRVSlotStagingIndex[smDestSlot] == pDevice->m_nShadowMapSRVStagingIndex )
+					{
+						++pDevice->m_nSRVCopiesSkipped;
+					}
+					else
+					{
+						D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = pDevice->m_SRVStagingHeap.GetCPUHandle( pDevice->m_nShadowMapSRVStagingIndex );
+						D3D12_CPU_DESCRIPTOR_HANDLE dstHandle = pDevice->getSRVCPUHandle( smDestSlot );
+						pDevice->getDevice()->CopyDescriptorsSimple( 1, dstHandle, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+						if ( smDestSlot < (UINT)pDevice->m_SRVSlotStagingIndex.size() )
+							pDevice->m_SRVSlotStagingIndex[smDestSlot] = pDevice->m_nShadowMapSRVStagingIndex;
+						++pDevice->m_nSRVCopies;
+					}
 
-					// Re-bind SRV table
-					ID3D12GraphicsCommandList * cl = pDevice->getCommandList();
-					if ( cl )
-						cl->SetGraphicsRootDescriptorTable( 4, pDevice->getSRVGPUHandle( pDevice->m_nSRVTextureBase ) );
+					// Re-bind SRV table (no-op when the base is unchanged from the
+					// previous surface/material bind within this material's slot group).
+					pDevice->bindSRVTableIfChanged( pDevice->m_nSRVTextureBase );
 				}
 				else
 				{

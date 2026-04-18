@@ -334,6 +334,9 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	ID3D12Device * dev = pDev->getDevice();
 
 	// --- Setup bloom pipeline ---
+	// Swapping root signature clears root-parameter bindings; drop the device's
+	// redundant-bind cache so downstream helpers don't assume stale bindings are live.
+	pDev->invalidateBoundSRVTable();
 	cl->SetGraphicsRootSignature( m_pBloomRootSig.Get() );
 
 	ID3D12DescriptorHeap * heaps[] = { pDev->m_SRVHeap.Get(), pDev->m_SamplerHeap.Get() };
@@ -483,9 +486,12 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	drawFullscreenTriangle( pDev );
 
 	// --- Restore main pipeline state ---
-	// Re-bind main root signature and heaps so subsequent operations work correctly
+	// Re-bind main root signature and heaps so subsequent operations work correctly.
+	// Drop the device's redundant-bind cache — root-sig/heap swaps cleared the GPU
+	// state, so the next material draw must re-issue its own SetGraphicsRoot* calls.
 	cl->SetGraphicsRootSignature( pDev->getRootSignature() );
 	cl->SetDescriptorHeaps( _countof(heaps), heaps );
+	pDev->invalidateBoundSRVTable();
 	cl->SetGraphicsRootDescriptorTable( 4, pDev->m_SRVHeap.GetGPUHandle( 0 ) );
 	cl->SetGraphicsRootDescriptorTable( 5, pDev->m_SamplerHeap.GetGPUHandle( 0 ) );
 

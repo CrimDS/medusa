@@ -47,13 +47,15 @@ BEGIN_PROPERTY_LIST( NodeZone, NodeTransform )
 	ADD_TRANSMIT_PROPERTY( m_Hull );
 END_PROPERTY_LIST();
 
-NodeZone::NodeZone() : 
-	m_Tick( 0 ), 
-	m_pContext( NULL ), 
-	m_nProfileTime( 0 ), 
-	m_nNounCount( 0 ), 
-	m_bLocked( false ), 
-	m_pCollisionHash( new COLLISION_HASH_CLASS )
+NodeZone::NodeZone() :
+	m_Tick( 0 ),
+	m_pContext( NULL ),
+	m_nProfileTime( 0 ),
+	m_nNounCount( 0 ),
+	m_bLocked( false ),
+	m_pCollisionHash( new COLLISION_HASH_CLASS ),
+	m_nCachedAmbientCount( -1 ),
+	m_nCachedChildCountAtScan( -1 )
 {}
 
 NodeZone::~NodeZone()
@@ -115,8 +117,12 @@ void NodeZone::onChildDetached()
 {
 	NodeTransform::onChildDetached();
 
-	if ( childCount() == 0 
-		&& context() != NULL 
+	// Child set changed — preRender's ambient-child cache is no longer accurate.
+	m_nCachedAmbientCount = -1;
+	m_nCachedChildCountAtScan = -1;
+
+	if ( childCount() == 0
+		&& context() != NULL
 		&& context()->user() != NULL
 		&& context()->user()->isServer() && locked() )
 	{
@@ -143,9 +149,38 @@ void NodeZone::preRender( RenderContext &context, const Matrix33 & frame, const 
 
 	// if this zone isn't visible, then we render ambient children only..
 	bool bAmbientOnly = !context.boxVisible( m_Hull, vViewFrame, vViewPosition );
-	
-	// render all children
-	for(int i=0;i<childCount();i++)
+
+	const int nChildren = childCount();
+
+	// Fast-path for the common case: zone is culled AND has no ambient children.
+	// Refresh the cached ambient count lazily when the child set size changes
+	// (attachNode has no virtual hook; detach invalidates directly).  The scan
+	// is O(N) but amortized across many frames of the cache being reused.
+	if ( bAmbientOnly )
+	{
+		if ( m_nCachedChildCountAtScan != nChildren )
+		{
+			int nAmbient = 0;
+			for ( int i = 0; i < nChildren; ++i )
+			{
+				if ( (child(i)->nodeFlags() & BaseNode::NF_AMBIENT) != 0 )
+					++nAmbient;
+			}
+			m_nCachedAmbientCount = nAmbient;
+			m_nCachedChildCountAtScan = nChildren;
+		}
+
+		if ( m_nCachedAmbientCount == 0 )
+		{
+			// Nothing to render in this culled zone — skip the iteration entirely.
+			context.setInstanceKey( context.instanceKey() - key() );
+			PROFILE_END();
+			return;
+		}
+	}
+
+	// render all children (cache childCount() instead of re-reading per iteration)
+	for ( int i = 0; i < nChildren; ++i )
 	{
 		BaseNode * pChild = child(i);
 		if ( !bAmbientOnly || (pChild->nodeFlags() & BaseNode::NF_AMBIENT) != 0 )

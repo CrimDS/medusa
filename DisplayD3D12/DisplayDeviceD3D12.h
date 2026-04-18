@@ -151,6 +151,14 @@ public:
 	void							bindPerMaterialCB( const CBPerMaterial & mat );
 	void							bindPerLightCB( const CBPerLight & light );
 
+	// Bind the SRV root descriptor table (root param 4) to the given base slot,
+	// skipping the API call when the base is unchanged from the last bind this frame.
+	// Any code path that changes the root signature or descriptor heaps must call
+	// invalidateBoundSRVTable() before re-binding, because those operations
+	// implicitly clear root-param bindings in D3D12.
+	void							bindSRVTableIfChanged( UINT nBaseSlot );
+	void							invalidateBoundSRVTable();
+
 	// Rebind the main root signature, descriptor heaps, and default CBV/SRV/Sampler
 	// root parameters.  Called from beginScene on fresh command lists, and again
 	// before the OVERLAY pass in present() after applyFXAA() swapped the root sig.
@@ -356,6 +364,40 @@ public:
 	// Per-frame SRV ring allocator — reset each beginScene(), advanced by setupTextures()
 	UINT							m_nSRVFrameOffset;		// next free slot in m_SRVHeap
 	UINT							m_nSRVTextureBase;		// base slot for the current material's textures
+
+	// Tracks the last base slot bound to root param 4 so we can skip redundant
+	// SetGraphicsRootDescriptorTable calls within a frame.  Invalidated on any
+	// root-signature/descriptor-heap change (post-process effects, applyFXAA).
+	UINT							m_nLastBoundSRVBase;
+	bool							m_bLastBoundSRVValid;
+
+	// Per-frame counters for the ALT+P profiler view — surfaced via PROFILE_LMESSAGE.
+	UINT							m_nSRVBindCalls;		// requested this frame
+	UINT							m_nSRVBindSkipped;		// skipped because base unchanged
+	UINT							m_nMatCBUploads;		// CBPerMaterial uploads this frame
+	UINT							m_nMatCBSkipped;		// skipped because data unchanged
+	UINT							m_nLightCBUploads;		// CBPerLight uploads this frame
+	UINT							m_nLightCBSkipped;		// skipped because data unchanged
+	UINT							m_nSRVCopies;			// CopyDescriptorsSimple calls to SRV slots
+	UINT							m_nSRVCopiesSkipped;	// skipped because destination already holds source
+
+	// Per-slot cache of which staging-heap SRV index currently lives in each
+	// shader-visible heap slot.  Lets setupTextures()/shadow-map binding skip
+	// CopyDescriptorsSimple when the destination slot already holds the source.
+	// Sized to MAX_SRV_DESCRIPTORS and reset at the start of each frame.
+	Array<UINT>						m_SRVSlotStagingIndex;
+
+	// Last-bound per-material and per-light CB data for redundant-upload suppression.
+	// We hash the struct via byte-wise compare against this cached copy; on a hit
+	// we reuse m_nLastMatCBGpuVA / m_nLastLightCBGpuVA instead of re-allocating
+	// from the ring and re-issuing SetGraphicsRootConstantBufferView.
+	CBPerMaterial					m_LastMatCB;
+	bool							m_bLastMatCBValid;
+	D3D12_GPU_VIRTUAL_ADDRESS		m_nLastMatCBGpuVA;
+
+	CBPerLight						m_LastLightCB;
+	bool							m_bLastLightCBValid;
+	D3D12_GPU_VIRTUAL_ADDRESS		m_nLastLightCBGpuVA;
 
 	// Current pipeline state tracking
 	bool							m_bUsingFixedFunction;

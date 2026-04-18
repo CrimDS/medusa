@@ -5,6 +5,7 @@
 
 #define FACTORY_DLL
 #include "Debug/Assert.h"
+#include "Debug/Profile.h"
 #include "Debug/Trace.h"
 #include "Standard/UUE.h"
 #include "File/FileMemoryBlocked.h"
@@ -52,6 +53,7 @@ WidgetWrap::~WidgetWrap()
 
 Widget * WidgetWrap::unwrap( Widget * pWidget /*= NULL*/ ) const
 {
+	PROFILE_FUNCTION();
 	if ( m_pWidget != NULL && m_Size > 0 )
 	{
 		try {

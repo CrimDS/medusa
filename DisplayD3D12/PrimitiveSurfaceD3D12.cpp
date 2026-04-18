@@ -118,10 +118,6 @@ bool PrimitiveSurfaceD3D12::execute()
 		break;
 	}
 
-	// Set the SRV into the shader-visible heap for the current frame
-	// The command list will reference this via the descriptor table in the root signature
-	ID3D12GraphicsCommandList * cl = pDevice->getCommandList();
-
 	// Determine texture slot based on type
 	int nTextureSlot = 0;
 	switch ( m_eType )
@@ -135,14 +131,27 @@ bool PrimitiveSurfaceD3D12::execute()
 	// Copy SRV from staging heap into the per-material slot group.
 	// m_nSRVTextureBase is set by setupTextures() to a fresh group of 3 slots,
 	// so consecutive materials never alias each other's descriptors.
+	// Skip the copy when the destination slot already holds this exact
+	// staging-heap SRV (typical when the same texture is reused across draws).
 	UINT destSlot = pDevice->m_nSRVTextureBase + nTextureSlot;
-	D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = pDevice->m_SRVStagingHeap.GetCPUHandle( m_SRVIndex );
-	D3D12_CPU_DESCRIPTOR_HANDLE dstHandle = pDevice->getSRVCPUHandle( destSlot );
-	pDevice->getDevice()->CopyDescriptorsSimple( 1, dstHandle, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+	if ( destSlot < (UINT)pDevice->m_SRVSlotStagingIndex.size()
+		&& pDevice->m_SRVSlotStagingIndex[destSlot] == m_SRVIndex )
+	{
+		++pDevice->m_nSRVCopiesSkipped;
+	}
+	else
+	{
+		D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = pDevice->m_SRVStagingHeap.GetCPUHandle( m_SRVIndex );
+		D3D12_CPU_DESCRIPTOR_HANDLE dstHandle = pDevice->getSRVCPUHandle( destSlot );
+		pDevice->getDevice()->CopyDescriptorsSimple( 1, dstHandle, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+		if ( destSlot < (UINT)pDevice->m_SRVSlotStagingIndex.size() )
+			pDevice->m_SRVSlotStagingIndex[destSlot] = m_SRVIndex;
+		++pDevice->m_nSRVCopies;
+	}
 
 	// Re-bind SRV descriptor table to the base of this material's slot group
-	if ( cl )
-		cl->SetGraphicsRootDescriptorTable( 4, pDevice->getSRVGPUHandle( pDevice->m_nSRVTextureBase ) );
+	// (skipped internally when the base is unchanged from the previous surface).
+	pDevice->bindSRVTableIfChanged( pDevice->m_nSRVTextureBase );
 
 	return true;
 }

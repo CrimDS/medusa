@@ -393,9 +393,13 @@ bool InterfaceContext::render()
 	m_Time += deltaTime;
 
 	// update the document
+	PROFILE_START( "InterfaceContext::document->onUpdate" );
 	m_pDocument->onUpdate( deltaTime );
-	// update the interface 
+	PROFILE_END();
+	// update the interface
+	PROFILE_START( "InterfaceContext::onUpdate(root)" );
 	onUpdate( m_pRootWindow, deltaTime );
+	PROFILE_END();
 
 	// detach any nodes now
 	if ( m_DetachQueue.valid() )
@@ -438,9 +442,12 @@ bool InterfaceContext::render()
 	
 	// render the scene
 	m_Context.beginRender( Color(0,0,0), Color(0,0,0) );
+	PROFILE_START( "InterfaceContext::scene_render" );
 	m_Context.render( m_pRootWindow );
+	PROFILE_END();
 
 	// render the cursor
+	PROFILE_START( "InterfaceContext::cursor+tooltip" );
 	m_Context.beginScene();
 	if ( platform() != NULL && m_CursorState > HIDDEN )
 	{
@@ -502,8 +509,9 @@ bool InterfaceContext::render()
 			Font::push( pDisplay, pFont, tipPosition, m_sCursorTip, WHITE );
 		}
 	}
+	PROFILE_END();	// close "InterfaceContext::cursor+tooltip"
 
-	PROFILE_END();
+	PROFILE_END();	// close "InterfaceContext::render()"
 
 	// display the frames per second
 	PROFILE_LMESSAGE( 0, CharString().format("FPS: %.2f", m_Context.fps()) );
@@ -555,20 +563,100 @@ bool InterfaceContext::render()
 			Font::push( pDisplay, pFont, vecPos, sThread, WHITE );
 
 			int nCount = Profiler::profileCount( nThread );
-			for(int j=0;j<nCount;j++)
+
+			// Build an indented display order by walking parent pointers.
+			// Each profile records its immediate enclosing profile (pParentName,
+			// set in Profiler::end); here we DFS from roots (parent == NULL) so
+			// children appear under and indented from their parents.
+			// Rows with zero hits this second are skipped — they're noise (one-time
+			// handlers, rare messages) that just clutters the view.
+			Array<int> orderIdx;
+			Array<int> orderDepth;
+			Array<bool> emitted;
+			emitted.allocate( nCount );
+			for ( int j = 0; j < nCount; ++j )
+				emitted[j] = false;
+
+			// Stack-based DFS: push roots, then for each popped profile push its
+			// children (reverse order so they come out in original order).
+			Array<int> stackIdx;
+			Array<int> stackDepth;
+			for ( int j = nCount - 1; j >= 0; --j )
 			{
-				Profiler::Profile & profile = Profiler::profile( nThread, j );
+				if ( Profiler::profile( nThread, j ).pParentName == NULL )
+				{
+					stackIdx.push( j );
+					stackDepth.push( 0 );
+				}
+			}
+
+			while ( stackIdx.size() > 0 )
+			{
+				int curIdx = stackIdx[ stackIdx.size() - 1 ];
+				int curDepth = stackDepth[ stackDepth.size() - 1 ];
+				stackIdx.pop();
+				stackDepth.pop();
+
+				if ( emitted[ curIdx ] )
+					continue;
+				emitted[ curIdx ] = true;
+				orderIdx.push( curIdx );
+				orderDepth.push( curDepth );
+
+				const char * pMyName = Profiler::profile( nThread, curIdx ).pName;
+				// Gather children (preserving original order), then push in reverse.
+				Array<int> kids;
+				for ( int j = 0; j < nCount; ++j )
+				{
+					if ( emitted[j] )
+						continue;
+					if ( Profiler::profile( nThread, j ).pParentName == pMyName )
+						kids.push( j );
+				}
+				for ( int k = kids.size() - 1; k >= 0; --k )
+				{
+					stackIdx.push( kids[k] );
+					stackDepth.push( curDepth + 1 );
+				}
+			}
+
+			// Append any profiles whose parent wasn't on this thread (orphans) so
+			// nothing is dropped from the display.
+			for ( int j = 0; j < nCount; ++j )
+			{
+				if ( !emitted[j] )
+				{
+					orderIdx.push( j );
+					orderDepth.push( 0 );
+				}
+			}
+
+			// Render in tree order with per-depth indentation.  Skip zero-hit rows —
+			// they're almost always idle message handlers or dead code paths and
+			// just add noise to the view.
+			for ( int i = 0; i < orderIdx.size(); ++i )
+			{
+				Profiler::Profile & profile = Profiler::profile( nThread, orderIdx[i] );
+				if ( profile.nAvHits == 0 )
+					continue;
+
+				int depth = orderDepth[i];
+
+				WideString indent;
+				for ( int d = 0; d < depth; ++d )
+					indent += STR("  ");
 
 				WideString line;
-				line.format(STR("%S - CPU: %s (%.2f%%), HITS: %u"), profile.pName, 
-					FormatNumber<wchar,qword>( profile.nAvCPU ), GetPercent( profile.nAvCPU, nTotalCPU), profile.nAvHits);
+				line.format(STR("%s%S - CPU: %s (%.2f%%), HITS: %u"),
+					(const wchar *)indent, profile.pName,
+					FormatNumber<wchar,qword>( profile.nAvCPU ),
+					GetPercent( profile.nAvCPU, nTotalCPU ), profile.nAvHits);
 
 				Vector3 vecPos( 10, y, 0 );
 				y += lineHeight;
 
 				Font::push( pDisplay, pFont, vecPos, line, WHITE );
 			}
-
 		}
 
 		// unlock the profiler

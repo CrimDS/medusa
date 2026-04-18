@@ -49,13 +49,14 @@ class DLL Profiler
 {
 public:
 	// Types
-	struct Profile	
+	struct Profile
 	{
 		Profile();
 
 		const char *		pName;			// name of the profile entry
-		qword				nCPU;				
-		dword				nHits;		
+		const char *		pParentName;	// name of the immediate enclosing profile, NULL if this is a root
+		qword				nCPU;
+		dword				nHits;
 		qword				nAvCPU;			// CPU time used per second
 		dword				nAvHits;		// number of hits per second
 		int					nBytes;			// memory allocated
@@ -117,8 +118,8 @@ private:
 
 //----------------------------------------------------------------------------
 
-inline Profiler::Profile::Profile() : pName( NULL ), nCPU( 0 ), 
-	nHits( 0 ), nAvCPU( 0 ), nAvHits( 0 ), nBytes( 0 )
+inline Profiler::Profile::Profile() : pName( NULL ), pParentName( NULL ),
+	nCPU( 0 ), nHits( 0 ), nAvCPU( 0 ), nAvHits( 0 ), nBytes( 0 )
 {}
 
 //----------------------------------------------------------------------------

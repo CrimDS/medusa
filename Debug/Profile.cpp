@@ -63,6 +63,12 @@ void Profiler::end()
 		// add/update the Profile structure
 		Profile & profile = sm_ThreadHash.insert( nThread ).insert( ((dword)timer.pName) );
 		profile.pName = timer.pName;
+		// Record the immediate-enclosing profile (stack below us) so the ALT+P
+		// view can indent each row under its parent.  Set once — first appearance
+		// wins; dynamic re-parenting is rare and the first context is usually
+		// representative.
+		if ( profile.pParentName == NULL && timers.size() >= 2 )
+			profile.pParentName = timers[ timers.size() - 2 ].pName;
 		profile.nCPU += Time::CPU() - timer.nTime;
 		//profile.nBytes += Heap::bytes() - timer.nBytes;
 		profile.nHits += 1;

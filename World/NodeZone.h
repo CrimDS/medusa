@@ -132,6 +132,15 @@ protected:
 	int					m_nNounCount;		// how many nouns in this zone
 	qword				m_nProfileTime;		// CPU usage
 
+	// preRender fast-path cache: when the zone frustum-culls (bAmbientOnly), we
+	// only need to dispatch to children with NF_AMBIENT.  Scanning all children
+	// every frame to check that flag is wasteful when the zone has zero ambient
+	// children (common for distant zones full of ordinary nouns).  Cache the
+	// count and invalidate when children change.
+	mutable int			m_nCachedAmbientCount;		// -1 = dirty, else # ambient children
+	mutable int			m_nCachedChildCountAtScan;	// childCount() when we last scanned
+
+
 	virtual void		detectCollisions();
 	virtual bool		hookNouns( BaseNode::Ref pNode );				// attach all nouns to update chain
 	virtual void		unhookNouns( BaseNode::Ref pNode );			// detach all nouns from update chain
