@@ -44,9 +44,21 @@ bool PrimitiveSurfaceD3D12::execute()
 	if ( !pDevice )
 		return false;
 
+	// DIAGNOSTIC: trace surface state on first few executes
+	static int s_nSurfaceLog = 0;
+	if ( s_nSurfaceLog < 10 )
+	{
+		TRACE( "Surface::execute type=%d, SRVCreated=%d, SRVIndex=%u, texture=%p, state=%d, pendingMips=%d, beginScene=%d",
+			(int)m_eType, m_bSRVCreated ? 1 : 0, m_SRVIndex, (void*)m_Texture.Get(),
+			(int)m_CurrentState, m_PendingMips.size(), pDevice->m_bBeginScene ? 1 : 0 );
+		++s_nSurfaceLog;
+	}
+
 	// Flush any pending mip uploads into the main command list.
-	// Only safe when inside beginScene/endScene — command list must be open.
-	if ( m_PendingMips.size() > 0 && pDevice->m_bBeginScene )
+	// Only the open-command-list state matters; m_bBeginScene is false during
+	// the OVERLAY pass in present(), but the command list is still open and
+	// flushPendingUploads only needs that.
+	if ( m_PendingMips.size() > 0 && pDevice->m_bCommandListOpen )
 		flushPendingUploads( pDevice );
 
 	// Create the SRV if not yet done
@@ -225,7 +237,7 @@ static DXGI_FORMAT GetDXGIFormat( ColorFormat::Format eFormat )
 	}
 }
 
-static int GetBytesPerPixel( DXGI_FORMAT format )
+int GetBytesPerPixel( DXGI_FORMAT format )
 {
 	switch ( format )
 	{
@@ -249,7 +261,7 @@ static int GetBytesPerPixel( DXGI_FORMAT format )
 
 // Returns the actual bytes per pixel of the SOURCE data (before D3D12 upload).
 // RGB888/RGB888E are 24-bit on disk (3 bytes/pixel) but D3D12 needs 32-bit.
-static int GetNativePixelBytes( ColorFormat::Format eFormat )
+int GetNativePixelBytes( ColorFormat::Format eFormat )
 {
 	if ( eFormat == ColorFormat::RGB888 || eFormat == ColorFormat::RGB888E )
 		return 3;
@@ -257,7 +269,7 @@ static int GetNativePixelBytes( ColorFormat::Format eFormat )
 	return GetBytesPerPixel( dxgi );
 }
 
-static bool IsBlockCompressed( DXGI_FORMAT format )
+bool IsBlockCompressed( DXGI_FORMAT format )
 {
 	return format == DXGI_FORMAT_BC1_UNORM ||
 		   format == DXGI_FORMAT_BC2_UNORM ||
@@ -394,7 +406,23 @@ byte * PrimitiveSurfaceD3D12::lock( int nLevel /*= 0*/ )
 
 	if ( !m_pStagingData )
 	{
-		m_pStagingData = new byte[ sliceSize ];
+		if ( sliceSize == 0 || sliceSize > 64 * 1024 * 1024 )
+		{
+			char buf[256];
+			sprintf_s( buf, "PrimitiveSurfaceD3D12::lock() - Bad sliceSize=%u (size=%dx%d level=%d fmt=%d pitch=%d)!\n",
+				sliceSize, m_Size.width, m_Size.height, nLevel, (int)m_eFormat, m_Pitch );
+			OutputDebugStringA( buf );
+			return NULL;
+		}
+		try {
+			m_pStagingData = new byte[ sliceSize ];
+		} catch ( const std::bad_alloc & ) {
+			char buf[256];
+			sprintf_s( buf, "PrimitiveSurfaceD3D12::lock() - bad_alloc for %u bytes (size=%dx%d level=%d)!\n",
+				sliceSize, m_Size.width, m_Size.height, nLevel );
+			OutputDebugStringA( buf );
+			return NULL;
+		}
 		m_StagingSize = sliceSize;
 		memset( m_pStagingData, 0, sliceSize );
 	}
@@ -423,11 +451,20 @@ bool PrimitiveSurfaceD3D12::unlock()
 	{
 		if ( m_PendingMips[i].mipLevel == m_LockedLevel )
 		{
-			// Same mip level — update data in place
+			// Same mip level (font rendering) — copy so staging buffer can be reused
 			if ( m_PendingMips[i].dataSize != m_StagingSize )
 			{
 				delete[] m_PendingMips[i].pData;
-				m_PendingMips[i].pData = new byte[ m_StagingSize ];
+				m_PendingMips[i].pData = NULL;
+				m_PendingMips[i].dataSize = 0;
+				try {
+					m_PendingMips[i].pData = new byte[ m_StagingSize ];
+				} catch ( const std::bad_alloc & ) {
+					// Remove the corrupt entry so flushPendingUploads doesn't read NULL
+					m_PendingMips.remove( i );
+					m_LockedLevel = -1;
+					return false;
+				}
 			}
 			memcpy( m_PendingMips[i].pData, m_pStagingData, m_StagingSize );
 			m_PendingMips[i].dataSize = m_StagingSize;
@@ -438,15 +475,25 @@ bool PrimitiveSurfaceD3D12::unlock()
 	}
 
 	PendingMip pending;
-	pending.pData    = new byte[ m_StagingSize ];
-	memcpy( pending.pData, m_pStagingData, m_StagingSize );
+	pending.pData    = m_pStagingData;		// transfer ownership — no copy needed
 	pending.dataSize = m_StagingSize;
 	pending.mipLevel = m_LockedLevel;
 	pending.pitch    = m_Pitch;
 	m_PendingMips.push( pending );
 
+	m_pStagingData = NULL;					// staging buffer now owned by PendingMip
+	m_StagingSize = 0;
 	m_LockedLevel = -1;
 	return true;
+}
+
+void PrimitiveSurfaceD3D12::flush()
+{
+	// No-op: texture data is uploaded lazily during execute() via flushPendingUploads().
+	// Synchronous GPU uploads from the loading thread (immediateTextureUpload) cause
+	// deadlocks due to cross-queue fence synchronization issues with the D3D12 debug layer.
+	// PendingMips accumulate in CPU memory until the texture is first rendered, which is
+	// the same behavior the engine had before the upload queue was added.
 }
 
 //------------------------------------------------------------------------------------
@@ -472,6 +519,8 @@ void PrimitiveSurfaceD3D12::flushPendingUploads( DisplayDeviceD3D12 * pDevice )
 	for ( int i = 0; i < (int)m_PendingMips.size(); ++i )
 	{
 		PendingMip & mip = m_PendingMips[i];
+		if ( !mip.pData || mip.dataSize == 0 )
+			continue;
 
 		UINT64 uploadSize = 0;
 		D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
@@ -482,6 +531,8 @@ void PrimitiveSurfaceD3D12::flushPendingUploads( DisplayDeviceD3D12 * pDevice )
 
 		// Use ring buffer for the upload data
 		UploadRingBuffer::Allocation alloc = pDevice->allocateDynamic( (UINT)uploadSize, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT );
+		if ( !alloc.cpuAddress )
+			continue;	// ring buffer overflow — skip this mip, will retry next frame
 
 		byte * pDst = (byte *)alloc.cpuAddress + footprint.Offset;
 		byte * pSrc = mip.pData;
@@ -530,12 +581,20 @@ void PrimitiveSurfaceD3D12::flushPendingUploads( DisplayDeviceD3D12 * pDevice )
 		src.PlacedFootprint = footprint;
 
 		cl->CopyTextureRegion( &dst, 0, 0, 0, &src, nullptr );
+
+		// Mark this mip as consumed so cleanup loop knows it was uploaded
+		delete[] mip.pData;
+		mip.pData = NULL;
+		mip.dataSize = 0;
 	}
 
-	// Free each PendingMip's owned data, then clear the array
-	for ( int i = 0; i < (int)m_PendingMips.size(); ++i )
-		delete[] m_PendingMips[i].pData;
-	m_PendingMips.release();
+	// Remove consumed entries (pData == NULL after successful upload).
+	// Skipped mips (ring buffer overflow) still have valid pData — keep them for retry.
+	for ( int i = (int)m_PendingMips.size() - 1; i >= 0; --i )
+	{
+		if ( m_PendingMips[i].pData == NULL )
+			m_PendingMips.remove( i );
+	}
 
 	// Transition back to PSR so shaders can sample the texture
 	TransitionResource( cl, m_Texture.Get(),

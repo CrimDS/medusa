@@ -202,6 +202,8 @@ bool ShaderD3D12::load( DisplayDeviceD3D12 * pDevice, const char * pShaderName )
 
 	m_nShaderFileTime = FileDisk::fileDate( m_sFullPath );
 
+	TRACE( "ShaderD3D12 loading from path: %s", (const char *)m_sFullPath );
+
 	// Convert path to wide string for D3DCompileFromFile
 	wchar_t wszPath[MAX_PATH];
 	MultiByteToWideChar( CP_ACP, 0, m_sFullPath, -1, wszPath, MAX_PATH );

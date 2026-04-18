@@ -23,7 +23,7 @@ SafeThread::SafeThread( Priority p /*= STANDARD*/, int stack /*= DEFAULT_STACK_S
 int SafeThread::runProxy()
 {
 #if defined(_WIN32) || defined(_XBOX)
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(DISABLE_SEH_HANDLER)
 	__try {
 #endif
 		// run the thread
@@ -33,7 +33,7 @@ int SafeThread::runProxy()
 
 		return n;
 
-#ifndef _DEBUG
+#if !defined(_DEBUG) && !defined(DISABLE_SEH_HANDLER)
 	}
 	__except( ProcessException( GetExceptionInformation() ) )
 	{}

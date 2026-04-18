@@ -12,6 +12,7 @@
 #include "Debug/Trace.h"
 #include "Debug/ExceptionHandler.h"
 #include "Standard/STLHelper.h"
+#include <new>
 
 #include "Factory.h"
 #include "Widget.h"
@@ -146,10 +147,19 @@ bool Factory::loadWidget( const InStream &input, Widget * & pWidget, const Class
 	}
 
 	// Read the properties of the object into the Widget..
-	if ( pWidget != NULL && !pWidget->read( input ) )
+	if ( pWidget != NULL )
 	{
-		LOG_ERROR( "Factory", "Failed to read widget %s", pWidget->factory()->className() );
-		return false;
+		try {
+			if ( !pWidget->read( input ) )
+			{
+				LOG_ERROR( "Factory", "Failed to read widget %s", pWidget->factory()->className() );
+				return false;
+			}
+		}
+		catch ( const std::bad_alloc & ) {
+			LOG_ERROR( "Factory", "Out of memory reading widget %s", pWidget->factory()->className() );
+			return false;
+		}
 	}
 
 	// Lastly, set the key of the loaded object if needed.

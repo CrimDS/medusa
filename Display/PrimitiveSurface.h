@@ -63,6 +63,7 @@ public:
 
 	virtual byte *			lock( int nLevel = 0 ) = 0;			// returns pixel data pointer
 	virtual bool			unlock() = 0;
+	virtual void			flush() {}							// flush pending uploads to GPU immediately
 
 	// Static
 	static bool				sm_bEnableLightMaps;				// are lightmaps enabled

@@ -369,7 +369,12 @@ int Broker::loadingThread()
 
 					//LOG( CharString().format("loadingThread() - Loading Widget %s", nLoadKey.string() ) );
 
-					pWidget = pBroker->load( nLoadKey );
+					try {
+						pWidget = pBroker->load( nLoadKey );
+					}
+					catch ( ... ) {
+						pWidget = NULL;
+					}
 
 					sm_Lock.lock();
 					sm_BlockingLoadSet.erase( nLoadKey );

@@ -251,8 +251,9 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 			return false;
 		}
 
-		// Allocate RTV
-		m_nBloomRTVIndex[i] = pDevice->m_RTVHeap.Allocate();
+		// Allocate RTV — reuse existing index if already allocated (resize case)
+		if ( m_nBloomRTVIndex[i] == UINT(-1) )
+			m_nBloomRTVIndex[i] = pDevice->m_RTVHeap.Allocate();
 		if ( m_nBloomRTVIndex[i] == UINT(-1) )
 		{
 			TRACE( "Bloom: Failed to allocate RTV %d", i );
@@ -261,8 +262,9 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 		pDevice->getDevice()->CreateRenderTargetView( m_pBloomTextures[i].Get(), nullptr,
 			pDevice->m_RTVHeap.GetCPUHandle( m_nBloomRTVIndex[i] ) );
 
-		// Allocate SRV in staging heap
-		m_nBloomSRVIndex[i] = pDevice->m_SRVStagingHeap.Allocate();
+		// Allocate SRV in staging heap — reuse existing index if already allocated
+		if ( m_nBloomSRVIndex[i] == UINT(-1) )
+			m_nBloomSRVIndex[i] = pDevice->m_SRVStagingHeap.Allocate();
 		if ( m_nBloomSRVIndex[i] == UINT(-1) )
 		{
 			TRACE( "Bloom: Failed to allocate SRV %d", i );
@@ -341,8 +343,12 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	cl->SetGraphicsRootDescriptorTable( 2, pDev->m_SamplerHeap.GetGPUHandle( 0 ) );
 
 	// --- Step 1: Bright pass (m_pSceneRT → bloom[0]) ---
-	TransitionResource( cl, pDev->m_pSceneRT.Get(),
-		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+	if ( pDev->m_bSceneRTisRT )
+	{
+		TransitionResource( cl, pDev->m_pSceneRT.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+		pDev->m_bSceneRTisRT = false;
+	}
 	TransitionResource( cl, m_pBloomTextures[0].Get(),
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
@@ -437,8 +443,12 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	// --- Step 3: Additive composite (bloom[0] → m_pSceneRT with additive blending) ---
 	TransitionResource( cl, m_pBloomTextures[0].Get(),
 		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
-	TransitionResource( cl, pDev->m_pSceneRT.Get(),
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+	if ( !pDev->m_bSceneRTisRT )
+	{
+		TransitionResource( cl, pDev->m_pSceneRT.Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+		pDev->m_bSceneRTisRT = true;
+	}
 
 	// Bind bloom[0] as input
 	UINT bloomSRVFinal = pDev->m_nSRVFrameOffset++;

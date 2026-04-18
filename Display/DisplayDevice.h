@@ -46,6 +46,7 @@ public:
 		BACKGROUND = 0,			// background polygons
 		PRIMARY = 1,			// opaque polygons
 		SECONDARY = 2,			// translucent polygons, particle systems, etc
+		OVERLAY = 3,			// UI overlay — executed after post-processing (e.g. FXAA) so text stays crisp
 
 		PASS_COUNT,
 	};

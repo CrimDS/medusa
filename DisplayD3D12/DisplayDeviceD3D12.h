@@ -36,7 +36,7 @@ public:
 	enum {
 		PRIMITIVE_STACK_SIZE	= 1024 * 8,
 		DYNAMIC_VB_SIZE			= 1024 * 1024 * 64, 		// 64MB ring buffer per frame
-		DYNAMIC_CB_SIZE			= 1024 * 1024 * 4, 		// 4MB for constant buffers per frame
+		DYNAMIC_CB_SIZE			= 1024 * 1024 * 8, 		// 8MB for constant buffers per frame
 		MAX_SRV_DESCRIPTORS		= 4096,
 		MAX_SAMPLER_DESCRIPTORS	= 64,
 		MAX_RTV_DESCRIPTORS		= 32,
@@ -151,6 +151,15 @@ public:
 	void							bindPerMaterialCB( const CBPerMaterial & mat );
 	void							bindPerLightCB( const CBPerLight & light );
 
+	// Rebind the main root signature, descriptor heaps, and default CBV/SRV/Sampler
+	// root parameters.  Called from beginScene on fresh command lists, and again
+	// before the OVERLAY pass in present() after applyFXAA() swapped the root sig.
+	void							bindMainRootDefaults();
+
+	// Drain the D3D12 InfoQueue (if debug layer is active) and log any validation
+	// messages.  Called from present() so errors are visible in Client.log.
+	void							drainInfoQueue();
+
 	// Get filter mode as D3D12 filter type
 	D3D12_FILTER					getD3D12Filter() const;
 
@@ -244,6 +253,7 @@ public:
 	ComPtr<IDXGIFactory4>			m_pDXGIFactory;
 	ComPtr<IDXGIAdapter1>			m_pAdapter;
 	ComPtr<ID3D12Device>			m_pDevice;
+	ComPtr<ID3D12InfoQueue>			m_pInfoQueue;		// debug layer validation messages (optional)
 	ComPtr<ID3D12CommandQueue>		m_pCommandQueue;
 	ComPtr<IDXGISwapChain3>			m_pSwapChain;
 
@@ -257,6 +267,7 @@ public:
 	// Synchronization
 	ComPtr<ID3D12Fence>				m_pFence;
 	UINT64							m_nFenceValues[FRAME_COUNT];
+	UINT64							m_nAllocatorFence[FRAME_COUNT];	// fence value signaled after each allocator's last submission
 	HANDLE							m_hFenceEvent;
 
 	// Descriptor heaps
@@ -265,6 +276,10 @@ public:
 	DescriptorHeap					m_SRVHeap;			// shader-visible for textures/CBVs
 	DescriptorHeap					m_SamplerHeap;		// shader-visible for samplers
 	DescriptorHeap					m_SRVStagingHeap;	// CPU-only staging for texture creation
+
+	// Tracked descriptor indices (for reuse on resize instead of leaking)
+	UINT							m_nRTVIndices[FRAME_COUNT];	// swap chain RTV indices
+	UINT							m_nDSVIndex;				// depth stencil DSV index
 
 	// Per-frame dynamic buffers
 	UploadRingBuffer				m_DynamicVB[FRAME_COUNT];
@@ -350,6 +365,15 @@ public:
 	bool							m_bRenderingShadowMap;	// true during shadow map geometry rendering
 	bool							m_bShadowMapInRTState;	// true when shadow map resource is in RENDER_TARGET state
 
+	// Dedicated upload queue for immediate texture uploads from loading thread
+	ComPtr<ID3D12CommandQueue>		m_pUploadQueue;
+	ComPtr<ID3D12CommandAllocator>	m_pUploadAllocator;
+	ComPtr<ID3D12GraphicsCommandList> m_pUploadCommandList;
+	ComPtr<ID3D12Fence>				m_pUploadFence;
+	UINT64							m_nUploadFenceValue;
+	HANDLE							m_hUploadFenceEvent;
+	CriticalSection					m_UploadCS;
+
 	// FXAA post-process
 	ComPtr<ID3D12Resource>			m_pSceneRT;				// intermediate render target for FXAA
 	UINT							m_nSceneRTVIndex;		// RTV index in m_RTVHeap
@@ -358,6 +382,7 @@ public:
 	ComPtr<ID3D12PipelineState>		m_pFXAAPSO;
 	ComPtr<ID3D12RootSignature>		m_pFXAARootSig;
 	bool							m_bFXAAEnabled;
+	bool							m_bSceneRTisRT;			// true when m_pSceneRT is in RENDER_TARGET state
 
 	// Static
 	static ModeList					sm_ModeList;
@@ -382,6 +407,8 @@ public:
 	void							moveToNextFrame();
 	void							flushCommandList();
 	void							resetCommandList();
+	bool							initUploadQueue();
+	void							immediateTextureUpload( class PrimitiveSurfaceD3D12 * pSurface );
 
 	void							updateProjection();
 	void							enumerateTextures();

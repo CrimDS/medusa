@@ -16,6 +16,7 @@
 #include "Math/Plane.h"
 #include "Math/SphericalHull.h"
 #include "Standard/Limits.h"
+#include "Standard/AutoLock.h"
 #include "Draw/ImageCodec.h"
 
 #include "Display/Types.h"
@@ -26,8 +27,14 @@
 #include "PrimitiveWindowD3D12.h"
 #include "DisplayEffectHDR.h"
 #include "DisplayEffectBlur.h"
+#include "DisplayEffectSSAO.h"
 
 #include <math.h>
+
+// Forward declarations for texture helpers defined in PrimitiveSurfaceD3D12.cpp
+int  GetNativePixelBytes( ColorFormat::Format eFormat );
+int  GetBytesPerPixel( DXGI_FORMAT format );
+bool IsBlockCompressed( DXGI_FORMAT format );
 
 //---------------------------------------------------------------------------------------------------
 
@@ -85,12 +92,19 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_nSceneRTVIndex( UINT(-1) ),
 	m_nSceneSRVIndex( UINT(-1) ),
 	m_bFXAAEnabled( true ),
+	m_bSceneRTisRT( false ),
 	m_nShadowMapDSVIndex( UINT(-1) ),
-	m_nShadowMapSRVStagingIndex( UINT(-1) )
+	m_nShadowMapSRVStagingIndex( UINT(-1) ),
+	m_nDepthSRVIndex( UINT(-1) ),
+	m_nUploadFenceValue( 0 ),
+	m_hUploadFenceEvent( NULL ),
+	m_nDSVIndex( UINT(-1) )
 {
+	memset( m_nRTVIndices, 0xff, sizeof(m_nRTVIndices) );
 	TRACE( "DisplayDeviceD3D12 created!" );
 
 	memset( m_nFenceValues, 0, sizeof(m_nFenceValues) );
+	memset( m_nAllocatorFence, 0, sizeof(m_nAllocatorFence) );
 
 	m_mView = XMMatrixIdentity();
 	m_mProj = XMMatrixIdentity();
@@ -103,6 +117,7 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	// Register supported effects
 	registerEffect( "HDR", DisplayEffectHDRD3D12::staticFactory() );
 	registerEffect( "BLUR", DisplayEffectBlurD3D12::staticFactory() );
+	registerEffect( "SSAO", DisplayEffectSSAOD3D12::staticFactory() );
 }
 
 DisplayDeviceD3D12::~DisplayDeviceD3D12()
@@ -498,9 +513,12 @@ bool DisplayDeviceD3D12::beginScene()
 			// Also clear the FXAA scene RT if enabled
 			if ( m_bFXAAEnabled && m_pSceneRT )
 			{
-				// Transition scene RT to render target for clearing
-				TransitionResource( m_pCommandList.Get(), m_pSceneRT.Get(),
-					D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+				if ( !m_bSceneRTisRT )
+				{
+					TransitionResource( m_pCommandList.Get(), m_pSceneRT.Get(),
+						D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+					m_bSceneRTisRT = true;
+				}
 				D3D12_CPU_DESCRIPTOR_HANDLE sceneRTV = m_RTVHeap.GetCPUHandle( m_nSceneRTVIndex );
 				m_pCommandList->ClearRenderTargetView( sceneRTV, black, 0, nullptr );
 			}
@@ -539,38 +557,8 @@ bool DisplayDeviceD3D12::beginScene()
 			m_CBPerFrame.mProjOrtho = ShaderMatrix( ortho );
 		}
 
-		// Set root signature and descriptor heaps once per frame
-		m_pCommandList->SetGraphicsRootSignature( m_pRootSignature.Get() );
-		ID3D12DescriptorHeap * heaps[] = { m_SRVHeap.Get(), m_SamplerHeap.Get() };
-		m_pCommandList->SetDescriptorHeaps( _countof(heaps), heaps );
-
-		// Bind descriptor tables for SRVs [4] and samplers [5]
-		m_pCommandList->SetGraphicsRootDescriptorTable( 4, m_SRVHeap.GetGPUHandle( 0 ) );
-		m_pCommandList->SetGraphicsRootDescriptorTable( 5, m_SamplerHeap.GetGPUHandle( 0 ) );
-
-		// Bind the per-frame constant buffer
-		bindPerFrameCB();
-
-		// Bind default per-object, per-material, and per-light CBs so that all
-		// root parameters are valid before any draw call.  Without this, the GPU
-		// reads garbage if a draw fires before the material/transform sets them.
-		{
-			m_mCurrentWorld = XMMatrixIdentity();
-			m_CBPerObject.mWorld = ShaderMatrix( m_mCurrentWorld );
-			bindPerObjectCB();
-
-			CBPerMaterial defaultMat = {};
-			defaultMat.vMatDiffuse = ShaderFloat4( 1, 1, 1, 1 );
-			defaultMat.vMatAmbient = ShaderFloat4( 1, 1, 1, 1 );
-			defaultMat.bEnableAmbient = 1;
-			bindPerMaterialCB( defaultMat );
-
-			CBPerLight defaultLight = {};
-			defaultLight.nLightType = 3;		// directional
-			defaultLight.vLightDiffuse = ShaderFloat4( 1, 1, 1, 1 );
-			defaultLight.vLightDirection = ShaderFloat4( 0, -1, 0, 0 );
-			bindPerLightCB( defaultLight );
-		}
+		// Set root signature, descriptor heaps, and default CBV/SRV/Sampler bindings
+		bindMainRootDefaults();
 	}
 	// else: sub-render call — command list is already open, reuse it
 
@@ -578,9 +566,13 @@ bool DisplayDeviceD3D12::beginScene()
 	// When FXAA is enabled, render to the intermediate scene RT instead of the swap chain
 	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
 	if ( m_bFXAAEnabled && m_pSceneRT )
+	{
 		rtvHandle = m_RTVHeap.GetCPUHandle( m_nSceneRTVIndex );
+	}
 	else
+	{
 		rtvHandle = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
+	}
 	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_DSVHeap.GetCPUHandle( 0 );
 	m_pCommandList->OMSetRenderTargets( 1, &rtvHandle, FALSE, &dsvHandle );
 
@@ -871,8 +863,9 @@ bool DisplayDeviceD3D12::endScene()
 			++iEffect;
 	}
 
-	// Execute all material stacks in order
-	for ( int i = 0; i < PASS_COUNT; ++i )
+	// Execute material stacks for 3D passes only — OVERLAY is deferred until
+	// after post-processing so UI text stays crisp (FXAA would blur it).
+	for ( int i = 0; i < OVERLAY; ++i )
 	{
 		Array< PrimitiveMaterial::Ref > & materials = m_Stack[i];
 		for ( int j = 0; j < materials.size(); ++j )
@@ -925,9 +918,53 @@ void DisplayDeviceD3D12::present()
 
 	if ( m_bCommandListOpen )
 	{
-		// Apply FXAA: resolve scene RT → swap chain back buffer
+		// Apply FXAA: resolve scene RT → swap chain back buffer.
+		// applyFXAA() also binds the back buffer as the current RTV and leaves the
+		// scene RT in the PIXEL_SHADER_RESOURCE state.
 		if ( m_bFXAAEnabled && m_pSceneRT )
 			applyFXAA();
+
+		// Render the OVERLAY pass on top of the post-processed image, so UI stays crisp.
+		// When FXAA is enabled, applyFXAA() already bound the back buffer as the RTV;
+		// when disabled, the back buffer is still bound from beginScene.
+		//
+		// applyFXAA() swaps the root signature to m_pFXAARootSig, which only has
+		// 3 parameters — materials assume the main root signature (6 parameters)
+		// and would crash on SetGraphicsRootDescriptorTable(4, ...) otherwise.
+		// Only rebind when FXAA actually ran; if disabled, beginScene's bindings
+		// are still in effect.
+		{
+			Array< PrimitiveMaterial::Ref > & materials = m_Stack[ OVERLAY ];
+
+			if ( materials.size() > 0 && m_bFXAAEnabled && m_pSceneRT )
+				bindMainRootDefaults();
+
+			static int s_nOverlayLog = 0;
+			for ( int j = 0; j < materials.size(); ++j )
+			{
+				PrimitiveMaterial * pMaterial = materials[j];
+
+				if ( s_nOverlayLog < 3 )
+				{
+					PrimitiveMaterialD3D12 * pMat12 = (PrimitiveMaterialD3D12 *)pMaterial;
+					TRACE( "OVERLAY exec[%d]: pass=%d, children=%d, blend=%d, lightEn=%d",
+						j, pMat12->pass(), pMat12->m_Children.size(),
+						(int)pMat12->m_Blending, pMat12->m_LightEnable ? 1 : 0 );
+					// Dump ortho matrix — if any value is huge/NaN, mProjOrtho is corrupted.
+					const DirectX::XMFLOAT4X4 & m = m_CBPerFrame.mProjOrtho.m;
+					TRACE( "  ortho row0: %.4f %.4f %.4f %.4f", m._11, m._12, m._13, m._14 );
+					TRACE( "  ortho row1: %.4f %.4f %.4f %.4f", m._21, m._22, m._23, m._24 );
+					TRACE( "  ortho row3: %.4f %.4f %.4f %.4f", m._41, m._42, m._43, m._44 );
+					TRACE( "  frameIdx=%d, rw=%dx%d", m_nFrameIndex,
+						renderWindow().width(), renderWindow().height() );
+					++s_nOverlayLog;
+				}
+
+				pMaterial->execute();
+				pMaterial->clear();
+			}
+			materials.release();
+		}
 
 		// Transition render target to present state and close the command list
 		TransitionResource( m_pCommandList.Get(), m_pRenderTargets[m_nFrameIndex].Get(),
@@ -944,6 +981,8 @@ void DisplayDeviceD3D12::present()
 
 	moveToNextFrame();
 	updateClientArea( true );
+
+	drainInfoQueue();
 
 	PROFILE_END();
 }
@@ -1475,6 +1514,102 @@ void DisplayDeviceD3D12::bindPerLightCB( const CBPerLight & light )
 	m_pCommandList->SetGraphicsRootConstantBufferView( 3, alloc.gpuAddress );
 }
 
+void DisplayDeviceD3D12::drainInfoQueue()
+{
+	if ( !m_pInfoQueue )
+		return;
+
+	UINT64 count = m_pInfoQueue->GetNumStoredMessages();
+	if ( count == 0 )
+		return;
+
+	static int s_nDrainLog = 0;
+	for ( UINT64 i = 0; i < count; ++i )
+	{
+		SIZE_T messageLength = 0;
+		m_pInfoQueue->GetMessage( i, nullptr, &messageLength );
+		if ( messageLength == 0 )
+			continue;
+
+		D3D12_MESSAGE * pMessage = (D3D12_MESSAGE *)malloc( messageLength );
+		if ( pMessage && SUCCEEDED(m_pInfoQueue->GetMessage( i, pMessage, &messageLength )) )
+		{
+			// Only log warnings/errors/corruption to keep log manageable
+			if ( pMessage->Severity <= D3D12_MESSAGE_SEVERITY_WARNING )
+			{
+				if ( s_nDrainLog < 50 )
+				{
+					TRACE( "D3D12 [%s] %s",
+						pMessage->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION ? "CORRUPTION" :
+						pMessage->Severity == D3D12_MESSAGE_SEVERITY_ERROR      ? "ERROR" :
+						pMessage->Severity == D3D12_MESSAGE_SEVERITY_WARNING    ? "WARNING" : "INFO",
+						pMessage->pDescription );
+					++s_nDrainLog;
+				}
+			}
+		}
+		if ( pMessage )
+			free( pMessage );
+	}
+
+	m_pInfoQueue->ClearStoredMessages();
+}
+
+void DisplayDeviceD3D12::bindMainRootDefaults()
+{
+	if ( !m_bCommandListOpen )
+		return;
+
+	m_pCommandList->SetGraphicsRootSignature( m_pRootSignature.Get() );
+	ID3D12DescriptorHeap * heaps[] = { m_SRVHeap.Get(), m_SamplerHeap.Get() };
+	m_pCommandList->SetDescriptorHeaps( _countof(heaps), heaps );
+
+	// Bind descriptor tables for SRVs [4] and samplers [5]
+	m_pCommandList->SetGraphicsRootDescriptorTable( 4, m_SRVHeap.GetGPUHandle( 0 ) );
+	m_pCommandList->SetGraphicsRootDescriptorTable( 5, m_SamplerHeap.GetGPUHandle( 0 ) );
+
+	// Bind the per-frame constant buffer
+	bindPerFrameCB();
+
+	// Bind default per-object, per-material, and per-light CBs so that all
+	// root parameters are valid before any draw call.  Without this, the GPU
+	// reads garbage if a draw fires before the material/transform sets them.
+	m_mCurrentWorld = XMMatrixIdentity();
+	m_CBPerObject.mWorld = ShaderMatrix( m_mCurrentWorld );
+	bindPerObjectCB();
+
+	CBPerMaterial defaultMat = {};
+	defaultMat.vMatDiffuse = ShaderFloat4( 1, 1, 1, 1 );
+	defaultMat.vMatAmbient = ShaderFloat4( 1, 1, 1, 1 );
+	defaultMat.bEnableAmbient = 1;
+	bindPerMaterialCB( defaultMat );
+
+	CBPerLight defaultLight = {};
+	defaultLight.nLightType = 3;		// directional
+	defaultLight.vLightDiffuse = ShaderFloat4( 1, 1, 1, 1 );
+	defaultLight.vLightDirection = ShaderFloat4( 0, -1, 0, 0 );
+	bindPerLightCB( defaultLight );
+
+	// Explicitly rebind the back buffer as the render target with no DSV.
+	// TL materials (UI, fonts) use PSOs with dsvFormat=UNKNOWN.  applyFXAA
+	// already bound this, but be explicit so OVERLAY is independent of FXAA state.
+	D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
+	m_pCommandList->OMSetRenderTargets( 1, &rtv, FALSE, nullptr );
+
+	// Set a full-window viewport; bindPSO for IL_VERTEXTL resets this per-draw
+	// anyway, but makes OVERLAY safe even before a TL PSO is bound.
+	RectInt rw = renderWindow();
+	D3D12_VIEWPORT viewport = {};
+	viewport.Width = (float)rw.width();
+	viewport.Height = (float)rw.height();
+	viewport.MinDepth = 0.0f;
+	viewport.MaxDepth = 1.0f;
+	m_pCommandList->RSSetViewports( 1, &viewport );
+
+	D3D12_RECT scissor = { 0, 0, (LONG)rw.width(), (LONG)rw.height() };
+	m_pCommandList->RSSetScissorRects( 1, &scissor );
+}
+
 D3D12_FILTER DisplayDeviceD3D12::getD3D12Filter() const
 {
 	switch ( m_eFilterMode )
@@ -1496,20 +1631,22 @@ bool DisplayDeviceD3D12::initializeD3D12()
 	// Initialize COM
 	CoInitializeEx( NULL, COINIT_MULTITHREADED );
 
-#if defined(_DEBUG)
-	// Enable debug layer
+	// Enable debug layer (temporarily unconditional for OVERLAY-pass diagnostics)
 	{
 		ComPtr<ID3D12Debug> debugController;
 		if ( SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))) )
+		{
 			debugController->EnableDebugLayer();
+			TRACE( "D3D12 debug layer enabled" );
+		}
+		else
+		{
+			TRACE( "D3D12 debug layer NOT available — install Graphics Tools feature" );
+		}
 	}
-#endif
 
 	// Create DXGI factory
-	UINT dxgiFlags = 0;
-#if defined(_DEBUG)
-	dxgiFlags = DXGI_CREATE_FACTORY_DEBUG;
-#endif
+	UINT dxgiFlags = DXGI_CREATE_FACTORY_DEBUG;
 	if ( FAILED(CreateDXGIFactory2(dxgiFlags, IID_PPV_ARGS(&m_pDXGIFactory))) )
 		return false;
 
@@ -1539,6 +1676,15 @@ bool DisplayDeviceD3D12::initializeD3D12()
 	// Create device
 	if ( FAILED(D3D12CreateDevice(m_pAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_pDevice))) )
 		return false;
+
+	// Query the info queue so we can drain validation messages each frame.
+	// Requires the debug layer to be enabled.
+	if ( SUCCEEDED(m_pDevice->QueryInterface(IID_PPV_ARGS(&m_pInfoQueue))) )
+	{
+		m_pInfoQueue->SetBreakOnSeverity( D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE );
+		m_pInfoQueue->SetBreakOnSeverity( D3D12_MESSAGE_SEVERITY_ERROR, FALSE );
+		TRACE( "D3D12 InfoQueue available — validation messages will be logged" );
+	}
 
 	// Log adapter info
 	{
@@ -1668,11 +1814,15 @@ bool DisplayDeviceD3D12::initializeD3D12()
 	D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
 	m_pDevice->CheckFeatureSupport( D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options) );
 
-	// Create FXAA post-process resources
+	// Update client area first so renderWindow() returns valid dimensions
+	updateClientArea( false );
+
+	// Create dedicated upload queue for loading thread texture uploads
+	initUploadQueue();
+
+	// Create FXAA post-process resources (needs valid window size)
 	if ( m_bFXAAEnabled )
 		createFXAA();
-
-	updateClientArea( false );
 
 	return true;
 }
@@ -1734,8 +1884,10 @@ bool DisplayDeviceD3D12::createRenderTargets()
 		if ( FAILED(m_pSwapChain->GetBuffer(i, IID_PPV_ARGS(&m_pRenderTargets[i]))) )
 			return false;
 
-		UINT rtvIndex = m_RTVHeap.Allocate();
-		m_pDevice->CreateRenderTargetView( m_pRenderTargets[i].Get(), nullptr, m_RTVHeap.GetCPUHandle(rtvIndex) );
+		// Reuse existing RTV index if already allocated (e.g. on resize)
+		if ( m_nRTVIndices[i] == UINT(-1) )
+			m_nRTVIndices[i] = m_RTVHeap.Allocate();
+		m_pDevice->CreateRenderTargetView( m_pRenderTargets[i].Get(), nullptr, m_RTVHeap.GetCPUHandle(m_nRTVIndices[i]) );
 	}
 	return true;
 }
@@ -1771,11 +1923,14 @@ bool DisplayDeviceD3D12::createDepthStencil()
 	dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
 	dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
 
-	UINT dsvIndex = m_DSVHeap.Allocate();
-	m_pDevice->CreateDepthStencilView( m_pDepthStencil.Get(), &dsvDesc, m_DSVHeap.GetCPUHandle(dsvIndex) );
+	// Reuse existing DSV index if already allocated (e.g. on resize)
+	if ( m_nDSVIndex == UINT(-1) )
+		m_nDSVIndex = m_DSVHeap.Allocate();
+	m_pDevice->CreateDepthStencilView( m_pDepthStencil.Get(), &dsvDesc, m_DSVHeap.GetCPUHandle(m_nDSVIndex) );
 
-	// Create SRV for depth buffer (for SSAO post-process)
-	m_nDepthSRVIndex = m_SRVStagingHeap.Allocate();
+	// Create SRV for depth buffer (for SSAO post-process) — reuse existing slot
+	if ( m_nDepthSRVIndex == UINT(-1) )
+		m_nDepthSRVIndex = m_SRVStagingHeap.Allocate();
 	if ( m_nDepthSRVIndex != UINT(-1) )
 	{
 		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
@@ -1936,6 +2091,17 @@ void DisplayDeviceD3D12::freeD3D12()
 
 	m_PSOCache.clear();
 
+	// Upload queue cleanup
+	m_pUploadCommandList.Reset();
+	m_pUploadAllocator.Reset();
+	m_pUploadQueue.Reset();
+	m_pUploadFence.Reset();
+	if ( m_hUploadFenceEvent )
+	{
+		CloseHandle( m_hUploadFenceEvent );
+		m_hUploadFenceEvent = NULL;
+	}
+
 	// FXAA cleanup
 	m_pSceneRT.Reset();
 	m_pFXAAPSO.Reset();
@@ -2016,7 +2182,9 @@ bool DisplayDeviceD3D12::readyShadowMap()
 		return false;
 	}
 
-	m_nShadowMapDSVIndex = m_RTVHeap.Allocate();
+	// Reuse existing heap indices if already allocated (shadow map size change)
+	if ( m_nShadowMapDSVIndex == UINT(-1) )
+		m_nShadowMapDSVIndex = m_RTVHeap.Allocate();
 	if ( m_nShadowMapDSVIndex == UINT(-1) )
 	{
 		TRACE( "readyShadowMap: Failed to allocate cascade 0 RTV" );
@@ -2030,7 +2198,8 @@ bool DisplayDeviceD3D12::readyShadowMap()
 	m_pDevice->CreateRenderTargetView( m_pShadowMapDepth.Get(), &rtvDesc,
 		m_RTVHeap.GetCPUHandle( m_nShadowMapDSVIndex ) );
 
-	m_nShadowMapSRVStagingIndex = m_SRVStagingHeap.Allocate();
+	if ( m_nShadowMapSRVStagingIndex == UINT(-1) )
+		m_nShadowMapSRVStagingIndex = m_SRVStagingHeap.Allocate();
 	if ( m_nShadowMapSRVStagingIndex == UINT(-1) )
 	{
 		TRACE( "readyShadowMap: Failed to allocate cascade 0 SRV" );
@@ -2065,34 +2234,265 @@ void DisplayDeviceD3D12::waitForGPU()
 
 	const UINT64 fence = m_nFenceValues[m_nFrameIndex];
 	m_pCommandQueue->Signal( m_pFence.Get(), fence );
-	m_nFenceValues[m_nFrameIndex]++;
 
 	if ( m_pFence->GetCompletedValue() < fence )
 	{
 		m_pFence->SetEventOnCompletion( fence, m_hFenceEvent );
 		WaitForSingleObject( m_hFenceEvent, INFINITE );
 	}
+
+	// All GPU work is now complete.  Synchronize ALL frame slots to the same
+	// next value so that moveToNextFrame() never signals a value LOWER than
+	// the fence's current completed value (which would make it go backward
+	// and cause subsequent waits to deadlock).
+	const UINT64 nextValue = fence + 1;
+	for ( UINT i = 0; i < FRAME_COUNT; i++ )
+	{
+		m_nFenceValues[i] = nextValue;
+		m_nAllocatorFence[i] = 0;	// all allocators are now safe to reset
+	}
 }
 
 void DisplayDeviceD3D12::moveToNextFrame()
 {
+	const UINT oldFrame = m_nFrameIndex;
 	const UINT64 currentFenceValue = m_nFenceValues[m_nFrameIndex];
 	m_pCommandQueue->Signal( m_pFence.Get(), currentFenceValue );
 
+	// Record that this allocator's commands will be done when fence reaches currentFenceValue
+	m_nAllocatorFence[oldFrame] = currentFenceValue;
+
 	m_nFrameIndex = m_pSwapChain->GetCurrentBackBufferIndex();
 
-	if ( m_pFence->GetCompletedValue() < m_nFenceValues[m_nFrameIndex] )
+	// Wait for the new frame's allocator to be free (its previous submission must be done)
+	if ( m_pFence->GetCompletedValue() < m_nAllocatorFence[m_nFrameIndex] )
 	{
-		m_pFence->SetEventOnCompletion( m_nFenceValues[m_nFrameIndex], m_hFenceEvent );
-		DWORD result = WaitForSingleObject( m_hFenceEvent, 5000 );
-		if ( result == WAIT_TIMEOUT )
-		{
-			HRESULT reason = m_pDevice ? m_pDevice->GetDeviceRemovedReason() : S_OK;
-			TRACE( CharString().format( "DisplayDeviceD3D12::moveToNextFrame() - GPU fence timeout! DeviceRemovedReason=0x%08X", reason ) );
-		}
+		m_pFence->SetEventOnCompletion( m_nAllocatorFence[m_nFrameIndex], m_hFenceEvent );
+		WaitForSingleObject( m_hFenceEvent, INFINITE );
 	}
 
 	m_nFenceValues[m_nFrameIndex] = currentFenceValue + 1;
+}
+
+bool DisplayDeviceD3D12::initUploadQueue()
+{
+	// Create a COPY command queue — copy queues can only do copy operations,
+	// avoiding debug-layer validation issues and resource state conflicts with the render queue.
+	// Resources implicitly promote/decay to COMMON state on copy queues.
+	D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_COPY;
+	queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+	HRESULT hr = m_pDevice->CreateCommandQueue( &queueDesc, IID_PPV_ARGS(&m_pUploadQueue) );
+	if ( FAILED(hr) )
+		return false;
+
+	hr = m_pDevice->CreateCommandAllocator(
+		D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&m_pUploadAllocator) );
+	if ( FAILED(hr) )
+		return false;
+
+	hr = m_pDevice->CreateCommandList( 0, D3D12_COMMAND_LIST_TYPE_COPY,
+		m_pUploadAllocator.Get(), nullptr, IID_PPV_ARGS(&m_pUploadCommandList) );
+	if ( FAILED(hr) )
+		return false;
+	m_pUploadCommandList->Close();
+
+	hr = m_pDevice->CreateFence( 0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_pUploadFence) );
+	if ( FAILED(hr) )
+		return false;
+	m_nUploadFenceValue = 0;
+	m_hUploadFenceEvent = CreateEvent( nullptr, FALSE, FALSE, nullptr );
+
+	TRACE( "Upload queue initialized for immediate texture uploads." );
+	return true;
+}
+
+void DisplayDeviceD3D12::immediateTextureUpload( PrimitiveSurfaceD3D12 * pSurface )
+{
+	if ( !pSurface || pSurface->m_PendingMips.size() == 0 || !pSurface->m_Texture )
+		return;
+	if ( !m_pUploadCommandList || !m_pUploadAllocator )
+		return;
+
+	AutoLock lock( &m_UploadCS );
+
+	// Wait for any previous upload to complete
+	if ( m_pUploadFence->GetCompletedValue() < m_nUploadFenceValue )
+	{
+		m_pUploadFence->SetEventOnCompletion( m_nUploadFenceValue, m_hUploadFenceEvent );
+		DWORD result = WaitForSingleObject( m_hUploadFenceEvent, 10000 );
+		if ( result == WAIT_TIMEOUT )
+		{
+			TRACE( "DisplayDeviceD3D12::immediateTextureUpload() - Upload fence timeout waiting for previous upload!" );
+			return;
+		}
+	}
+
+	// Reset and open the upload command list
+	m_pUploadAllocator->Reset();
+	m_pUploadCommandList->Reset( m_pUploadAllocator.Get(), nullptr );
+
+	// COPY queues don't support resource barriers — resources implicitly promote
+	// from COMMON to COPY_DEST when written by a copy operation.
+	// The resource was created in COPY_DEST state, and after previous copy queue
+	// work it decays to COMMON, which promotes automatically.
+
+	D3D12_RESOURCE_DESC texDesc = pSurface->m_Texture->GetDesc();
+
+	// Calculate total upload buffer size needed
+	UINT64 totalUploadSize = 0;
+	for ( int i = 0; i < (int)pSurface->m_PendingMips.size(); ++i )
+	{
+		UINT64 mipSize = 0;
+		m_pDevice->GetCopyableFootprints( &texDesc, pSurface->m_PendingMips[i].mipLevel, 1, 0,
+			nullptr, nullptr, nullptr, &mipSize );
+		totalUploadSize += (mipSize + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1)
+			& ~(UINT64)(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+	}
+
+	// Create a temporary upload buffer
+	ComPtr<ID3D12Resource> uploadBuffer;
+	D3D12_HEAP_PROPERTIES uploadHeap = {};
+	uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+	D3D12_RESOURCE_DESC bufDesc = {};
+	bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	bufDesc.Width = totalUploadSize;
+	bufDesc.Height = 1;
+	bufDesc.DepthOrArraySize = 1;
+	bufDesc.MipLevels = 1;
+	bufDesc.SampleDesc.Count = 1;
+	bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+	HRESULT hr = m_pDevice->CreateCommittedResource(
+		&uploadHeap, D3D12_HEAP_FLAG_NONE, &bufDesc,
+		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer) );
+	if ( FAILED(hr) )
+	{
+		m_pUploadCommandList->Close();
+		// Free PendingMips to reclaim memory even if upload fails
+		for ( int i = 0; i < (int)pSurface->m_PendingMips.size(); ++i )
+			delete[] pSurface->m_PendingMips[i].pData;
+		pSurface->m_PendingMips.release();
+		return;
+	}
+
+	byte * pUploadBase = nullptr;
+	uploadBuffer->Map( 0, nullptr, (void **)&pUploadBase );
+
+	UINT64 bufferOffset = 0;
+	int nativeBPP = GetNativePixelBytes( pSurface->m_eFormat );
+	int dxgiBPP   = GetBytesPerPixel( pSurface->m_DXGIFormat );
+	bool bExpand = !IsBlockCompressed( pSurface->m_DXGIFormat )
+		&& (nativeBPP != dxgiBPP) && (nativeBPP > 0) && (dxgiBPP > 0);
+
+	for ( int i = 0; i < (int)pSurface->m_PendingMips.size(); ++i )
+	{
+		PrimitiveSurfaceD3D12::PendingMip & mip = pSurface->m_PendingMips[i];
+		if ( !mip.pData || mip.dataSize == 0 )
+			continue;
+
+		// Align offset
+		bufferOffset = (bufferOffset + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1)
+			& ~(UINT64)(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1);
+
+		D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+		UINT numRows = 0;
+		UINT64 rowSizeInBytes = 0;
+		UINT64 mipUploadSize = 0;
+		m_pDevice->GetCopyableFootprints( &texDesc, mip.mipLevel, 1, bufferOffset,
+			&footprint, &numRows, &rowSizeInBytes, &mipUploadSize );
+
+		byte * pDst = pUploadBase + footprint.Offset;
+		byte * pSrc = mip.pData;
+		UINT srcRowPitch = mip.pitch;
+		UINT dstRowPitch = footprint.Footprint.RowPitch;
+
+		for ( UINT row = 0; row < numRows; ++row )
+		{
+			byte * pSrcRow = pSrc + row * srcRowPitch;
+			byte * pDstRow = pDst + row * dstRowPitch;
+
+			if ( bExpand )
+			{
+				UINT mipW = footprint.Footprint.Width;
+				for ( UINT x = 0; x < mipW; ++x )
+				{
+					for ( int c = 0; c < nativeBPP; ++c )
+						pDstRow[x * dxgiBPP + c] = pSrcRow[x * nativeBPP + c];
+					for ( int c = nativeBPP; c < dxgiBPP; ++c )
+						pDstRow[x * dxgiBPP + c] = 0xFF;
+				}
+			}
+			else
+			{
+				UINT copyBytes = (UINT)rowSizeInBytes < srcRowPitch ? (UINT)rowSizeInBytes : srcRowPitch;
+				memcpy( pDstRow, pSrcRow, copyBytes );
+			}
+		}
+
+		D3D12_TEXTURE_COPY_LOCATION dst = {};
+		dst.pResource = pSurface->m_Texture.Get();
+		dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		dst.SubresourceIndex = mip.mipLevel;
+
+		D3D12_TEXTURE_COPY_LOCATION src = {};
+		src.pResource = uploadBuffer.Get();
+		src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+		src.PlacedFootprint = footprint;
+
+		m_pUploadCommandList->CopyTextureRegion( &dst, 0, 0, 0, &src, nullptr );
+
+		bufferOffset = footprint.Offset + mipUploadSize;
+	}
+
+	// COPY queues cannot issue barriers — the resource will implicitly decay
+	// to COMMON state after the copy queue finishes.  The render queue's
+	// execute() path will transition COMMON → PSR when the texture is first used.
+	pSurface->m_CurrentState = D3D12_RESOURCE_STATE_COMMON;
+
+	// Close and execute
+	m_pUploadCommandList->Close();
+	ID3D12CommandList * ppLists[] = { m_pUploadCommandList.Get() };
+	m_pUploadQueue->ExecuteCommandLists( 1, ppLists );
+
+	// Signal and wait for the copy to finish
+	m_nUploadFenceValue++;
+	m_pUploadQueue->Signal( m_pUploadFence.Get(), m_nUploadFenceValue );
+	if ( m_pUploadFence->GetCompletedValue() < m_nUploadFenceValue )
+	{
+		m_pUploadFence->SetEventOnCompletion( m_nUploadFenceValue, m_hUploadFenceEvent );
+		DWORD result = WaitForSingleObject( m_hUploadFenceEvent, 10000 );
+		if ( result == WAIT_TIMEOUT )
+		{
+			TRACE( "DisplayDeviceD3D12::immediateTextureUpload() - Upload fence timeout!" );
+		}
+	}
+
+	// Unmap and release upload buffer
+	uploadBuffer->Unmap( 0, nullptr );
+	uploadBuffer.Reset();
+
+	// Free PendingMips — data is now on the GPU
+	for ( int i = 0; i < (int)pSurface->m_PendingMips.size(); ++i )
+		delete[] pSurface->m_PendingMips[i].pData;
+	pSurface->m_PendingMips.release();
+
+	// Create SRV if needed
+	if ( !pSurface->m_bSRVCreated )
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Format = pSurface->m_DXGIFormat;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Texture2D.MipLevels = pSurface->m_nLevels;
+
+		m_pDevice->CreateShaderResourceView(
+			pSurface->m_Texture.Get(), &srvDesc,
+			m_SRVStagingHeap.GetCPUHandle( pSurface->m_SRVIndex ) );
+		pSurface->m_bSRVCreated = true;
+	}
+
+	pSurface->m_bUploaded = true;
 }
 
 void DisplayDeviceD3D12::flushCommandList()
@@ -2108,8 +2508,18 @@ void DisplayDeviceD3D12::flushCommandList()
 
 void DisplayDeviceD3D12::resetCommandList()
 {
-	// Caller is responsible for ensuring the command list is not open before calling this.
-	// beginScene() only calls this when !m_bCommandListOpen (first call per frame).
+	// Safety: ensure the GPU has finished all commands from this allocator's
+	// last submission before resetting.  This is the last line of defense
+	// against COMMAND_ALLOCATOR_SYNC errors.
+	if ( m_pFence && m_hFenceEvent && m_nAllocatorFence[m_nFrameIndex] > 0 )
+	{
+		if ( m_pFence->GetCompletedValue() < m_nAllocatorFence[m_nFrameIndex] )
+		{
+			m_pFence->SetEventOnCompletion( m_nAllocatorFence[m_nFrameIndex], m_hFenceEvent );
+			WaitForSingleObject( m_hFenceEvent, INFINITE );
+		}
+	}
+
 	m_pCommandAllocators[m_nFrameIndex]->Reset();
 	m_pCommandList->Reset( m_pCommandAllocators[m_nFrameIndex].Get(), nullptr );
 	m_bCommandListOpen = true;
@@ -2207,6 +2617,7 @@ bool DisplayDeviceD3D12::createFXAA()
 
 	D3D12_CLEAR_VALUE clearValue = {};
 	clearValue.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	clearValue.Color[3] = 1.0f;	// match beginScene clear color {0,0,0,1}
 
 	HRESULT hr = m_pDevice->CreateCommittedResource(
 		&heapProps, D3D12_HEAP_FLAG_NONE, &rtDesc,
@@ -2219,9 +2630,9 @@ bool DisplayDeviceD3D12::createFXAA()
 		return false;
 	}
 
-	// Create RTV for scene RT (use slot after the swap chain RTVs)
+	// Create RTV for scene RT via allocator (avoids collision with shadow map, effects)
 	if ( m_nSceneRTVIndex == UINT(-1) )
-		m_nSceneRTVIndex = FRAME_COUNT;		// slots 0..FRAME_COUNT-1 are swap chain
+		m_nSceneRTVIndex = m_RTVHeap.Allocate();
 	m_pDevice->CreateRenderTargetView( m_pSceneRT.Get(), nullptr,
 		m_RTVHeap.GetCPUHandle( m_nSceneRTVIndex ) );
 
@@ -2339,8 +2750,12 @@ void DisplayDeviceD3D12::applyFXAA()
 	float height = (float)rw.height();
 
 	// Transition scene RT from render target → shader resource
-	TransitionResource( m_pCommandList.Get(), m_pSceneRT.Get(),
-		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+	if ( m_bSceneRTisRT )
+	{
+		TransitionResource( m_pCommandList.Get(), m_pSceneRT.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+		m_bSceneRTisRT = false;
+	}
 
 	// Set the swap chain back buffer as render target
 	D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
@@ -2395,9 +2810,7 @@ void DisplayDeviceD3D12::applyFXAA()
 	m_pCommandList->IASetVertexBuffers( 0, 0, nullptr );
 	m_pCommandList->DrawInstanced( 3, 1, 0, 0 );
 
-	// Transition scene RT back for next frame
-	TransitionResource( m_pCommandList.Get(), m_pSceneRT.Get(),
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+	// Leave scene RT in PSR state — beginScene will transition PSR → RT
 }
 
 //---------------------------------------------------------------------------------------------------
@@ -2451,13 +2864,15 @@ bool DisplayDeviceD3D12::updateClientArea( bool a_bAllowReset )
 			m_ClientRectangle = clientWindow;
 			if ( a_bAllowReset && m_pSwapChain )
 			{
-				// Resize swap chain buffers
+				// Resize swap chain buffers — wait for all GPU work, then release
+			// back buffer references.  Do NOT reset the descriptor heaps; the
+			// tracked indices (m_nRTVIndices, m_nDSVIndex, etc.) are reused by
+			// createRenderTargets/createDepthStencil.  Resetting the heap would
+			// let future Allocate() return indices already in use.
 				waitForGPU();
 				for ( UINT i = 0; i < FRAME_COUNT; i++ )
 					m_pRenderTargets[i].Reset();
 				m_pDepthStencil.Reset();
-				m_RTVHeap.Reset();
-				m_DSVHeap.Reset();
 
 				UINT w = m_ClientRectangle.width() + 1;
 				UINT h = m_ClientRectangle.height() + 1;
@@ -2469,6 +2884,10 @@ bool DisplayDeviceD3D12::updateClientArea( bool a_bAllowReset )
 
 				createRenderTargets();
 				createDepthStencil();
+
+				// Recreate FXAA scene RT (needed by FXAA, HDR, SSAO effects)
+				if ( m_bFXAAEnabled )
+					createFXAA();
 			}
 		}
 	}

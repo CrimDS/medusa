@@ -214,6 +214,7 @@ public:
 	static bool					sm_bUpdateHDR;
 	static bool					sm_bEnableShadows;
 	static int					sm_nMaxShadowLights;
+	static bool					sm_bEnableSSAO;
 
 	// Constructions
 	WorldContext();
@@ -515,6 +516,7 @@ protected:
 	Queue< Verb::Ref >			m_Verbs;					// queued verbs
 
 	DisplayEffect::Ref			m_pHDR;						// HDR effect
+	DisplayEffect::Ref			m_pSSAO;					// SSAO effect
 	WidgetMap					m_WidgetMap;				// generic widget storage
 
 	// deprecated

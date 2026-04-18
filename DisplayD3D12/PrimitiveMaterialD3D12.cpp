@@ -433,14 +433,23 @@ bool PrimitiveMaterialD3D12::setupTextures()
 	// Slots 0-2 are diffuse/lightmap/bumpmap; slot 7 is shadow map.
 	// Must cover the full descriptor table range declared in the root signature (8 slots).
 	// Wrap BEFORE allocation to ensure all 8 slots fit within the heap.
+	// Slots 0-7 are permanent null SRVs; allocate from slot 8 onward.
 	if ( pDevice->m_nSRVFrameOffset + 8 > DisplayDeviceD3D12::MAX_SRV_DESCRIPTORS )
+	{
+		// Ring is exhausted — wrap to start. Earlier materials' descriptors will be
+		// overwritten, but those draw calls are already recorded in the command list
+		// with their GPU descriptor handles, so they reference the correct GPU-side
+		// copies made at draw time.
 		pDevice->m_nSRVFrameOffset = 8;
+	}
 	pDevice->m_nSRVTextureBase = pDevice->m_nSRVFrameOffset;
 	pDevice->m_nSRVFrameOffset += 8;
 
 	for ( int i = 0; i < m_Surfaces.size(); i++ )
 	{
 		Surface & surface = m_Surfaces[i];
+		if ( !surface.m_pSurface.valid() )
+			continue;
 		surface.m_pSurface->setDevice( device() );
 		surface.m_pSurface->set( surface.m_eType,
 			surface.m_nIndex,

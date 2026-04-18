@@ -406,11 +406,13 @@ void Font::push( DisplayDevice * pDisplay, Font * pFont, PointInt & pos, const c
 
 void Font::createFontMaterial( DisplayDevice * pDisplay )
 {
-	m_FontMaterial = PrimitiveMaterial::create( pDisplay, WHITE, WHITE, WHITE, WHITE, 0.0f, 
+	m_FontMaterial = PrimitiveMaterial::create( pDisplay, WHITE, WHITE, WHITE, WHITE, 0.0f,
 		sm_bEnableAlpha ? PrimitiveMaterial::ALPHA : PrimitiveMaterial::ADDITIVE );
-	m_FontMaterial->setPass( DisplayDevice::SECONDARY );
+	m_FontMaterial->setPass( DisplayDevice::OVERLAY );
 	m_FontMaterial->setFilterMode( PrimitiveMaterial::FILTER_OFF );
 	m_FontMaterial->setLightEnable( false );
+	TRACE( "Font::createFontMaterial pass=%d (OVERLAY=%d) alpha=%d",
+		m_FontMaterial->pass(), (int)DisplayDevice::OVERLAY, sm_bEnableAlpha ? 1 : 0 );
 }
 
 bool Font::createFontSurface( DisplayDevice * pDisplay )

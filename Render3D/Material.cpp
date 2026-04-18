@@ -10,10 +10,14 @@
 
 #include "Debug/Assert.h"
 #include "Debug/Trace.h"
-#include "Standard/Bits.h" 
-#include "Standard/Limits.h" 
+#include "Standard/Bits.h"
+#include "Standard/Limits.h"
 #include "Draw/Draw.h"
 #include "Render3D/Material.h"
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
 
 //---------------------------------------------------------------------------------------------------
 
@@ -366,6 +370,14 @@ PrimitiveSurface * Material::getSurface( DisplayDevice * pDisplay, Image::Link p
 		}
 
 		SizeInt imageSize( pImage->size() );
+		if ( imageSize.width <= 0 || imageSize.height <= 0 || imageSize.width > 16384 || imageSize.height > 16384 )
+		{
+			char buf[256];
+			sprintf_s( buf, "ERROR: Material::getSurface() - corrupt Image size %dx%d format=%d, skipping!\n",
+				imageSize.width, imageSize.height, (int)pImage->format() );
+			OutputDebugStringA( buf );
+			return NULL;
+		}
 		SizeInt maxSize( pDisplay->textureMaxSize() );
 		SizeInt minSize( pDisplay->textureMinSize() );
 
@@ -453,6 +465,9 @@ PrimitiveSurface * Material::getSurface( DisplayDevice * pDisplay, Image::Link p
 			// next mipmap level of our image..
 			pMipMap = pMipMap->mipMap();
 		}
+
+		// Flush texture data to GPU immediately so PendingMips don't accumulate
+		pSurface->flush();
 	}
 
 	// cache the surface now

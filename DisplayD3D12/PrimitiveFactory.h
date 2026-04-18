@@ -95,7 +95,21 @@ public:
 		List< T * >::Iterator primitive = m_Cache.head();
 		while( primitive.valid() )
 		{
+#if defined(_MSC_VER)
+			const size_t alignment = alignof(PrimitiveProxy);
+			if ( alignment >= 16 )
+			{
+				PrimitiveProxy * p = static_cast<PrimitiveProxy *>( *primitive );
+				p->~PrimitiveProxy();
+				_aligned_free( p );
+			}
+			else
+			{
+				delete *primitive;
+			}
+#else
 			delete *primitive;
+#endif
 			primitive++;
 		}
 		m_Cache.release();

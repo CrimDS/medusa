@@ -156,17 +156,34 @@ public:
 		m_DescriptorSize = pDevice->GetDescriptorHandleIncrementSize(type);
 		m_NumDescriptors = numDescriptors;
 		m_NumAllocated = 0;
+		m_FreeList.clear();
 		return true;
 	}
 
 	UINT Allocate()
 	{
+		if (!m_FreeList.empty())
+		{
+			UINT index = m_FreeList.back();
+			m_FreeList.pop_back();
+			return index;
+		}
 		if (m_NumAllocated >= m_NumDescriptors)
 			return UINT(-1);
 		return m_NumAllocated++;
 	}
 
-	void Reset() { m_NumAllocated = 0; }
+	void Free(UINT index)
+	{
+		if (index != UINT(-1) && index < m_NumDescriptors)
+			m_FreeList.push_back(index);
+	}
+
+	void Reset()
+	{
+		m_NumAllocated = 0;
+		m_FreeList.clear();
+	}
 
 	D3D12_CPU_DESCRIPTOR_HANDLE GetCPUHandle(UINT index) const
 	{
@@ -191,6 +208,7 @@ private:
 	UINT							m_DescriptorSize;
 	UINT							m_NumDescriptors;
 	UINT							m_NumAllocated;
+	std::vector<UINT>				m_FreeList;
 };
 
 //----------------------------------------------------------------------------
@@ -243,6 +261,14 @@ public:
 
 	Allocation Allocate(UINT size, UINT alignment = 256)
 	{
+		// Reject allocations that exceed the entire buffer
+		if (size > m_BufferSize)
+		{
+			OutputDebugStringA("UploadRingBuffer: allocation exceeds buffer size!\n");
+			Allocation alloc = {};
+			return alloc;
+		}
+
 		UINT alignedOffset = (m_CurrentOffset + alignment - 1) & ~(alignment - 1);
 		if (alignedOffset + size > m_BufferSize)
 		{
@@ -309,12 +335,28 @@ struct PSOKey
 
 	bool operator<(const PSOKey & other) const
 	{
-		return memcmp(this, &other, sizeof(PSOKey)) < 0;
+		if (inputLayout != other.inputLayout) return inputLayout < other.inputLayout;
+		if (topology != other.topology) return topology < other.topology;
+		if (blendMode != other.blendMode) return blendMode < other.blendMode;
+		if (doubleSided != other.doubleSided) return doubleSided < other.doubleSided;
+		if (depthWrite != other.depthWrite) return depthWrite < other.depthWrite;
+		if (depthEnable != other.depthEnable) return depthEnable < other.depthEnable;
+		if (wireframe != other.wireframe) return wireframe < other.wireframe;
+		if (rtvFormat != other.rtvFormat) return rtvFormat < other.rtvFormat;
+		if (dsvFormat != other.dsvFormat) return dsvFormat < other.dsvFormat;
+		if (sampleCount != other.sampleCount) return sampleCount < other.sampleCount;
+		if (vsBytecode != other.vsBytecode) return vsBytecode < other.vsBytecode;
+		return psBytecode < other.psBytecode;
 	}
 
 	bool operator==(const PSOKey & other) const
 	{
-		return memcmp(this, &other, sizeof(PSOKey)) == 0;
+		return inputLayout == other.inputLayout && topology == other.topology
+			&& blendMode == other.blendMode && doubleSided == other.doubleSided
+			&& depthWrite == other.depthWrite && depthEnable == other.depthEnable
+			&& wireframe == other.wireframe && rtvFormat == other.rtvFormat
+			&& dsvFormat == other.dsvFormat && sampleCount == other.sampleCount
+			&& vsBytecode == other.vsBytecode && psBytecode == other.psBytecode;
 	}
 };
 

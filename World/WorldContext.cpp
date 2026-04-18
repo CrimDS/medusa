@@ -38,6 +38,7 @@ bool		WorldContext::sm_bEnableHDR = true;
 bool		WorldContext::sm_bUpdateHDR = false;
 bool		WorldContext::sm_bEnableShadows = true;
 int			WorldContext::sm_nMaxShadowLights = 4;
+bool		WorldContext::sm_bEnableSSAO = true;
 
 //----------------------------------------------------------------------------
 
@@ -472,6 +473,23 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 		{
 			if ( m_pHDR.valid() )
 				m_pHDR = NULL;		
+		}
+
+		// Push SSAO effect
+		if ( sm_bEnableSSAO )
+		{
+			if (! m_pSSAO.valid() )
+				m_pSSAO = pDisplay->createEffect( "SSAO" );
+
+			if ( m_pSSAO.valid() )
+				pDisplay->push( m_pSSAO );
+			else
+				sm_bEnableSSAO = false;
+		}
+		else
+		{
+			if ( m_pSSAO.valid() )
+				m_pSSAO = NULL;
 		}
 
 		// disable lens flares if HDR is enabled..

@@ -975,6 +975,10 @@ inline const InStream & operator>>( const InStream & input, Buffer & buffer )
 	dword nBytes;
 	input >> nBytes;
 
+	// Sanity check: reject obviously corrupt sizes (>256MB)
+	if ( nBytes > 256 * 1024 * 1024 )
+		throw std::bad_alloc();
+
 	void * pBuffer = new byte[ nBytes ];
 	if ( (input.filter() & FF_TEXT) == 0 )
 		input.read( pBuffer, nBytes );

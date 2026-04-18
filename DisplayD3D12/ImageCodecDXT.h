@@ -1,6 +1,8 @@
 /*
 	ImageCodecDXT.h - D3D12 version
 	Uses squish library for CPU-side DXT compression (no D3DX dependency)
+	Registered as ImageCodecDXT1D3D12 etc. to avoid conflicting with the
+	D3D9 codecs since both DLLs are loaded simultaneously.
 	(c)2024 Palestar
 */
 

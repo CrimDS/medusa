@@ -37,6 +37,7 @@ public:
 	virtual void			set( Type eType, int nIndex, int nUV, bool bFiltered, float * pParams = NULL );
 	virtual byte *			lock( int nLevel = 0 );
 	virtual bool			unlock();
+	virtual void			flush();
 
 	// Called from execute() to flush deferred mip uploads into the open command list
 	void					flushPendingUploads( DisplayDeviceD3D12 * pDevice );
