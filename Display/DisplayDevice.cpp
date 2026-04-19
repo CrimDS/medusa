@@ -13,6 +13,7 @@
 // Display options
 bool					DisplayDevice::sm_bUseFixedFunction = false;					// if true, then the fixed function pipeline will always be used
 bool					DisplayDevice::sm_bWaitVB = true;								// wait for verticle blank
+bool					DisplayDevice::sm_bLightSecondaryPass = false;					// see header — default off, skip per-light render for SECONDARY pass
 dword					DisplayDevice::sm_nTrianglesRendered = 0;						// total number of triangles rendered via lists
 dword					DisplayDevice::sm_nLinesRendered = 0;
 DisplayDevice *			DisplayDevice::sm_pCacheDevice = NULL;							// device for used to precache graphics assets...

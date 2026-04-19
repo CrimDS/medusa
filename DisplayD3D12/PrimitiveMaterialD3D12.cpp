@@ -5,6 +5,7 @@
 
 #include "Debug/Assert.h"
 #include "Debug/Trace.h"
+#include "Debug/Profile.h"
 #include "PrimitiveMaterialD3D12.h"
 #include "PrimitiveSurfaceD3D12.h"
 #include "PrimitiveFactory.h"
@@ -44,12 +45,21 @@ bool PrimitiveMaterialD3D12::execute()
 
 	// Determine if we use the passthrough or full lighting shader.
 	// If a custom shader is explicitly set, always use the full pipeline so it gets loaded.
+	//
+	// SECONDARY pass (translucent particles, beams, trails) skips the per-light
+	// pipeline by default — see DisplayDevice::sm_bLightSecondaryPass.  The
+	// per-light loop below renders geometry once per light, so for ~3 active
+	// lights and ~87 translucent materials/frame that's ~348 executes/frame
+	// vs 87 with passthrough.  Translucent geometry is almost always emissive
+	// and doesn't read meaningfully different under per-light shading; the
+	// flag is exposed if a particular emitter actually needs it.
 	bool bHasCustomShader = (m_sShader.length() > 0);
 	bool bUsePassthrough = !bHasCustomShader
 		&& (DisplayDevice::sm_bUseFixedFunction
 			|| !m_LightEnable
 			|| lights.size() == 0
-			|| m_Blending == PrimitiveMaterial::ADDITIVE);
+			|| m_Blending == PrimitiveMaterial::ADDITIVE
+			|| (m_nPass == DisplayDevice::SECONDARY && !DisplayDevice::sm_bLightSecondaryPass));
 
 	// Diagnostic: log custom shader materials
 	if ( bHasCustomShader )
@@ -101,11 +111,25 @@ bool PrimitiveMaterialD3D12::execute()
 		pDevice->m_CurrentMatCB.bEnableAmbient = 1;
 
 		setupBlending();
-		if ( !setupTextures() )
-			return false;
-		pDevice->bindPerMaterialCB( pDevice->m_CurrentMatCB );
-		if ( !executeChildren() )
-			return false;
+		{
+			PROFILE_START( "Material::passthrough:setupTextures" );
+			bool ok = setupTextures();
+			PROFILE_END();
+			if ( !ok )
+				return false;
+		}
+		{
+			PROFILE_START( "Material::passthrough:bindMatCB" );
+			pDevice->bindPerMaterialCB( pDevice->m_CurrentMatCB );
+			PROFILE_END();
+		}
+		{
+			PROFILE_START( "Material::passthrough:executeChildren" );
+			bool ok = executeChildren();
+			PROFILE_END();
+			if ( !ok )
+				return false;
+		}
 	}
 	else
 	{

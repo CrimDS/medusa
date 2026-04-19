@@ -404,6 +404,8 @@ public:
 	UINT							m_nMatCBSkipped;		// skipped because data unchanged
 	UINT							m_nLightCBUploads;		// CBPerLight uploads this frame
 	UINT							m_nLightCBSkipped;		// skipped because data unchanged
+	UINT							m_nObjCBUploads;		// CBPerObject (world matrix) uploads this frame
+	UINT							m_nObjCBSkipped;		// skipped because data unchanged
 	UINT							m_nSRVCopies;			// CopyDescriptorsSimple calls to SRV slots
 	UINT							m_nSRVCopiesSkipped;	// skipped because destination already holds source
 
@@ -424,6 +426,16 @@ public:
 	CBPerLight						m_LastLightCB;
 	bool							m_bLastLightCBValid;
 	D3D12_GPU_VIRTUAL_ADDRESS		m_nLastLightCBGpuVA;
+
+	// Same pattern for CBPerObject (world matrix).  Heavy savings on text/UI
+	// rendering — Font::push fans out one PrimitiveSetTransform per glyph
+	// batch; many adjacent glyphs share the same world matrix and previously
+	// each one allocated+memcpy'd+SetGraphicsRootConstantBufferView'd a fresh
+	// CB.  Sized small (single CBPerObject = one matrix) so the compare is
+	// effectively one cmpxchg-equivalent.
+	CBPerObject						m_LastObjCB;
+	bool							m_bLastObjCBValid;
+	D3D12_GPU_VIRTUAL_ADDRESS		m_nLastObjCBGpuVA;
 
 	// Current pipeline state tracking
 	bool							m_bUsingFixedFunction;

@@ -23,6 +23,8 @@
 
 #include "Display/Types.h"
 #include "DisplayDeviceD3D12.h"
+
+#include <stdint.h>
 #include "PrimitiveFactory.h"
 #include "PrimitiveSurfaceD3D12.h"
 #include "PrimitiveMaterialD3D12.h"
@@ -109,12 +111,16 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_nMatCBSkipped( 0 ),
 	m_nLightCBUploads( 0 ),
 	m_nLightCBSkipped( 0 ),
+	m_nObjCBUploads( 0 ),
+	m_nObjCBSkipped( 0 ),
 	m_nSRVCopies( 0 ),
 	m_nSRVCopiesSkipped( 0 ),
 	m_bLastMatCBValid( false ),
 	m_nLastMatCBGpuVA( 0 ),
 	m_bLastLightCBValid( false ),
-	m_nLastLightCBGpuVA( 0 )
+	m_nLastLightCBGpuVA( 0 ),
+	m_bLastObjCBValid( false ),
+	m_nLastObjCBGpuVA( 0 )
 {
 	memset( m_nRTVIndices, 0xff, sizeof(m_nRTVIndices) );
 	TRACE( "DisplayDeviceD3D12 created!" );
@@ -496,9 +502,14 @@ void DisplayDeviceD3D12::setShadowPass( int a_nMaxLights, const Vector3 & a_vFoc
 
 bool DisplayDeviceD3D12::beginScene()
 {
+	PROFILE_START( "DisplayDeviceD3D12::beginScene" );
+
 	// Don't open the command list when minimized — present() will still advance the frame
 	if ( m_bMinimized )
+	{
+		PROFILE_END();
 		return false;
+	}
 
 	m_pCurrentTransform = NULL;
 	m_pCurrentMaterial = NULL;
@@ -511,17 +522,23 @@ bool DisplayDeviceD3D12::beginScene()
 
 	if ( !m_bCommandListOpen )
 	{
-
+		PROFILE_START( "beginScene:resetCommandList" );
 		resetCommandList();
+		PROFILE_END();
 
 		// Transition the render target from PRESENT to RENDER_TARGET
-		TransitionResource( m_pCommandList.Get(), m_pRenderTargets[m_nFrameIndex].Get(),
-			D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET );
+		{
+			PROFILE_START( "beginScene:transitionRT_to_RT" );
+			TransitionResource( m_pCommandList.Get(), m_pRenderTargets[m_nFrameIndex].Get(),
+				D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET );
+			PROFILE_END();
+		}
 
 		// FLIP_DISCARD leaves back buffer contents undefined after Present.
 		// Always clear both the render target and depth buffer at frame start
 		// to prevent ghosting from previous frames.
 		{
+			PROFILE_START( "beginScene:clearRTandDepth" );
 			D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
 			float black[4] = { 0, 0, 0, 1 };
 			m_pCommandList->ClearRenderTargetView( rtv, black, 0, nullptr );
@@ -544,6 +561,7 @@ bool DisplayDeviceD3D12::beginScene()
 				D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_DSVHeap.GetCPUHandle( 0 );
 				m_pCommandList->ClearDepthStencilView( dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr );
 			}
+			PROFILE_END();
 		}
 
 		// Reset per-frame dynamic buffers only once per frame
@@ -563,8 +581,10 @@ bool DisplayDeviceD3D12::beginScene()
 		m_bLastBoundSRVValid = false;
 		m_bLastMatCBValid = false;
 		m_bLastLightCBValid = false;
+		m_bLastObjCBValid = false;
 		m_nLastMatCBGpuVA = 0;
 		m_nLastLightCBGpuVA = 0;
+		m_nLastObjCBGpuVA = 0;
 
 		// Reset per-frame counters used by the ALT+P profiler overlay
 		m_nSRVBindCalls = 0;
@@ -573,6 +593,8 @@ bool DisplayDeviceD3D12::beginScene()
 		m_nMatCBSkipped = 0;
 		m_nLightCBUploads = 0;
 		m_nLightCBSkipped = 0;
+		m_nObjCBUploads = 0;
+		m_nObjCBSkipped = 0;
 		m_nSRVCopies = 0;
 		m_nSRVCopiesSkipped = 0;
 
@@ -632,6 +654,7 @@ bool DisplayDeviceD3D12::beginScene()
 	m_pCommandList->RSSetScissorRects( 1, &scissor );
 
 	m_bBeginScene = true;
+	PROFILE_END();	// "DisplayDeviceD3D12::beginScene"
 	return true;
 }
 
@@ -943,6 +966,27 @@ bool DisplayDeviceD3D12::endScene()
 			continue;
 		}
 
+		// SECONDARY pass benefits from grouping same-shader materials so the
+		// PSO state thrash drops between adjacent draws.  Stable insertion
+		// sort by shader() pointer — names are stable string literals so
+		// pointer comparison groups equal-shader materials.
+		if ( i == SECONDARY && materials.size() > 1 )
+		{
+			const int n = materials.size();
+			for ( int a = 1; a < n; ++a )
+			{
+				PrimitiveMaterial::Ref vRef = materials[ a ];
+				const char * vKey = vRef->shader();
+				int b = a;
+				while ( b > 0 && (uintptr_t)materials[ b - 1 ]->shader() > (uintptr_t)vKey )
+				{
+					materials[ b ] = materials[ b - 1 ];
+					--b;
+				}
+				materials[ b ] = vRef;
+			}
+		}
+
 		PROFILE_START( kPassNames[ i ] );
 		for ( int j = 0; j < materials.size(); ++j )
 		{
@@ -1065,8 +1109,12 @@ void DisplayDeviceD3D12::present()
 		}
 
 		// Transition render target to present state and close the command list
-		TransitionResource( m_pCommandList.Get(), m_pRenderTargets[m_nFrameIndex].Get(),
-			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT );
+		{
+			PROFILE_START( "present:transitionRT_to_present" );
+			TransitionResource( m_pCommandList.Get(), m_pRenderTargets[m_nFrameIndex].Get(),
+				D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT );
+			PROFILE_END();
+		}
 		PROFILE_START( "present:flushCommandList" );
 		flushCommandList();
 		PROFILE_END();
@@ -1081,8 +1129,20 @@ void DisplayDeviceD3D12::present()
 		PROFILE_END();
 	}
 
-	moveToNextFrame();
-	updateClientArea( true );
+	// moveToNextFrame() rotates the per-frame allocator + signals/waits on the
+	// fence.  This is where GPU back-pressure shows up if the GPU can't keep
+	// up with the CPU — the wait blocks until the next frame's allocator is
+	// safe to reuse.
+	{
+		PROFILE_START( "present:moveToNextFrame" );
+		moveToNextFrame();
+		PROFILE_END();
+	}
+	{
+		PROFILE_START( "present:updateClientArea" );
+		updateClientArea( true );
+		PROFILE_END();
+	}
 
 	PROFILE_START( "present:drainInfoQueue" );
 	drainInfoQueue();
@@ -1111,6 +1171,11 @@ void DisplayDeviceD3D12::present()
 		m_nSRVCopies, m_nSRVCopiesSkipped,
 		(m_nSRVCopies + m_nSRVCopiesSkipped) > 0
 			? (100.0f * m_nSRVCopiesSkipped / (m_nSRVCopies + m_nSRVCopiesSkipped)) : 0.0f ) );
+	PROFILE_LMESSAGE( 13, CharString().format(
+		"D3D12 ObjCB: %u uploaded, %u skipped (%.0f%% skipped)",
+		m_nObjCBUploads, m_nObjCBSkipped,
+		(m_nObjCBUploads + m_nObjCBSkipped) > 0
+			? (100.0f * m_nObjCBSkipped / (m_nObjCBUploads + m_nObjCBSkipped)) : 0.0f ) );
 #endif
 
 	PROFILE_END();
@@ -1674,11 +1739,28 @@ void DisplayDeviceD3D12::bindPerObjectCB()
 	if ( !m_bCommandListOpen )
 		return;
 
+	// Same byte-compare cache as bindPerMaterialCB / bindPerLightCB.  Major win
+	// for OVERLAY/text rendering: Font::push fans out one PrimitiveSetTransform
+	// per glyph batch and many adjacent glyphs share the same world matrix —
+	// previously every one allocated + memcpy'd + SetGraphicsRootCBV'd a fresh
+	// CB.  Single 64-byte struct (one matrix), so memcmp is one cmpxchg-equiv.
+	if ( m_bLastObjCBValid && memcmp( &m_CBPerObject, &m_LastObjCB, sizeof(CBPerObject) ) == 0 )
+	{
+		m_pCommandList->SetGraphicsRootConstantBufferView( 1, m_nLastObjCBGpuVA );
+		++m_nObjCBSkipped;
+		return;
+	}
+
 	UploadRingBuffer::Allocation alloc = allocateCB( sizeof(CBPerObject) );
 	memcpy( alloc.cpuAddress, &m_CBPerObject, sizeof(CBPerObject) );
 
 	// Root parameter 1 = CBV for per-object constants
 	m_pCommandList->SetGraphicsRootConstantBufferView( 1, alloc.gpuAddress );
+
+	m_LastObjCB = m_CBPerObject;
+	m_bLastObjCBValid = true;
+	m_nLastObjCBGpuVA = alloc.gpuAddress;
+	++m_nObjCBUploads;
 }
 
 void DisplayDeviceD3D12::bindPerMaterialCB( const CBPerMaterial & mat )
@@ -1881,7 +1963,12 @@ bool DisplayDeviceD3D12::initializeD3D12()
 	// Initialize COM
 	CoInitializeEx( NULL, COINIT_MULTITHREADED );
 
-	// Enable debug layer (temporarily unconditional for OVERLAY-pass diagnostics)
+	// Debug layer: validates every D3D12 API call (~5-15% CPU overhead per
+	// call) and surfaces validation messages via the info queue.  Only enable
+	// in debug builds — in release we want the perf back.  If you need
+	// validation on a release build for one-off investigation, flip the
+	// `#if 0` to `#if 1` here.
+#if defined(_DEBUG) || 0
 	{
 		ComPtr<ID3D12Debug> debugController;
 		if ( SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))) )
@@ -1894,9 +1981,16 @@ bool DisplayDeviceD3D12::initializeD3D12()
 			TRACE( "D3D12 debug layer NOT available — install Graphics Tools feature" );
 		}
 	}
+#endif
 
-	// Create DXGI factory
+	// Create DXGI factory.  DXGI_CREATE_FACTORY_DEBUG enables additional
+	// validation around swap-chain / adapter operations and pairs with the
+	// D3D12 debug layer.  Same gating: debug-only.
+#if defined(_DEBUG) || 0
 	UINT dxgiFlags = DXGI_CREATE_FACTORY_DEBUG;
+#else
+	UINT dxgiFlags = 0;
+#endif
 	if ( FAILED(CreateDXGIFactory2(dxgiFlags, IID_PPV_ARGS(&m_pDXGIFactory))) )
 		return false;
 
@@ -1928,13 +2022,15 @@ bool DisplayDeviceD3D12::initializeD3D12()
 		return false;
 
 	// Query the info queue so we can drain validation messages each frame.
-	// Requires the debug layer to be enabled.
+	// Requires the debug layer to be enabled — only meaningful in debug builds.
+#if defined(_DEBUG) || 0
 	if ( SUCCEEDED(m_pDevice->QueryInterface(IID_PPV_ARGS(&m_pInfoQueue))) )
 	{
 		m_pInfoQueue->SetBreakOnSeverity( D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE );
 		m_pInfoQueue->SetBreakOnSeverity( D3D12_MESSAGE_SEVERITY_ERROR, FALSE );
 		TRACE( "D3D12 InfoQueue available — validation messages will be logged" );
 	}
+#endif
 
 	// Log adapter info
 	{
@@ -2756,9 +2852,17 @@ void DisplayDeviceD3D12::flushCommandList()
 		return;
 
 	m_bCommandListOpen = false;
-	m_pCommandList->Close();
-	ID3D12CommandList * ppCommandLists[] = { m_pCommandList.Get() };
-	m_pCommandQueue->ExecuteCommandLists( _countof(ppCommandLists), ppCommandLists );
+	{
+		PROFILE_START( "flushCommandList:Close" );
+		m_pCommandList->Close();
+		PROFILE_END();
+	}
+	{
+		PROFILE_START( "flushCommandList:ExecuteCommandLists" );
+		ID3D12CommandList * ppCommandLists[] = { m_pCommandList.Get() };
+		m_pCommandQueue->ExecuteCommandLists( _countof(ppCommandLists), ppCommandLists );
+		PROFILE_END();
+	}
 }
 
 void DisplayDeviceD3D12::resetCommandList()

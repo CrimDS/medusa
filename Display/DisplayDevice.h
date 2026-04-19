@@ -242,6 +242,14 @@ public:
 	// Static
 	static bool						sm_bUseFixedFunction;				// if true, then the fixed function pipeline will always be used
 	static bool						sm_bWaitVB;							// if true, then we will wait for VB
+	// When false (default), the SECONDARY pass (translucent particles, beams,
+	// trails) renders with the passthrough shader instead of the per-light
+	// pipeline.  Translucent geometry rarely benefits from per-light shading
+	// — particles are usually emissive — and skipping the per-light loop
+	// removes (N+1)× material executes per frame, which is the dominant cost
+	// on the render thread (~32% of frame in dense combat).  Flip on if a
+	// particular emitter actually needs lit shading and looks wrong.
+	static bool						sm_bLightSecondaryPass;
 	static dword					sm_nTrianglesRendered;				// total number of triangles rendered
 	static dword					sm_nLinesRendered;					// total number of lines rendered
 	static CharString				sm_sShadersPath;					// base directory of shader files

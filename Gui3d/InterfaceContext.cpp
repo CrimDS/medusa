@@ -57,10 +57,12 @@ static float GetPercent( qword nCPU, qword nTotalCPU )
 
 #ifndef PROFILE_OFF
 
-// One formatted row of the per-thread profile tree.  Accumulated in a per-
-// thread buffer first, then placed by the column layout below — this lets
-// us lay several thread blocks side by side instead of running off the
-// bottom of the screen.
+// One row of the per-thread profile tree.  Pre-formatted into a single
+// WideString — pushing one Font::push per row keeps the dynamic vertex
+// ring under control (a previous design pushed each column separately and
+// the ~5× allocation rate corrupted the vertex buffer ring, manifesting
+// as huge scattered glyphs over the screen).  Column alignment relies on
+// printf width specifiers + the font being close-enough-to-monospace.
 struct ProfileLine
 {
 	WideString	text;
@@ -149,9 +151,18 @@ static void renderProfileChildren( ProfileRenderCtx & ctx,
 		const double ms        = (double)cs.nAvCPU * 1000.0 / (double)nSafeTotal;
 		const double pctThread = 100.0 * (double)cs.nAvCPU / (double)nSafeThread;
 
-		// Build the indented name: prefix + connector + function name.
-		// Then truncate or pad to a fixed 44-char column so everything that
-		// follows lines up regardless of name length or tree depth.
+		// 12-char bar.  Each cell = ~8.3% of thread time.
+		const int kBarWidth = 12;
+		int filled = (int)( pctThread * kBarWidth / 100.0 + 0.5 );
+		if ( filled > kBarWidth ) filled = kBarWidth;
+		if ( filled < 0 )         filled = 0;
+		WideString bar;
+		for ( int b = 0; b < filled;     ++b ) bar += STR("#");
+		for ( int b = filled; b < kBarWidth; ++b ) bar += STR(".");
+
+		// Build the indented name, truncate or right-pad to a fixed character
+		// count so the rest of the columns line up.  44 chars covers most
+		// names (~30 chars) plus tree depth (~10 chars) without truncation.
 		WideString label;
 		label.format( STR("%s%s %S"),
 			pPrefix,
@@ -167,19 +178,12 @@ static void renderProfileChildren( ProfileRenderCtx & ctx,
 		while ( label.length() < kNameWidth )
 			label += STR(" ");
 
-		// 12-char bar.  Each cell = ~8.3% of thread time.
-		const int kBarWidth = 12;
-		int filled = (int)( pctThread * kBarWidth / 100.0 + 0.5 );
-		if ( filled > kBarWidth ) filled = kBarWidth;
-		if ( filled < 0 )         filled = 0;
-
-		WideString bar;
-		for ( int b = 0; b < filled;     ++b ) bar += STR("#");
-		for ( int b = filled; b < kBarWidth; ++b ) bar += STR(".");
-
+		// Right-align numerics with printf width specifiers — relies on the
+		// debug font being close-enough-to-monospace for the columns to line
+		// up.  %9.2f → "  XXX.XX", %5.1f → "XX.X ", %6u → " XXXXX".
 		ProfileLine & out = ctx.pLines->push();
 		out.color = profileRowColor( pctThread );
-		out.text.format( STR("%s %7.2f ms  [%s] %5.1f%%  %5u/s"),
+		out.text.format( STR("%s %9.2f ms  [%s] %5.1f%%  %6u/s"),
 			(const wchar *)label, ms,
 			(const wchar *)bar, pctThread, cs.nAvHits );
 
@@ -801,9 +805,11 @@ bool InterfaceContext::render()
 				const double pctThread = 100.0 * (double)cs.nAvCPU /
 										 (double)( nThreadTotal > 0 ? nThreadTotal : 1 );
 
+				// Orphan row — flagged with "?? " prefix, dimmed colour.
+				// Same column layout as the tree rows so totals line up.
 				ProfileLine & out = blk.lines.push();
 				out.color = GREY;
-				out.text.format( STR("?? %-41.41S %7.2f ms  [............] %5.1f%%  %5u/s"),
+				out.text.format( STR("?? %-41.41S %9.2f ms  [............] %5.1f%%  %6u/s"),
 					cs.pName, ms, pctThread, cs.nAvHits );
 			}
 		}
@@ -812,7 +818,12 @@ bool InterfaceContext::render()
 		// then fit as many columns side-by-side as the screen allows.  The
 		// header row spans one line above the column's tree.  When more
 		// blocks exist than columns, wrap onto a new "row of columns" below
-		// the tallest block in the current row.
+		// the tallest block in the current row.  Each row is a single
+		// pre-formatted line — column alignment relies on printf width
+		// specifiers + a close-enough-to-monospace font.  A previous design
+		// pushed each cell as a separate Font::push for pixel-precise
+		// alignment but the 5× allocation pressure on the dynamic vertex
+		// ring corrupted other glyph rendering on screen.
 		if ( blocks.size() > 0 )
 		{
 			WideString sample;
