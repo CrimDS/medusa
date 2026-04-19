@@ -237,6 +237,32 @@ public:
 	PrimitiveMaterial::Ref			m_pCurrentMaterial;
 	PrimitiveSetTransform::Ref		m_pCurrentTransform;
 
+	// Per-worker rendering state used by parallel preRender.  When
+	// ThreadPool::currentWorkerIndex() is >= 0, push() routes its writes
+	// to m_WorkerStates[idx] instead of the shared fields above.  After
+	// parallelFor returns, mergeWorkerStacks() concatenates each worker's
+	// per-pass stack back onto m_Stack[pass] in worker-index order, then
+	// clears the per-worker state for the next dispatch.
+	struct WorkerRenderState
+	{
+		Array< PrimitiveMaterial::Ref >	m_Stack[ PASS_COUNT ];
+		PrimitiveMaterial::Ref			m_pCurrentMaterial;
+		PrimitiveSetTransform::Ref		m_pCurrentTransform;
+	};
+	// Sized lazily to ThreadPool::shared().workerCount() on first parallel
+	// preRender dispatch.  Kept as a plain Array (not thread_local) so the
+	// main thread can merge results back deterministically.
+	Array< WorkerRenderState >		m_WorkerStates;
+
+	// Called by the parallel-preRender dispatcher on the main thread after
+	// all workers have finished.  Concatenates each worker's per-pass
+	// primitive stack into m_Stack, preserving worker-index order.
+	void							mergeWorkerStacks();
+
+	// DisplayDevice virtual overrides for parallel render dispatch.
+	virtual void					mergeParallelRenderState() { mergeWorkerStacks(); }
+	virtual void					ensureParallelWorkerSlots( int nWorkers );
+
 	TextureFormat					m_TextureFormats;
 	bool							m_TextureP2;
 	bool							m_TextureSquare;

@@ -8,6 +8,9 @@
 #include "Debug/Assert.h"
 #include "Debug/Profile.h"
 #include "Standard/Time.h"
+#include "Standard/AutoLock.h"
+#include "Standard/ThreadPool.h"
+#include "Render3D/RenderContext.h"
 #include "WorldContext.h"
 #include "NodeZone.h"
 
@@ -25,7 +28,11 @@
 #define COLLISION_HASH_CLASS		CollisionHashBSP
 //#define COLLISION_HASH_CLASS		CollisionHash1D
 //! Define to non-zero to turn on profiling of all noun updates
-#define PROFILE_NOUNS				0
+// Per-noun simulate profiling.  When 1, NodeZone::simulate wraps each child's
+// simulate() with PROFILE_START(pChild->className()) so the ALT+P tree shows
+// ship/projectile/planet/etc. broken out separately under NodeZone::simulate.
+// Cheap (~50ns/call) but adds one row per noun-class in play.
+#define PROFILE_NOUNS				1
 
 // object limits
 Constant		MAX_ZONE_PLATFORMS( "MAX_ZONE_PLATFORMS", 128 );
@@ -179,12 +186,80 @@ void NodeZone::preRender( RenderContext &context, const Matrix33 & frame, const 
 		}
 	}
 
-	// render all children (cache childCount() instead of re-reading per iteration)
-	for ( int i = 0; i < nChildren; ++i )
+	// Decide whether to parallelise the child loop.  We require:
+	//  - the runtime flag is on,
+	//  - we're currently on the main thread (no nested dispatch),
+	//  - enough children to amortise the dispatch overhead,
+	//  - not rendering a shadow pass (shadow push path uses main-thread
+	//    m_pCurrentMaterial and hasn't been parallelised).
+	const bool bParallel =
+		RenderContext::sm_bParallelPreRender
+		&& ThreadPool::currentWorkerIndex() < 0
+		&& !context.isShadowPass()
+		&& nChildren >= 4;
+
+	if ( bParallel )
 	{
-		BaseNode * pChild = child(i);
-		if ( !bAmbientOnly || (pChild->nodeFlags() & BaseNode::NF_AMBIENT) != 0 )
-			pChild->preRender( context, vWorldFrame, vWorldPosition );
+		// Snapshot the parent's instance-key value — workers start their
+		// TLS counter from this so BaseNode::preRender's bump/pop pattern
+		// yields the same key path it would serially.
+		const qword nParentKey = context.instanceKey();
+
+		// Make sure the device has scratch state for each worker.
+		ThreadPool & pool = ThreadPool::shared();
+		DisplayDevice * pDev = context.display();
+		if ( pDev )
+			pDev->ensureParallelWorkerSlots( pool.workerCount() );
+
+		// Shared job payload.  Read-only from worker threads.
+		struct Job {
+			NodeZone *			pZone;
+			RenderContext *		pContext;
+			Matrix33			vWorldFrame;
+			Vector3				vWorldPosition;
+			bool				bAmbientOnly;
+			qword				nParentKey;
+		};
+		Job job;
+		job.pZone = this;
+		job.pContext = &context;
+		job.vWorldFrame = vWorldFrame;
+		job.vWorldPosition = vWorldPosition;
+		job.bAmbientOnly = bAmbientOnly;
+		job.nParentKey = nParentKey;
+
+		struct Dispatch {
+			static void run( int i, void * ud )
+			{
+				Job * pJ = (Job *)ud;
+				BaseNode * pChild = pJ->pZone->child( i );
+				if ( pChild == NULL )
+					return;
+				if ( pJ->bAmbientOnly && (pChild->nodeFlags() & BaseNode::NF_AMBIENT) == 0 )
+					return;
+				// Seed this worker's TLS instance-key to the parent value so
+				// the child subtree sees the same key context it would under
+				// a serial traversal.
+				pJ->pContext->setInstanceKey( pJ->nParentKey );
+				pChild->preRender( *pJ->pContext, pJ->vWorldFrame, pJ->vWorldPosition );
+			}
+		};
+
+		pool.parallelFor( 0, nChildren, &Dispatch::run, &job );
+
+		// Merge each worker's per-pass primitive stack back onto the device.
+		if ( pDev )
+			pDev->mergeParallelRenderState();
+	}
+	else
+	{
+		// render all children (cache childCount() instead of re-reading per iteration)
+		for ( int i = 0; i < nChildren; ++i )
+		{
+			BaseNode * pChild = child(i);
+			if ( !bAmbientOnly || (pChild->nodeFlags() & BaseNode::NF_AMBIENT) != 0 )
+				pChild->preRender( context, vWorldFrame, vWorldPosition );
+		}
 	}
 
 	context.setInstanceKey( context.instanceKey() - key() );
@@ -266,6 +341,10 @@ bool NodeZone::attachNoun( Noun * pNoun, BaseNode * pParent /*= NULL*/ )
 {
 	ASSERT( pNoun != NULL );
 
+	// Serialize scene-graph mutation with other workers running NodeZone::simulate.
+	// CriticalSection is reentrant; nested acquires from the same thread are free.
+	AutoLock lock( &WorldContext::sm_SimMutLock );
+
 	// if parent is null, then attach directly to this zone
 	if ( pParent == NULL )
 		pParent = this;
@@ -274,7 +353,7 @@ bool NodeZone::attachNoun( Noun * pNoun, BaseNode * pParent /*= NULL*/ )
 	pNoun->setZone( this );
 	// attach the node to it's parent
 	pParent->attachNode( pNoun );
-	
+
 	return true;
 }
 
@@ -352,6 +431,11 @@ bool NodeZone::transferNoun( Noun * pNoun, NodeZone * pNewZone, bool updatePosit
 		return false;		// noun must be attached
 	if ( pParent != this )
 		return false;		// we can only transfer root nouns, no children allowed
+
+	// Hold the sim mutation lock for the whole detach+attach sequence — two
+	// zones transferring nouns concurrently would race on each other's
+	// m_Children arrays without this.
+	AutoLock lock( &WorldContext::sm_SimMutLock );
 
 	// prevent the noun from being deleted while transferring
 	if (! pNoun->grabReference() )
@@ -592,6 +676,14 @@ void NodeZone::detectCollisions()
 	CollisionSet collisionSet;
 	// this array is used to track any objects outside of this zone
 	NounList outsideZone;
+	// Split the work into two profiled phases:
+	//   1) detectCollisions:queryAndTest — per-noun spatial query + ray/sphere
+	//      pair-test against candidates returned by m_pCollisionHash->query.
+	//      This is the dominant cost in dense combat (lots of candidates).
+	//   2) detectCollisions:hashUpdate — leaveZone bookkeeping + collision
+	//      hash refresh, both serialised via sm_SimMutLock so cross-zone
+	//      transfers don't race.
+	PROFILE_START( "detectCollisions:queryAndTest" );
 	// detect collisions for all nouns in this zone
 	for(int j=0;j<childCount();++j)
 	{
@@ -673,16 +765,26 @@ void NodeZone::detectCollisions()
 
 		} // if ( pNoun->canCollide() )
 	}
+	PROFILE_END();	// "detectCollisions:queryAndTest"
 
-	// process all nouns that are outside this zone
-	for ( NounList::iterator iNoun = outsideZone.begin(); iNoun != outsideZone.end(); ++iNoun )
-		leaveZone( *iNoun );
-	// update the last position vector on all collidable objects in this zone..
-	updateLastPosition( this );
-	// update the collision hash, this will allow us to find objects by their last position..
-	m_pCollisionHash->update();
+	// Scene-graph mutations below (leaveZone → transferNoun) and collision-hash
+	// update must serialize with other parallel workers — coarse lock.
+	// leaveZone/transferNoun re-acquire the lock reentrantly, which is free
+	// on Windows CriticalSection.
+	{
+		PROFILE_START( "detectCollisions:hashUpdate" );
+		AutoLock lock( &WorldContext::sm_SimMutLock );
+		// process all nouns that are outside this zone
+		for ( NounList::iterator iNoun = outsideZone.begin(); iNoun != outsideZone.end(); ++iNoun )
+			leaveZone( *iNoun );
+		// update the last position vector on all collidable objects in this zone..
+		updateLastPosition( this );
+		// update the collision hash, this will allow us to find objects by their last position..
+		m_pCollisionHash->update();
+		PROFILE_END();
+	}
 
-	PROFILE_END();
+	PROFILE_END();	// "NodeZone::detectCollisions()"
 }
 
 const dword MAX_NOUN_TICK = TICKS_PER_SECOND * 10;

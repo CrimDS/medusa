@@ -347,6 +347,7 @@
     <ClInclude Include="..\Standard\StringHelpers.h" />
     <ClInclude Include="..\Standard\Test.h" />
     <ClInclude Include="..\Standard\Thread.h" />
+    <ClInclude Include="..\Standard\ThreadPool.h" />
     <ClInclude Include="..\Standard\Time.h" />
     <ClInclude Include="..\Standard\Timer.h" />
     <ClInclude Include="..\Standard\TimerWheel.h" />
@@ -531,6 +532,7 @@
     <ClCompile Include="..\Standard\StringBuffer.cpp" />
     <ClCompile Include="..\Standard\StringHash.cpp" />
     <ClCompile Include="..\Standard\Thread.cpp" />
+    <ClCompile Include="..\Standard\ThreadPool.cpp" />
     <ClCompile Include="..\Standard\Time.cpp" />
     <ClCompile Include="..\Standard\Timer.cpp" />
     <ClCompile Include="..\Standard\TimerWheel.cpp" />

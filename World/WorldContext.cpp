@@ -11,13 +11,16 @@
 #include "Debug/Profile.h"
 #include "File/FileDisk.h"
 #include "Standard/Queue.h"
+#include "Standard/ThreadPool.h"
 #include "Render3D/NodeFlare.h"
+#include "Render3D/NodeTransform.h"
 #include "Display/PrimitiveSetTransform.h"
 #include "Network/LogClient.h"		// LogLevels
 #include "Verb.h"
 #include "Constants.h"
 #include "WorldTimer.h"
 #include "WorldContext.h"
+#include "RenderSnapshot.h"
 
 #include <list>
 #include <set>
@@ -39,6 +42,8 @@ bool		WorldContext::sm_bUpdateHDR = false;
 bool		WorldContext::sm_bEnableShadows = true;
 int			WorldContext::sm_nMaxShadowLights = 4;
 bool		WorldContext::sm_bEnableSSAO = true;
+bool				WorldContext::sm_bParallelSimulate = true;		// default on — cross-zone mutations guarded by sm_SimMutLock
+CriticalSection		WorldContext::sm_SimMutLock;						// coarse lock for cross-zone mutations during parallel simulate
 
 //----------------------------------------------------------------------------
 
@@ -268,9 +273,100 @@ bool WorldContext::stop()
 	return true;
 }
 
+// Dispatch target for ThreadPool::parallelFor — each call simulates one zone.
+// The `i` argument is the zone index, the userData is the tuple below.
+struct WorldContextSimulateJob
+{
+	WorldContext *	pContext;
+	dword			nTick;
+};
+
+static void worldContextSimulateZone( int i, void * ud )
+{
+	WorldContextSimulateJob * pJob = (WorldContextSimulateJob *)ud;
+	NodeZone * pZone = pJob->pContext->lockedZone( i );
+	if ( pZone )
+		pZone->simulate( pJob->nTick );
+}
+
+// Run the per-tick simulate pass over every locked zone.  When the experimental
+// parallel flag is ON, dispatch across worker threads; otherwise keep the
+// original serial loop byte-for-byte identical so the default path is
+// guaranteed unchanged.  Guarded by size() > 1 because parallelFor short-
+// circuits a single job inline anyway but this makes intent explicit.
+static void simulateLockedZones( WorldContext * pContext, dword nTick )
+{
+	const int nZones = pContext->lockedZoneCount();
+
+	if ( WorldContext::sm_bParallelSimulate && nZones > 1 )
+	{
+		WorldContextSimulateJob job = { pContext, nTick };
+		ThreadPool::shared().parallelFor( 0, nZones, worldContextSimulateZone, &job );
+	}
+	else
+	{
+		for ( int i = 0; i < nZones; ++i )
+			pContext->lockedZone( i )->simulate( nTick );
+	}
+}
+
+void WorldContext::captureRenderSnapshot( RenderSnapshot & out )
+{
+	PROFILE_START( "WorldContext::captureRenderSnapshot" );
+
+	out.clear();
+	out.m_Time = 0.0f;						// set by caller (InterfaceContext has the clock)
+	out.m_Tick = m_Tick;
+
+	// Walk every locked zone.  For each zone, iterate its direct children
+	// (the top-level nouns in that zone) and capture their render-relevant
+	// state.  Sub-children aren't captured yet — Stage 3.2 will either
+	// recurse or capture a flat scene-graph spanning list.  For now the
+	// top-level nouns are what the render path cares about at this layer.
+	for ( int z = 0; z < m_LockedZones.size(); ++z )
+	{
+		NodeZone * pZone = m_LockedZones[z];
+		if ( pZone == NULL )
+			continue;
+
+		const Vector3 & vZonePos = pZone->position();
+		const int nChildren = pZone->childCount();
+		for ( int i = 0; i < nChildren; ++i )
+		{
+			Noun * pNoun = WidgetCast<Noun>( pZone->child(i) );
+			if ( pNoun == NULL )
+				continue;
+
+			// Capture both LOCAL and WORLD transforms.  Local values are used
+			// by Noun::preRender's swap-and-restore (so the scene-graph
+			// descent's `parent % m_Frame` accumulation produces the same
+			// world frame the live path would).  World values are used by
+			// Noun::calculateWorld()/worldPosition()/worldFrame() — these
+			// are called from MANY render-side sites (HUD, camera math,
+			// shadow focus, contact rendering) outside the preRender chain.
+			// Without capturing world here, those calls walk the live parent
+			// chain and race with sim's mutations on ancestors → streaks.
+			out.addNoun(
+				pNoun->key(),
+				pNoun->position(),
+				pNoun->frame(),
+				pNoun->worldPosition(),
+				NodeTransform::worldFrame( pNoun ),
+				pNoun->velocity(),
+				pNoun->nodeFlags() );
+		}
+	}
+
+	PROFILE_END();
+}
+
 bool WorldContext::update()
 {
-	PROFILE_START( "WorldContext::update()" );
+	// RAII so the timer pops on every exit path — including the early
+	// `return false` below if grabReference() fails.  Previously this used
+	// PROFILE_START/_END and the early return leaked the timer on the stack,
+	// permanently corrupting parent depth on the sim thread.
+	PROFILE_FUNCTION();
 
 	if ( m_Timer.active() )
 	{
@@ -286,9 +382,8 @@ bool WorldContext::update()
 			{
 				// update the current tick
 				++m_Tick;
-				// simulate all locked zones
-				for(int i=0;i<m_LockedZones.size();i++)
-					m_LockedZones[i]->simulate( m_Tick );
+				// simulate all locked zones (serial or parallel per sm_bParallelSimulate)
+				simulateLockedZones( this, m_Tick );
 				// update the following once per second
 				if ( (m_Tick - m_TickSecond) >= TICKS_PER_SECOND )
 				{
@@ -300,6 +395,13 @@ bool WorldContext::update()
 			// simulate proxy worlds
 			for(int i=0;i<m_Worlds.size();++i)
 				m_Worlds[i]->update();
+
+			// Stage 3.1: drain sim state into the render snapshot ring.  Nothing
+			// downstream consumes it yet; Stage 3.2 redirects render reads to
+			// this snapshot.  Doing the capture here means worker threads
+			// (parallelSimulate) have completed and mutations are done.
+			captureRenderSnapshot( RenderSnapshotRing::instance().writeSlot() );
+			RenderSnapshotRing::instance().publish();
 		}
 		else
 		{
@@ -310,9 +412,8 @@ bool WorldContext::update()
 				m_Tick += nElaspedTicks;
 				m_TickSecond = m_Tick;
 
-				// simulate all locked zones
-				for(int i=0;i<m_LockedZones.size();i++)
-					m_LockedZones[i]->simulate( m_Tick );
+				// simulate all locked zones (serial or parallel per sm_bParallelSimulate)
+				simulateLockedZones( this, m_Tick );
 
 				updateSecond();
 
@@ -325,8 +426,6 @@ bool WorldContext::update()
 
 		releaseReference();
 	}
-
-	PROFILE_END();
 
 	return true;
 }
@@ -532,6 +631,13 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 				context.endShadowPass();
 			}
 
+			PROFILE_END();	// close "Rendering Zones" — must pair with the
+							// PROFILE_START above which only fires when
+							// beginScene succeeds.  The previous
+							// unconditional PROFILE_END at function exit
+							// popped the wrong Timer when beginScene failed
+							// or the proxy branch ran.
+
 			context.endScene();
 		}
 	}
@@ -540,8 +646,6 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 		// proxy render, just render the zones..
 		renderZones( context, frame, translate );
 	}
-
-	PROFILE_END();
 }
 
 void WorldContext::renderZones( RenderContext & context, const Matrix33 & frame, const Vector3 & translate )

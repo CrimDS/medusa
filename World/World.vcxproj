@@ -202,6 +202,7 @@
     <ClCompile Include="NounZoneTarget.cpp" />
     <ClCompile Include="Profile.cpp" />
     <ClCompile Include="ProfileUpdateQueue.cpp" />
+    <ClCompile Include="RenderSnapshot.cpp" />
     <ClCompile Include="Trait.cpp" />
     <ClCompile Include="TraitMovement.cpp" />
     <ClCompile Include="TraitReplication.cpp" />
@@ -250,6 +251,7 @@
     <ClInclude Include="NounZoneTarget.h" />
     <ClInclude Include="Profile.h" />
     <ClInclude Include="ProfileUpdateQueue.h" />
+    <ClInclude Include="RenderSnapshot.h" />
     <ClInclude Include="TargetReference.h" />
     <ClInclude Include="Trait.h" />
     <ClInclude Include="TraitMovement.h" />

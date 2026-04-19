@@ -17,6 +17,8 @@
 #include "Math/SphericalHull.h"
 #include "Standard/Limits.h"
 #include "Standard/AutoLock.h"
+#include "Standard/ThreadPool.h"
+#include "Render3D/RenderContext.h"
 #include "Draw/ImageCodec.h"
 
 #include "Display/Types.h"
@@ -803,8 +805,25 @@ bool DisplayDeviceD3D12::endShadowPass()
 		m_pCommandList->RSSetViewports( 1, &vp );
 		m_pCommandList->RSSetScissorRects( 1, &scissor );
 
-		for ( int i = 0; i < pass.m_Primitives.size(); ++i )
-			pass.m_Primitives[i]->execute();
+		{
+			// Per-cascade label so ALT+P shows which cascade is the runaway.
+			// Cascades cover progressively wider areas (CASCADE_SPLIT_RATIOS
+			// = { 0.08, 0.24, 0.60, 1.0 }) so cascade 3 typically catches the
+			// most geometry.  Lookup-table because the profiler interns names
+			// by content — we need stable string-literal pointers, not
+			// sprintf'd buffers.
+			static const char * const kShadowCascadeNames[ NUM_SHADOW_CASCADES ] = {
+				"shadowPass:cascade_0",
+				"shadowPass:cascade_1",
+				"shadowPass:cascade_2",
+				"shadowPass:cascade_3",
+			};
+			const int idx = ( cascadeIndex >= 0 && cascadeIndex < NUM_SHADOW_CASCADES ) ? cascadeIndex : 0;
+			PROFILE_START( kShadowCascadeNames[ idx ] );
+			for ( int i = 0; i < pass.m_Primitives.size(); ++i )
+				pass.m_Primitives[i]->execute();
+			PROFILE_END();
+		}
 
 		// Transition back to SRV on last cascade
 		if ( cascadeIndex == NUM_SHADOW_CASCADES - 1 )
@@ -889,42 +908,65 @@ bool DisplayDeviceD3D12::endScene()
 	bindPerFrameCB();
 
 	// Pre-render effects (e.g. redirect rendering to an offscreen target)
-	for ( EffectList::iterator iEffect = m_EffectList.begin();
-		iEffect != m_EffectList.end(); )
 	{
-		DisplayEffect * pEffect = *iEffect;
-		if ( !pEffect->preRender( this ) )
+		PROFILE_START( "endScene:effect_preRender" );
+		for ( EffectList::iterator iEffect = m_EffectList.begin();
+			iEffect != m_EffectList.end(); )
 		{
-			TRACE( "ERROR: Effect preRender() failed." );
-			m_EffectList.erase( iEffect++ );
+			DisplayEffect * pEffect = *iEffect;
+			if ( !pEffect->preRender( this ) )
+			{
+				TRACE( "ERROR: Effect preRender() failed." );
+				m_EffectList.erase( iEffect++ );
+			}
+			else
+				++iEffect;
 		}
-		else
-			++iEffect;
+		PROFILE_END();
 	}
 
 	// Execute material stacks for 3D passes only — OVERLAY is deferred until
 	// after post-processing so UI text stays crisp (FXAA would blur it).
+	// One profile entry per pass so the ALT+P tree shows where the GPU work
+	// actually goes (background clear + skybox vs solid geometry vs particles).
+	static const char * const kPassNames[ OVERLAY ] = {
+		"endScene:exec_BACKGROUND",		// stars, skybox, planet shells
+		"endScene:exec_PRIMARY",		// opaque ships, stations, planets
+		"endScene:exec_SECONDARY",		// translucent particles, beams, trails
+	};
 	for ( int i = 0; i < OVERLAY; ++i )
 	{
 		Array< PrimitiveMaterial::Ref > & materials = m_Stack[i];
+		if ( materials.size() == 0 )
+		{
+			materials.release();
+			continue;
+		}
+
+		PROFILE_START( kPassNames[ i ] );
 		for ( int j = 0; j < materials.size(); ++j )
 		{
 			PrimitiveMaterial * pMaterial = materials[j];
 			pMaterial->execute();
 			pMaterial->clear();
 		}
+		PROFILE_END();
 		materials.release();
 	}
 
 	// Post-render effects (e.g. bloom, blur — processed in reverse order)
-	for ( EffectList::reverse_iterator iEffect = m_EffectList.rbegin();
-		iEffect != m_EffectList.rend(); ++iEffect )
 	{
-		DisplayEffect * pEffect = *iEffect;
-		if ( !pEffect->postRender( this ) )
-			TRACE( "ERROR: Effect postRender() returned false!" );
+		PROFILE_START( "endScene:effect_postRender" );
+		for ( EffectList::reverse_iterator iEffect = m_EffectList.rbegin();
+			iEffect != m_EffectList.rend(); ++iEffect )
+		{
+			DisplayEffect * pEffect = *iEffect;
+			if ( !pEffect->postRender( this ) )
+				TRACE( "ERROR: Effect postRender() returned false!" );
+		}
+		m_EffectList.clear();
+		PROFILE_END();
 	}
-	m_EffectList.clear();
 
 	m_bBeginScene = false;
 	return true;
@@ -1078,6 +1120,13 @@ void DisplayDeviceD3D12::present()
 
 DevicePrimitive * DisplayDeviceD3D12::create( const PrimitiveKey & key )
 {
+	// BasePrimitiveFactory12::findFactory + pFactory->create() touch a shared
+	// factory pool (List of free primitives).  Two worker threads racing here
+	// corrupt the list → heap validation failure.  Serialize with the render
+	// lock used by Material and push().  Main thread no-ops when parallel is
+	// off since the lock is uncontended.
+	AutoLock lock( &RenderContext::sm_StateLock );
+
 	BasePrimitiveFactory12 * pFactory = BasePrimitiveFactory12::findFactory( key );
 	if ( pFactory == NULL )
 		throw PrimitiveFailure();
@@ -1096,24 +1145,50 @@ bool DisplayDeviceD3D12::push( DevicePrimitive * pPrimitive )
 
 	pPrimitive->setDevice( this );
 
+	// Route writes to per-worker scratch slots when running on a ThreadPool
+	// worker (inside parallel preRender).  Main thread keeps writing to the
+	// shared m_Stack / m_pCurrentMaterial / m_pCurrentTransform.  The main
+	// thread is blocked in parallelFor() during worker activity, so there
+	// is no contention between main and worker on the shared fields.
+	const int workerIdx = ThreadPool::currentWorkerIndex();
+	PrimitiveMaterial::Ref *		ppCurrentMaterial	= &m_pCurrentMaterial;
+	PrimitiveSetTransform::Ref *	ppCurrentTransform	= &m_pCurrentTransform;
+	Array< PrimitiveMaterial::Ref > * pStackArray		= m_Stack;
+	if ( workerIdx >= 0 && workerIdx < m_WorkerStates.size() )
+	{
+		WorkerRenderState & ws = m_WorkerStates[ workerIdx ];
+		ppCurrentMaterial	= &ws.m_pCurrentMaterial;
+		ppCurrentTransform	= &ws.m_pCurrentTransform;
+		pStackArray			= ws.m_Stack;
+	}
+
+	// The PrimitiveMaterial object is a process-wide cache: m_bPushed and
+	// its children-list are shared by every thread that touches it.  When
+	// we're on a worker, serialize the whole push() body through the same
+	// lock Material::material() uses so the two stay consistent.  Main
+	// thread never contends (it's blocked in parallelFor during worker
+	// activity) and gets a nullptr AutoLock = zero-cost no-op.
+	AutoLock sharedLock( workerIdx >= 0 ? (AbstractLock *)&RenderContext::sm_StateLock : (AbstractLock *)NULL );
+
 	if ( pPrimitive->primitiveKey() == PrimitiveMaterial::staticPrimitiveKey() )
 	{
-		m_pCurrentMaterial = (PrimitiveMaterial *)pPrimitive;
+		*ppCurrentMaterial = (PrimitiveMaterial *)pPrimitive;
 
 		if ( !m_bShadowPass )
 		{
 			PrimitiveMaterialD3D12 * pMaterial = (PrimitiveMaterialD3D12 *)pPrimitive;
 			if ( !pMaterial->m_bPushed )
 			{
-				m_Stack[ pMaterial->m_nPass ].push( pMaterial );
+				pStackArray[ pMaterial->m_nPass ].push( pMaterial );
 				pMaterial->m_bPushed = true;
 			}
 
-			if ( m_pCurrentTransform.valid() )
-				pMaterial->addChild( m_pCurrentTransform );
+			if ( (*ppCurrentTransform).valid() )
+				pMaterial->addChild( *ppCurrentTransform );
 		}
 		else
 		{
+			// Shadow passes are not parallelised — keep using main-thread state.
 			ShadowPass & pass = *m_iCurrentShadowPass;
 			if ( m_pCurrentTransform.valid() && (pass.m_Primitives.size() == 0 || pass.m_Primitives.last() != m_pCurrentTransform) )
 				pass.m_Primitives.push( (DevicePrimitive *)m_pCurrentTransform );
@@ -1122,15 +1197,16 @@ bool DisplayDeviceD3D12::push( DevicePrimitive * pPrimitive )
 	else
 	{
 		if ( pPrimitive->primitiveKey() == PrimitiveSetTransform::staticPrimitiveKey() )
-			m_pCurrentTransform = (PrimitiveSetTransform *)pPrimitive;
+			*ppCurrentTransform = (PrimitiveSetTransform *)pPrimitive;
 
 		if ( !m_bShadowPass )
 		{
-			if ( m_pCurrentMaterial.valid() )
-				m_pCurrentMaterial->addChild( pPrimitive );
+			if ( (*ppCurrentMaterial).valid() )
+				(*ppCurrentMaterial)->addChild( pPrimitive );
 		}
 		else
 		{
+			// Shadow passes stay main-thread.
 			ShadowPass & pass = *m_iCurrentShadowPass;
 			if ( !m_pCurrentMaterial.valid() || m_pCurrentMaterial->pass() == PRIMARY )
 				pass.m_Primitives.push( pPrimitive );
@@ -1138,6 +1214,34 @@ bool DisplayDeviceD3D12::push( DevicePrimitive * pPrimitive )
 	}
 
 	return true;
+}
+
+void DisplayDeviceD3D12::ensureParallelWorkerSlots( int nWorkers )
+{
+	if ( m_WorkerStates.size() < nWorkers )
+		m_WorkerStates.allocate( nWorkers );
+}
+
+void DisplayDeviceD3D12::mergeWorkerStacks()
+{
+	// Concatenate each worker's per-pass primitive stack back onto the shared
+	// m_Stack in worker-index order.  Clear each worker's slot so the next
+	// parallel dispatch starts empty.  Called on the main thread after a
+	// parallelFor dispatch of preRender completes, before endScene() reads
+	// m_Stack[pass] to submit draws.
+	for ( int w = 0; w < m_WorkerStates.size(); ++w )
+	{
+		WorkerRenderState & ws = m_WorkerStates[w];
+		for ( int pass = 0; pass < PASS_COUNT; ++pass )
+		{
+			Array< PrimitiveMaterial::Ref > & src = ws.m_Stack[pass];
+			for ( int i = 0; i < src.size(); ++i )
+				m_Stack[pass].push( src[i] );
+			src.release();
+		}
+		ws.m_pCurrentMaterial = NULL;
+		ws.m_pCurrentTransform = NULL;
+	}
 }
 
 DisplayEffect::Ref DisplayDeviceD3D12::createEffect( const char * pName )

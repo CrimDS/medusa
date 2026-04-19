@@ -498,6 +498,9 @@
     <ClInclude Include="..\Standard\Thread.h">
       <Filter>Standard</Filter>
     </ClInclude>
+    <ClInclude Include="..\Standard\ThreadPool.h">
+      <Filter>Standard</Filter>
+    </ClInclude>
     <ClInclude Include="..\Standard\Time.h">
       <Filter>Standard</Filter>
     </ClInclude>
@@ -871,6 +874,9 @@
       <Filter>Standard</Filter>
     </ClCompile>
     <ClCompile Include="..\Standard\Thread.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="..\Standard\ThreadPool.cpp">
       <Filter>Standard</Filter>
     </ClCompile>
     <ClCompile Include="..\Standard\Time.cpp">

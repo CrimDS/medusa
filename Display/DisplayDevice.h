@@ -213,6 +213,18 @@ public:
 	virtual void					abortScene() = 0;					// remove all primitives from stack
 	virtual void					present() = 0;						// show rendering results
 
+	// Called by parallel preRender dispatchers on the main thread after a
+	// parallelFor of child preRender returns, before the primitives are
+	// consumed.  Concrete devices that maintain per-worker scratch state
+	// (e.g. DisplayDeviceD3D12) override this to concatenate per-worker
+	// primitive stacks onto the main stack.  Default: no-op.
+	virtual void					mergeParallelRenderState() {}
+
+	// Ensure per-worker scratch space is large enough for the given worker
+	// count.  Called once per parallel dispatch just before workers start.
+	// Default: no-op.
+	virtual void					ensureParallelWorkerSlots( int nWorkers ) { (void)nWorkers; }
+
 	virtual DevicePrimitive *		create( const PrimitiveKey &key ) = 0;	
 	template<class T> 
 	T *								create( Reference<T> &primitive );	

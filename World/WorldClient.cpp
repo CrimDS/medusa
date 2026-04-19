@@ -37,6 +37,34 @@ IMPLEMENT_ABSTRACT_FACTORY( WorldClient, Widget );
 
 #pragma warning(disable:4800) // forcing value to bool 'true' or 'false' (performance warning)
 
+// Stage 3.3 — default off.  Set true to run simulation on a dedicated thread.
+// Requires RenderContext::sm_bUseRenderSnapshot to be true as well: when the
+// sim thread mutates live noun state, the render thread must read from the
+// published snapshot or see torn data.
+bool				WorldClient::sm_bPipelinedSimRender = false;
+
+int WorldClient::SimThread::run()
+{
+	// Loop until shutdown.  Each iteration briefly acquires the client lock,
+	// runs the sim pass (which internally gates by WorldTimer so only real
+	// ticks do work), then releases and sleeps lightly.  Release between
+	// iterations is what lets the render thread's lock() acquire proceed.
+	while ( m_bRunning )
+	{
+		m_pClient->lock();
+		WorldContext * pContext = m_pClient->context();
+		if ( pContext )
+			pContext->update();
+		m_pClient->unlock();
+
+		// Yield briefly.  WorldTimer inside WorldContext::update caps the
+		// real tick rate to TICKS_PER_SECOND (20 Hz); this thread can spin
+		// faster than that without cost.  10 ms ≈ 100 Hz wake rate.
+		Thread::sleep( 10 );
+	}
+	return 0;
+}
+
 WorldClient::WorldClient() : Client(),
 	m_pUser( &NULL_USER ), 
 	m_Active( true ), 
@@ -69,7 +97,8 @@ WorldClient::WorldClient() : Client(),
 	m_nLastPingTime( 0 ), 
 	m_nLastPingTimeUDP( 0 ), 
 	m_nLastUDPTime( 0 ),
-	m_bServerTransfer( false )
+	m_bServerTransfer( false ),
+	m_pSimThread( NULL )
 {
 	// create a new WorldContext object
 	m_pWorldContext = new WorldContext();
@@ -90,6 +119,16 @@ WorldClient::~WorldClient()
 	
 	// stop the threads
 	m_Active = false;
+
+	// Stop the sim thread first — its loop checks m_bRunning then tries to
+	// acquire the client lock.  Setting m_bRunning to 0 lets the current
+	// iteration finish; delete then joins via Thread's destructor.
+	if ( m_pSimThread )
+	{
+		m_pSimThread->m_bRunning = 0;
+		delete m_pSimThread;
+		m_pSimThread = NULL;
+	}
 
 	if (m_pMetaUpdate )
 	{
@@ -209,6 +248,16 @@ void WorldClient::onClientUDP( u32 nClient, u8 nMessage, UDP * pUDP )
 {
 	if ( nClient == SERVER_CLIENTID )
 	{
+		// Serialize against sim/render threads.  receiveMessage handlers mutate
+		// the noun graph (CONTEXT_UPDATE_NOUN, CONTEXT_DEL_NOUN, …) and write
+		// outgoing replies to the socket FIFO via send().  Without this lock
+		// the UDP receive thread races with SimThread::run (mutating nouns)
+		// and the render thread's WorldClient::update (PING send), producing
+		// heap corruption and FIFOBuffer::push memcpy crashes.  The lock is a
+		// reentrant CRITICAL_SECTION so handlers that themselves call lock()
+		// nest safely.
+		AutoLock netLock( &m_Lock );
+
 		try {
 			InStream input( pUDP, FF_TRANSMIT, SV_CURRENT, m_pDictionary );
 			receiveMessage( true, nMessage, input );
@@ -342,6 +391,15 @@ bool WorldClient::login( dword a_nSessionID )
 		// start the meta update thread
 		m_pMetaUpdate = new MetaUpdate( this );
 		m_pMetaUpdate->resume();
+	}
+
+	// Stage 3.3 of the sim/render split: start the dedicated sim thread
+	// if pipelined mode is enabled.  Requires sm_bUseRenderSnapshot too
+	// so render reads from the published snapshot instead of live state.
+	if ( sm_bPipelinedSimRender && m_pSimThread == NULL )
+	{
+		m_pSimThread = new SimThread( this );
+		m_pSimThread->resume();
 	}
 
 	unlock();
@@ -739,8 +797,11 @@ void WorldClient::update()
 
 			PROFILE_END();	// close "WorldClient::zone_lock_scan"
 
-			// update the worldContext (already has its own PROFILE_START inside)
-			pContext->update();
+			// Sim pass.  When pipelined, the dedicated SimThread owns the
+			// sim pass — skip it here on the render thread to avoid running
+			// WorldContext::update twice per wall-clock tick.
+			if ( !sm_bPipelinedSimRender )
+				pContext->update();
 		}
 	}
 

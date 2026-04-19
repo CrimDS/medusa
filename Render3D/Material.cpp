@@ -12,8 +12,10 @@
 #include "Debug/Trace.h"
 #include "Standard/Bits.h"
 #include "Standard/Limits.h"
+#include "Standard/AutoLock.h"
 #include "Draw/Draw.h"
 #include "Render3D/Material.h"
+#include "Render3D/RenderContext.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -213,6 +215,14 @@ bool Material::removeTexture( int n )
 
 DevicePrimitive * Material::material( RenderContext & context )
 {
+	// A Material is a process-wide cache shared across every draw that uses
+	// it — m_Material, m_Surfaces, m_fLastAlpha, m_nLastFrame are mutated here.
+	// Under parallel preRender multiple workers can push the same Material
+	// concurrently, so the whole function must serialise on a global lock.
+	// Cost: uncontended CriticalSection is ~30ns; typical materials hit the
+	// cache early-return after first use so real contention stays low.
+	AutoLock lock( &RenderContext::sm_StateLock );
+
 	// check for the primitives being initialized
 	if (! m_Material.valid() || m_fLastAlpha != context.alpha() || !m_bSurfaceReady )
 		createDevicePrimitives( context );
@@ -237,10 +247,10 @@ DevicePrimitive * Material::material( RenderContext & context )
 				for(int i=0;i<surfaces.size();++i)
 				{
 					Texture & texture = m_Textures[ i ];
-					m_Material->addSurface( surfaces[i], 
+					m_Material->addSurface( surfaces[i],
 						texture.m_eType,
-						texture.m_nIndex, 
-						texture.m_nUV, 
+						texture.m_nIndex,
+						texture.m_nUV,
 						texture.m_fParams );
 				}
 			}

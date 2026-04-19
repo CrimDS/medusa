@@ -27,6 +27,7 @@
 
 #include "Standard/List.h"
 #include "Standard/Queue.h"
+#include "Standard/CriticalSection.h"
 #include "Resource/Text.h"
 #include "Resource/Collection.h"
 
@@ -216,6 +217,21 @@ public:
 	static int					sm_nMaxShadowLights;
 	static bool					sm_bEnableSSAO;
 
+	// EXPERIMENTAL: when true, WorldContext::update() dispatches NodeZone::simulate
+	// across worker threads.  Known-racing cross-zone mutations (weapon spawn,
+	// zone transfer, cross-ship collision/threat lists) are serialized through
+	// sm_SimMutLock below; other paths are best-effort and may exhibit glitches
+	// until Phase 2 audit completes.
+	static bool					sm_bParallelSimulate;
+
+	// Serializes the subset of mutations known to be called transitively from
+	// NodeZone::simulate() that would race across zones under parallel dispatch.
+	// Single global lock (coarse) — cheap to hold for short mutation windows,
+	// simpler than per-object locks and sufficient for current scale.  Always
+	// acquired so serial-mode behavior stays identical (uncontended lock is
+	// cheap); no need to branch on sm_bParallelSimulate.
+	static CriticalSection		sm_SimMutLock;
+
 	// Constructions
 	WorldContext();
 	virtual	~WorldContext();
@@ -286,6 +302,13 @@ public:
 	virtual bool				stop();											// stop/pause this context
 	virtual bool				update();										// update all locked zones
 	virtual void				updateSecond();									// called by update() every one second
+
+	// Stage 3.1 of the sim/render split (see Docs/Phase3_SimRenderSplit.md).
+	// Walk all locked zones and drain per-noun render-relevant state into the
+	// given snapshot.  Called by update() after simulate completes; the
+	// snapshot is not yet consumed by the render path.  Populating it here
+	// proves the capture side works and surfaces the cost in profiling.
+	void						captureRenderSnapshot( class RenderSnapshot & out );
 
 	virtual bool				merge( WorldContext * a_pContext );				// merge another world context into this one..
 

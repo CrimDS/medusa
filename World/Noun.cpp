@@ -12,9 +12,11 @@
 #include "Resource/Resource.h"
 #include "Render3D/NodeSound.h"
 #include "Render3D/NodeLight.h"
+#include "Render3D/RenderContext.h"
 
 #include "Noun.h"
 #include "NounTarget.h"
+#include "RenderSnapshot.h"
 #include "WorldContext.h"
 #include "VerbChat.h"
 #include "TraitMovement.h"
@@ -174,13 +176,73 @@ void Noun::preRender( RenderContext & context,
 
 	// NOTE: We use the worldHull() function, because it will calculate the world hull if needed..
 #if USE_SPHERE_VISIBLE
-	if ( bAmbient || context.sphereVisible( context.worldToView( worldHull().center() ), worldHull().radius() ) )
-		NodeTransform::preRender( context, frame, position );
+	const bool bVisible = bAmbient || context.sphereVisible( context.worldToView( worldHull().center() ), worldHull().radius() );
 #else
-	if ( bAmbient || context.boxVisible( context.worldToView( worldHull() ) ) )
-		NodeTransform::preRender( context, frame, position );
+	const bool bVisible = bAmbient || context.boxVisible( context.worldToView( worldHull() ) );
 #endif
+	if ( bVisible )
+	{
+		// Stage 3.2: swap in the snapshotted local frame/position, let the
+		// live NodeTransform::preRender path run unchanged, then restore.
+		// This is race-free while sim and render are still serial on one
+		// thread (Stage 3.3 will address threading).  The swap guarantees
+		// byte-identical rendering vs the flag-off path, including all the
+		// downstream cache invariants on m_Frame / m_Position that the
+		// scene graph's primitive factories, materials, and per-primitive
+		// caches depend on.
+		if ( RenderContext::sm_bUseRenderSnapshot )
+		{
+			const RenderSnapshot & snap = RenderSnapshotRing::instance().readSlot();
+			const int nIdx = snap.findIndex( key() );
+			// Sanity-check the lookup: ensure the entry's key actually matches.
+			// If the map ever got into an inconsistent state, a wrong index here
+			// would silently swap in some other noun's transform.
+			if ( nIdx >= 0 && snap.nounKey( nIdx ).m_Id == key().m_Id )
+			{
+				// Diagnostic: log first few large mismatches between snapshot
+				// and live to catch torn captures.
+				static int s_nLogCount = 0;
+				if ( s_nLogCount < 20 )
+				{
+					const Vector3 & snapPos = snap.position( nIdx );
+					if ( (snapPos - m_Position).magnitude2() > 100.0f )
+					{
+						LOG_STATUS( "Noun", "snap mismatch: %s key=%llu live=(%.1f,%.1f,%.1f) snap=(%.1f,%.1f,%.1f)",
+							name(), (unsigned long long)key().m_Id,
+							m_Position.x, m_Position.y, m_Position.z,
+							snapPos.x, snapPos.y, snapPos.z );
+						++s_nLogCount;
+					}
+				}
+				const Matrix33 liveFrame = m_Frame;
+				const Vector3  livePos   = m_Position;
+				m_Frame    = snap.frame( nIdx );
+				m_Position = snap.position( nIdx );
+				NodeTransform::preRender( context, frame, position );
+				m_Frame    = liveFrame;
+				m_Position = livePos;
+				return;
+			}
+		}
+		NodeTransform::preRender( context, frame, position );
+	}
 #else
+	if ( RenderContext::sm_bUseRenderSnapshot )
+	{
+		const RenderSnapshot & snap = RenderSnapshotRing::instance().readSlot();
+		const int nIdx = snap.findIndex( key() );
+		if ( nIdx >= 0 )
+		{
+			const Matrix33 liveFrame = m_Frame;
+			const Vector3  livePos   = m_Position;
+			m_Frame    = snap.frame( nIdx );
+			m_Position = snap.position( nIdx );
+			NodeTransform::preRender( context, frame, position );
+			m_Frame    = liveFrame;
+			m_Position = livePos;
+			return;
+		}
+	}
 	NodeTransform::preRender( context, frame, position );
 #endif
 }
@@ -287,6 +349,29 @@ void Noun::invalidateWorld() const
 
 void Noun::calculateWorld() const
 {
+	// When the render thread is reading from the published snapshot, short-
+	// circuit the live parent-chain walk.  Without this, render-side calls
+	// to worldPosition()/worldFrame()/worldHull() (HUD code, camera math,
+	// shadow focus, contact rendering) read live ancestor positions while
+	// the sim thread mutates them — producing torn world transforms and
+	// streaked geometry.  When the noun is in the snapshot we use the
+	// values captured atomically there.
+	if ( isRenderingFromSnapshot() && RenderContext::sm_bUseRenderSnapshot )
+	{
+		const RenderSnapshot & snap = RenderSnapshotRing::instance().readSlot();
+		const int nIdx = snap.findIndex( key() );
+		if ( nIdx >= 0 && snap.nounKey( nIdx ).m_Id == key().m_Id )
+		{
+			m_nWorldTick    = m_Tick;
+			m_WorldPosition = snap.worldPosition( nIdx );
+			m_WorldFrame    = snap.worldFrame( nIdx );
+			m_vWorldVelocity = snap.velocity( nIdx );
+			m_vZonePosition = snap.position( nIdx );
+			m_WorldHull.setBox( hull(), m_WorldFrame, m_WorldPosition );
+			return;
+		}
+	}
+
 	BaseNode * pBaseNode = parent();
 
 	m_vWorldVelocity = m_vVelocity;

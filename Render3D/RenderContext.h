@@ -35,10 +35,11 @@
 
 #include "Math/Matrix33.h"
 #include "Math/Vector3.h"
-#include "Math/Plane.h" 
+#include "Math/Plane.h"
 #include "Display/DisplayDevice.h"
 #include "Audio/AudioDevice.h"
 #include "Math/BoxHull.h"
+#include "Standard/CriticalSection.h"
 #include "Render3D/Render3dDll.h"
 
 //-------------------------------------------------------------------------------
@@ -112,6 +113,42 @@ public:
 	// traversal code (e.g. NodeZone::preRender) can cache per-pass transforms
 	// and invalidate on generation-counter mismatch without comparing matrices.
 	qword				renderPassGeneration() const;
+
+	// Atomically add `delta` to the instance key and return the new value.
+	// Replaces the read-modify-write pattern `setInstanceKey(instanceKey()+k)`
+	// used by BaseNode::preRender / NodeZone::preRender.  Stage 1: serialized
+	// via sm_StateLock so concurrent preRender threads don't interleave the
+	// R/W.  Stage 2 will replace this with per-thread state.
+	qword				bumpInstanceKey( qword delta );
+
+	// KNOWN BROKEN — do not enable.  Parallel preRender dispatch was prototyped
+	// but the rendering subsystem has many shared caches (Material, Font,
+	// Texture, PrimitiveFactory pools, etc.) that were designed single-threaded.
+	// Even with locks around the cache creation sites, transparency ordering
+	// breaks because per-worker primitive stacks merge in worker-index order
+	// rather than traversal order, causing visible flicker.  Leave false.
+	//
+	// The scaffolding (per-thread instance key, per-worker primitive stacks,
+	// lock points on shared caches) is kept in place because it's correct
+	// when unused and paves the way for a future architectural refactor
+	// (sim/render pipeline split — see darkspace/Docs/Phase3_SimRenderSplit.md).
+	static bool			sm_bParallelPreRender;
+
+	// Stage 3.2 of the sim/render split: when true, Noun::preRender swaps
+	// snapshotted local frame/position into the live members for the
+	// duration of preRender, runs the unchanged live path, then restores.
+	// This is race-free while sim and render are both on the main thread
+	// (Stage 3.3 will move sim off).  The swap-and-restore approach
+	// guarantees identical rendering vs flag-off — downstream cache
+	// invariants on m_Frame / m_Position are preserved because the actual
+	// live members are what gets read.
+	static bool			sm_bUseRenderSnapshot;
+
+	// Global lock that serializes reads/writes of shared render-traversal
+	// state (instance key, instance data map).  Reentrant.  Acquired
+	// unconditionally — uncontended lock overhead is tens of nanoseconds and
+	// keeps the serial path byte-for-byte identical semantically.
+	static CriticalSection	sm_StateLock;
 
 	const Matrix33 &	frame() const;										// world space frame and position
 	const Vector3 &		position() const;
@@ -343,10 +380,8 @@ inline dword RenderContext::bits() const
 	return m_State.m_Bits;
 }
 
-inline qword RenderContext::instanceKey() const
-{
-	return m_State.m_nInstanceKey;
-}
+// instanceKey() moved to RenderContext.cpp because it returns thread-local
+// state.  See tl_nInstanceKey in the .cpp file.
 
 inline float RenderContext::alpha() const
 {

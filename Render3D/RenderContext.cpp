@@ -10,10 +10,12 @@ RenderContext.cpp
 #include "Debug/Assert.h"
 #include "Standard/Bits.h"
 #include "Standard/Time.h"
+#include "Standard/AutoLock.h"
+#include "Standard/ThreadPool.h"
 #include "Display/Types.h"
 #include "Display/PrimitiveLineStrip.h"
 #include "Display/PrimitiveSetTransform.h"
-#include "Render3D/Material.h" 
+#include "Render3D/Material.h"
 #include "Render3D/RenderContext.h"
 #include "Render3D/Scene.h"
 #include "Render3D/NodeSound.h"
@@ -27,6 +29,18 @@ IMPLEMENT_NAMED_ABSTRACT_FACTORY(FACTORY_RenderContextInstanceData, RenderContex
 float	RenderContext::sm_fDefaultDetail = 0.5f;				// default detail level, should be initialized by client options..
 int		RenderContext::sm_nShadowMapSize = 4096;				// default shadow map size
 float	RenderContext::sm_fShadowMapRadius = 5000.0f;			// default shadow map radius
+
+// Threading infrastructure — see RenderContext.h comments.
+bool				RenderContext::sm_bParallelPreRender = false;
+bool				RenderContext::sm_bUseRenderSnapshot = false;
+CriticalSection		RenderContext::sm_StateLock;
+
+// Per-thread instance key.  BaseNode::preRender bumps the key up on enter and
+// down on exit as it walks the tree; the value is a path-dependent breadcrumb
+// that identifies "this specific traversal position".  Must be per-thread so
+// parallel workers exploring different subtrees don't step on each other.
+// Main thread's initial value is 0; each worker sees 0 at the start of a job.
+static thread_local qword tl_nInstanceKey = 0;
 
 																//---------------------------------------------------------------------------------------------------
 
@@ -191,16 +205,44 @@ void RenderContext::setBits(dword bits)
 	m_State.m_Bits = bits;
 }
 
+qword RenderContext::instanceKey() const
+{
+	// Reads the per-thread breadcrumb counter.  Each worker thread bumps its
+	// own TLS value independently; cross-thread reads would see the wrong
+	// value anyway (the key is path-dependent for THIS thread's traversal).
+	return tl_nInstanceKey;
+}
+
 void RenderContext::setInstanceKey(qword key)
 {
-	m_State.m_nInstanceKey = key;
+	// Per-thread.  Workers never touch m_State.m_nInstanceKey — that value
+	// is only kept in sync on the main thread for any legacy consumer that
+	// reaches into m_State directly.
+	tl_nInstanceKey = key;
+	if ( ThreadPool::currentWorkerIndex() < 0 )
+		m_State.m_nInstanceKey = key;
+}
+
+qword RenderContext::bumpInstanceKey( qword delta )
+{
+	// Per-thread atomic-by-construction: no other thread writes tl_nInstanceKey.
+	tl_nInstanceKey += delta;
+	// Keep m_State aligned on the main-thread side for legacy observers;
+	// worker threads don't touch m_State from here.
+	if ( ThreadPool::currentWorkerIndex() < 0 )
+		m_State.m_nInstanceKey = tl_nInstanceKey;
+	return tl_nInstanceKey;
 }
 
 RenderContext::InstanceData * RenderContext::instanceData(const ClassKey & a_ClassKey)
 {
+	// The data map is shared; serialize access.  This is called rarely
+	// compared to push(), so coarse-lock overhead is negligible.
+	AutoLock lock( &sm_StateLock );
+
 	InstanceData * pData = NULL;
 
-	InstanceDataMap::iterator iData = m_InstanceDataMap.find(m_State.m_nInstanceKey);
+	InstanceDataMap::iterator iData = m_InstanceDataMap.find( tl_nInstanceKey );
 	if (iData != m_InstanceDataMap.end())
 		pData = iData->second;
 
@@ -214,7 +256,7 @@ RenderContext::InstanceData * RenderContext::instanceData(const ClassKey & a_Cla
 		}
 
 		// update the map with the new data object..
-		m_InstanceDataMap[m_State.m_nInstanceKey] = pData;
+		m_InstanceDataMap[ tl_nInstanceKey ] = pData;
 	}
 
 	pData->setTouched(true);
@@ -385,8 +427,18 @@ void RenderContext::push(DevicePrimitive * pPrimitive)
 
 void RenderContext::push(Material * pMaterial)
 {
-	if (pMaterial != NULL)
-		push(pMaterial->material(*this));
+	if (pMaterial == NULL)
+		return;
+
+	// Material::material() may replace its internal m_Material reference
+	// on this or another thread (alpha change, animation frame swap).  The
+	// raw DevicePrimitive* returned could then be released before push()
+	// gets to run on it.  Hold the same lock Material::material() uses
+	// across BOTH calls so the returned pointer remains valid until push
+	// finishes consuming it.  Reentrant no-op on the main thread when
+	// parallelPreRender is off; reentrant on worker threads too.
+	AutoLock lock( &sm_StateLock );
+	push( pMaterial->material(*this) );
 }
 
 void RenderContext::pushTransform(const Matrix33 & m, const Vector3 & v)

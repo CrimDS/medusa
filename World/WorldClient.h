@@ -466,7 +466,7 @@ protected:
 		// Data
 		WorldClient *	m_pClient;
 		// Construction
-		MetaUpdate( WorldClient * pClient ) 
+		MetaUpdate( WorldClient * pClient )
 			: m_pClient( pClient )
 		{}
 		// Thread interface
@@ -477,6 +477,33 @@ protected:
 	};
 
 	MetaUpdate *		m_pMetaUpdate;		// update object
+
+	// Stage 3.3 of the sim/render split: dedicated thread that runs
+	// WorldContext::update() — simulation + snapshot capture — in a loop,
+	// off the render thread.  Only active when sm_bPipelinedSimRender is
+	// true.  Coordinated with the main thread via WorldClient::lock (sim
+	// acquires briefly each iteration; render acquires for the frame).
+	// The actual sim cadence is gated by WorldTimer inside the context,
+	// so this thread's loop sleeps lightly and lets the timer decide.
+	class DLL SimThread : public SafeThread
+	{
+	public:
+		WorldClient *	m_pClient;
+		volatile int	m_bRunning;
+		SimThread( WorldClient * pClient ) : m_pClient( pClient ), m_bRunning( 1 ) {}
+		int run();
+	};
+
+	SimThread *			m_pSimThread;		// sim thread (when pipelined)
+
+public:
+	// When true, dedicated sim thread runs WorldContext::update; render
+	// reads world transforms from the published snapshot via
+	// Noun::calculateWorld's snapshot short-circuit (gated on the
+	// tl_bRenderingFromSnapshot thread-local set by InterfaceContext::render).
+	// Default off — set "pipelinedSimRender=1" in config.ini to enable.
+	// Auto-enables sm_bUseRenderSnapshot when on.
+	static bool			sm_bPipelinedSimRender;
 
 	//-------------------------------------------------------------------------------
 };

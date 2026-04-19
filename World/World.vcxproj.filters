@@ -50,6 +50,9 @@
     <ClCompile Include="ProfileUpdateQueue.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="RenderSnapshot.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Trait.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -188,6 +191,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="ProfileUpdateQueue.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="RenderSnapshot.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="TargetReference.h">
