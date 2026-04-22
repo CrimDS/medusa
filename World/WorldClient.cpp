@@ -41,7 +41,8 @@ IMPLEMENT_ABSTRACT_FACTORY( WorldClient, Widget );
 // Requires RenderContext::sm_bUseRenderSnapshot to be true as well: when the
 // sim thread mutates live noun state, the render thread must read from the
 // published snapshot or see torn data.
-bool				WorldClient::sm_bPipelinedSimRender = false;
+bool				WorldClient::sm_bPipelinedSimRender = true;		// Phase D D.3 unblocked sim pipelining (Material/Broker deadlock fix at Material.cpp:129)
+bool				WorldClient::sm_bAssertSnapshotCoverage = true;	// Phase D audit — fires SNAPSHOT_ASSERT_COVERED in debug builds
 
 int WorldClient::SimThread::run()
 {
@@ -772,8 +773,8 @@ void WorldClient::update()
 					if ( pZone->locked() )
 					{
 						// if the world hull of the zone intersects with our focus area, lock the zone for updating
-						if ( hFocusArea.intersect( pZone->worldHull() ) 
-							|| pZone->inZone( m_pSelf ) 
+						if ( hFocusArea.intersect( pZone->worldHull() )
+							|| pZone->inZone( m_pSelf )
 							|| pZone->inZone( m_pTarget ) )
 						{
 							continue;		// keep zone locked
@@ -783,8 +784,8 @@ void WorldClient::update()
 					}
 					else if (! pZone->locked() )
 					{
-						if ( !hFocusArea.intersect( pZone->worldHull() ) 
-							&& !pZone->inZone( m_pSelf ) 
+						if ( !hFocusArea.intersect( pZone->worldHull() )
+							&& !pZone->inZone( m_pSelf )
 							&& !pZone->inZone( m_pTarget ) )
 						{
 							continue;		// keep zone unlocked

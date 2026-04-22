@@ -241,7 +241,14 @@ void NodeZone::preRender( RenderContext &context, const Matrix33 & frame, const 
 				// the child subtree sees the same key context it would under
 				// a serial traversal.
 				pJ->pContext->setInstanceKey( pJ->nParentKey );
+				// Publish the current child index so DisplayDevice::push can
+				// tag each pushed material with it.  mergeWorkerStacks later
+				// stable-sorts materials by the minimum child index across
+				// workers, restoring traversal order in the merged pass
+				// stacks regardless of worker-grab order.
+				RenderContext::setPreRenderChildIndex( i );
 				pChild->preRender( *pJ->pContext, pJ->vWorldFrame, pJ->vWorldPosition );
+				RenderContext::setPreRenderChildIndex( -1 );
 			}
 		};
 

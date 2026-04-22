@@ -12,6 +12,7 @@
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <DirectXMath.h>
+#include <atomic>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -222,7 +223,7 @@ public:
 	bool Create(ID3D12Device * pDevice, UINT bufferSize)
 	{
 		m_BufferSize = bufferSize;
-		m_CurrentOffset = 0;
+		m_CurrentOffset.store(0, std::memory_order_relaxed);
 
 		D3D12_HEAP_PROPERTIES heapProps = {};
 		heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -249,7 +250,9 @@ public:
 		return true;
 	}
 
-	void Reset() { m_CurrentOffset = 0; }
+	// Single-threaded reset; called at frame start.  Relaxed because there
+	// are no concurrent allocators at this point (frame boundary barrier).
+	void Reset() { m_CurrentOffset.store(0, std::memory_order_relaxed); }
 
 	// Allocate space and return GPU virtual address + CPU pointer
 	struct Allocation
@@ -259,6 +262,14 @@ public:
 		UINT						offset;
 	};
 
+	// Thread-safe via compare-exchange loop on m_CurrentOffset.  Multiple
+	// workers can call concurrently; each gets a non-overlapping slice.
+	// Wrap-on-exhaust is intact: when a candidate alignedOffset+size would
+	// overrun the buffer we restart from 0.  This is safe because by the
+	// time a frame's ring buffer is being reused (post-Reset()), the GPU
+	// has finished the prior frame's draws via the frame fence.  Concurrent
+	// wrappers each propose their own alignedOffset/newOffset and only the
+	// CAS winner commits; losers retry against the updated value.
 	Allocation Allocate(UINT size, UINT alignment = 256)
 	{
 		// Reject allocations that exceed the entire buffer
@@ -269,18 +280,30 @@ public:
 			return alloc;
 		}
 
-		UINT alignedOffset = (m_CurrentOffset + alignment - 1) & ~(alignment - 1);
-		if (alignedOffset + size > m_BufferSize)
+		UINT current = m_CurrentOffset.load(std::memory_order_relaxed);
+		UINT alignedOffset;
+		UINT newOffset;
+		for (;;)
 		{
-			// wrap around
-			alignedOffset = 0;
+			alignedOffset = (current + alignment - 1) & ~(alignment - 1);
+			if (alignedOffset + size > m_BufferSize)
+				alignedOffset = 0;	// wrap around
+			newOffset = alignedOffset + size;
+
+			// Acquire on success so any subsequent reads of the buffer (which
+			// don't happen — CPU writes via mapped pointer — but kept for
+			// future-proofing) synchronise-with prior allocators.
+			if (m_CurrentOffset.compare_exchange_weak(
+					current, newOffset,
+					std::memory_order_acq_rel, std::memory_order_relaxed))
+				break;
+			// CAS failure refreshes `current`; retry with the new value.
 		}
 
 		Allocation alloc;
 		alloc.offset = alignedOffset;
 		alloc.cpuAddress = m_pMappedData + alignedOffset;
 		alloc.gpuAddress = m_Buffer->GetGPUVirtualAddress() + alignedOffset;
-		m_CurrentOffset = alignedOffset + size;
 		return alloc;
 	}
 
@@ -309,7 +332,7 @@ private:
 	ComPtr<ID3D12Resource>	m_Buffer;
 	byte *					m_pMappedData;
 	UINT					m_BufferSize;
-	UINT					m_CurrentOffset;
+	std::atomic<UINT>		m_CurrentOffset;	// thread-safe via Allocate's CAS loop
 };
 
 //----------------------------------------------------------------------------

@@ -271,6 +271,14 @@ void Noun::setFrame( const Matrix33 &frame )
 
 //----------------------------------------------------------------------------
 
+void Noun::captureSnapshotState( RenderSnapshot & /*out*/, int /*idx*/ ) const
+{
+	// Default: no extra state to capture.  NounShip and other subclasses
+	// override to write type-specific render-relevant state.
+}
+
+//----------------------------------------------------------------------------
+
 bool Noun::isRootNoun() const
 {
 	return WidgetCast<NodeZone>( parent() ) != NULL;

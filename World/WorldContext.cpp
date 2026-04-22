@@ -354,6 +354,35 @@ void WorldContext::captureRenderSnapshot( RenderSnapshot & out )
 				NodeTransform::worldFrame( pNoun ),
 				pNoun->velocity(),
 				pNoun->nodeFlags() );
+
+			// Phase D: type-specific render state.  Default Noun impl is
+			// no-op; NounShip writes energy/damage/signature; future
+			// overrides can add more (gadget state, target keys, etc).
+			pNoun->captureSnapshotState( out, out.nounCount() - 1 );
+
+			// Phase D D.5: one level of recursion into direct children so
+			// gadgets (NounGadget — children of NounShip), cargo, and
+			// planet-attached structures/units land in the snapshot too.
+			// HUD code keys lookups by WidgetKey, so each child becomes
+			// findable via findIndex independent of its parent.  Only one
+			// level — deeper recursion is rare and adds cost.
+			const int nGrandchildren = pNoun->childCount();
+			for ( int c = 0; c < nGrandchildren; ++c )
+			{
+				Noun * pChild = WidgetCast<Noun>( pNoun->child(c) );
+				if ( pChild == NULL )
+					continue;
+
+				out.addNoun(
+					pChild->key(),
+					pChild->position(),
+					pChild->frame(),
+					pChild->worldPosition(),
+					NodeTransform::worldFrame( pChild ),
+					pChild->velocity(),
+					pChild->nodeFlags() );
+				pChild->captureSnapshotState( out, out.nounCount() - 1 );
+			}
 		}
 	}
 

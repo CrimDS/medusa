@@ -20,11 +20,13 @@
 #define RENDER_SNAPSHOT_H
 
 #include "Standard/Types.h"
+#include "Debug/Assert.h"
 #include "Factory/WidgetKey.h"
 #include "Math/Vector3.h"
 #include "Math/Matrix33.h"
 #include "WorldDll.h"
 
+#include <atomic>
 #include <vector>
 #include <unordered_map>
 
@@ -39,6 +41,38 @@
 // ancestors).  Sim/network threads never set this — they read live state.
 DLL bool				isRenderingFromSnapshot();
 DLL void				setRenderingFromSnapshot( bool a_bOn );
+
+//---------------------------------------------------------------------------------------------------
+
+// Phase D coverage assertion.  When sim is pipelined onto a separate thread
+// (sm_bPipelinedSimRender == true), any render-side read of live world state
+// is a race waiting to happen — the post-mortem on the first sim-thread
+// attempt traced visible streak corruption to a long tail of unmigrated
+// reads (HUD energy/hull, target pointers, gadget state, etc).
+//
+// The plan to close those: instrument render-side accessors of live state
+// with SNAPSHOT_ASSERT_COVERED("description"), then run with the assertion
+// flag on.  Any unmigrated read fires the assertion at file:line; we add a
+// snapshot field to cover it, redirect the read to consult the snapshot,
+// and move on.  Once no assertion fires under realistic play, sm_bPipelined-
+// SimRender is safe to enable.
+//
+// The macro is debug-only (zero overhead in Release).  setAssertSnapshot-
+// Coverage gates internally on sm_bPipelinedSimRender, so InterfaceContext
+// can unconditionally enable it around scene render — it only actually arms
+// when sim runs on a separate thread.  When sim is on the main thread the
+// snapshot was captured microseconds before render, so live reads are race-
+// free and the assertion would just spam.
+DLL bool				assertSnapshotCoverageEnabled();
+DLL void				setAssertSnapshotCoverage( bool a_bOn );
+
+#ifdef _DEBUG
+#define SNAPSHOT_ASSERT_COVERED( reason ) \
+	do { if ( assertSnapshotCoverageEnabled() ) \
+	     ASSERT_ERR( false, "RenderSnapshot coverage gap: " reason ); } while( 0 )
+#else
+#define SNAPSHOT_ASSERT_COVERED( reason ) ((void)0)
+#endif
 
 //---------------------------------------------------------------------------------------------------
 
@@ -84,6 +118,39 @@ public:
 	// capture, or wasn't captured because it's not in a locked zone).
 	int						findIndex( const WidgetKey & nKey ) const;
 
+	// Phase D — per-ship combat state.  Written by NounShip::captureSnapshot-
+	// State (called from WorldContext::captureRenderSnapshot immediately after
+	// addNoun).  Non-ship slots keep the default zeros pushed by addNoun.
+	void					setShipState( int idx,
+								int nEnergy, int nMaxEnergy,
+								int nDamage, int nMaxDamage,
+								float fSignature );
+
+	// Phase D D.4 — per-ship motion + sensor scalars.  Same lifecycle as
+	// setShipState (sim-side write after addNoun, render-side read by
+	// shipVelocityForRender etc.).  Separate setter to keep argument lists
+	// readable as the per-ship state grows.
+	void					setShipMotion( int idx,
+								float fVelocity, float fMaxVelocity,
+								float fView, float fVisibility, float fSensor );
+
+	// Phase D D.5 — per-noun damage.  Used by both NounShip (alongside
+	// setShipState) and NounGadget.  Writes to the same m_ShipDamage /
+	// m_ShipMaxDamage arrays — they're per-noun-slot, not ship-specific.
+	void					setNounDamage( int idx,
+								int nDamage, int nMaxDamage );
+
+	int						shipEnergy( int idx ) const;
+	int						shipMaxEnergy( int idx ) const;
+	int						shipDamage( int idx ) const;
+	int						shipMaxDamage( int idx ) const;
+	float					shipSignature( int idx ) const;
+	float					shipVelocity( int idx ) const;
+	float					shipMaxVelocity( int idx ) const;
+	float					shipView( int idx ) const;
+	float					shipVisibility( int idx ) const;
+	float					shipSensor( int idx ) const;
+
 	// World-state snapshot fields (populated by WorldContext::captureRenderSnapshot).
 	Vector3					m_CameraPosition;
 	Matrix33				m_CameraFrame;
@@ -100,6 +167,26 @@ private:
 	std::vector<Matrix33>	m_WorldFrames;
 	std::vector<Vector3>	m_Velocities;
 	std::vector<dword>		m_NodeFlags;
+
+	// Phase D — per-ship combat state.  Parallel to the noun arrays above;
+	// non-ship slots stay at zero.  See setShipState / shipEnergy / etc.
+	// Despite the "Ship" prefix, m_ShipDamage / m_ShipMaxDamage are reused
+	// by NounGadget::captureSnapshotState (D.5) — they're per-noun-slot,
+	// not ship-specific.  Helper naming (shipDamage(idx), gadgetDamageFor-
+	// Render) reflects the caller's view of the slot.
+	std::vector<int>		m_ShipEnergy;
+	std::vector<int>		m_ShipMaxEnergy;
+	std::vector<int>		m_ShipDamage;
+	std::vector<int>		m_ShipMaxDamage;
+	std::vector<float>		m_ShipSignature;
+
+	// Phase D D.4 — per-ship motion + sensor scalars.  Same parallel-array
+	// pattern; non-ship slots stay at zero.
+	std::vector<float>		m_ShipVelocity;
+	std::vector<float>		m_ShipMaxVelocity;
+	std::vector<float>		m_ShipView;
+	std::vector<float>		m_ShipVisibility;
+	std::vector<float>		m_ShipSensor;
 
 	// Index into the parallel arrays by noun key.  Populated by addNoun,
 	// cleared by clear().  Lets the render path map a live Noun back to
@@ -155,9 +242,14 @@ public:
 private:
 	enum { NUM_SLOTS = 3 };
 	RenderSnapshot			m_Slots[NUM_SLOTS];
-	volatile int			m_nLatestPublished;	// index sim last published, -1 if none
-	volatile int			m_nWriteSlot;		// index sim currently writing into
-	volatile int			m_nReaderPinned;	// index reader pinned for frame, -1 if idle
+	// C++11 atomics with explicit memory_order on every access.  volatile
+	// is not a barrier under MSVC's default model; it just happens to work
+	// on x86/x64 because InterlockedExchange is seq-cst.  Promoting to
+	// std::atomic documents the handshake and is correct on weakly-ordered
+	// architectures.  See per-site ordering comments in the .cpp.
+	std::atomic<int>		m_nLatestPublished;	// index sim last published, -1 if none
+	std::atomic<int>		m_nWriteSlot;		// index sim currently writing into
+	std::atomic<int>		m_nReaderPinned;	// index reader pinned for frame, -1 if idle
 };
 
 //---------------------------------------------------------------------------------------------------
@@ -202,6 +294,56 @@ inline const Vector3 & RenderSnapshot::velocity( int i ) const
 inline dword RenderSnapshot::nodeFlags( int i ) const
 {
 	return m_NodeFlags[i];
+}
+
+inline int RenderSnapshot::shipEnergy( int i ) const
+{
+	return m_ShipEnergy[i];
+}
+
+inline int RenderSnapshot::shipMaxEnergy( int i ) const
+{
+	return m_ShipMaxEnergy[i];
+}
+
+inline int RenderSnapshot::shipDamage( int i ) const
+{
+	return m_ShipDamage[i];
+}
+
+inline int RenderSnapshot::shipMaxDamage( int i ) const
+{
+	return m_ShipMaxDamage[i];
+}
+
+inline float RenderSnapshot::shipSignature( int i ) const
+{
+	return m_ShipSignature[i];
+}
+
+inline float RenderSnapshot::shipVelocity( int i ) const
+{
+	return m_ShipVelocity[i];
+}
+
+inline float RenderSnapshot::shipMaxVelocity( int i ) const
+{
+	return m_ShipMaxVelocity[i];
+}
+
+inline float RenderSnapshot::shipView( int i ) const
+{
+	return m_ShipView[i];
+}
+
+inline float RenderSnapshot::shipVisibility( int i ) const
+{
+	return m_ShipVisibility[i];
+}
+
+inline float RenderSnapshot::shipSensor( int i ) const
+{
+	return m_ShipSensor[i];
 }
 
 //---------------------------------------------------------------------------------------------------

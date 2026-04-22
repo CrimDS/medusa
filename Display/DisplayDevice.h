@@ -9,6 +9,7 @@
 #define DISPLAY_DEVICE_H
 
 #include "Factory/FactoryTypes.h"
+#include "Standard/Array.h"
 #include "Standard/Reference.h"
 #include "Standard/CharString.h"
 #include "Standard/ColorFormat.h"
@@ -128,8 +129,21 @@ public:
 
 
 	// Exceptions
-	class PrimitiveFailure {};	
+	class PrimitiveFailure {};
 	class DeviceNotLocked {};
+
+	// Per-frame render counter surfaced to the profiler overlay.  Backends
+	// fill an Array<RenderStat> in getRenderStats() with whatever they want
+	// to expose (SRV binds, CB uploads, draw calls, etc.); the profiler
+	// renders them as a tabular block alongside the per-thread CPU blocks.
+	struct RenderStat
+	{
+		const char *	pName;			// short label, e.g. "SRV binds"
+		dword			nValue;			// primary count (issued / uploaded)
+		const char *	pValueLabel;	// "issued", "uploaded", "drawn", etc.
+		dword			nSkipped;		// secondary count (skipped / redundant)
+		float			fSkipPct;		// 100 * nSkipped / (nValue + nSkipped)
+	};
 
 	// Construction
 	DisplayDevice();
@@ -224,6 +238,13 @@ public:
 	// count.  Called once per parallel dispatch just before workers start.
 	// Default: no-op.
 	virtual void					ensureParallelWorkerSlots( int nWorkers ) { (void)nWorkers; }
+
+	// Surface per-frame render counters for the profiler overlay.  Backends
+	// override to push RenderStat entries (SRV binds, CB uploads, draw
+	// calls, etc.).  Called once per frame from the profiler renderer when
+	// the overlay is visible.  Default: no stats.  Out parameter is cleared
+	// by the caller before invocation.
+	virtual void					getRenderStats( Array<RenderStat> & a_Out ) const { (void)a_Out; }
 
 	virtual DevicePrimitive *		create( const PrimitiveKey &key ) = 0;	
 	template<class T> 

@@ -126,7 +126,17 @@ bool Material::read( const InStream & input )
 		m_LightMap = NULL;
 	}
 
-	if ( DisplayDevice::sm_pCacheDevice != NULL )
+	// Eager device-surface creation here is an optimization — it avoids a
+	// first-render hitch when many materials need surfaces created at once.
+	// BUT: when this Material::read is running on the Broker loading thread,
+	// createDeviceSurfaces eventually calls DisplayDeviceD3D12::create which
+	// acquires RenderContext::sm_StateLock.  The main thread routinely holds
+	// sm_StateLock during Material::material() in the render path AND blocks
+	// on Broker::requestLoad for new assets — so taking sm_StateLock from
+	// the loader thread closes a deadlock cycle (main waits for broker,
+	// broker waits for sm_StateLock that main holds).  Skip the eager path
+	// when on the loader thread; lazy creation on first render is safe.
+	if ( DisplayDevice::sm_pCacheDevice != NULL && !Broker::inLoadingThread() )
 		createDeviceSurfaces( DisplayDevice::sm_pCacheDevice );
 
 	return true;

@@ -89,10 +89,29 @@ public:
 	Array< Surface >		m_Surfaces;
 	Array< DevicePrimitive::Ref >
 							m_Children;
+	// Parallel array recording the preRender child index that was active
+	// when each m_Children entry was added.  Used by executeChildren to
+	// stable-sort children into traversal order before rendering, so a
+	// shared material whose addChild calls came from multiple workers
+	// (in lock-acquire order) still draws in the same order serial mode
+	// would produce.  Index -1 means the entry was added outside parallel
+	// zone dispatch (main-thread path) — those preserve their push order
+	// because all -1 ties tie-break stable.
+	Array< int >			m_ChildOrder;
 	PrimitiveSetTransform::Ref
 							m_TopTransform;
 
 	bool					m_bPushed;
+
+	// Lowest child index that has tried to push this material during the
+	// current frame's parallel preRender dispatch.  Tracked under
+	// RenderContext::sm_StateLock so mergeWorkerStacks can place the material
+	// at the position serial rendering would give it (the first child that
+	// uses it), even when a later-indexed child won the push race.  Initialised
+	// to INT_MAX; reset alongside m_bPushed in clear() and release().
+	// INT_MAX means "not touched this frame" (or only touched outside parallel
+	// dispatch, where tl_nPreRenderChildIndex is -1 — see push() guard).
+	int						m_nFirstClaimChild;
 
 	void					setupBlending();
 	bool					setupTextures();

@@ -37,11 +37,19 @@ public:
 		PRIMITIVE_STACK_SIZE	= 1024 * 8,
 		DYNAMIC_VB_SIZE			= 1024 * 1024 * 64, 		// 64MB ring buffer per frame
 		DYNAMIC_CB_SIZE			= 1024 * 1024 * 8, 		// 8MB for constant buffers per frame
-		MAX_SRV_DESCRIPTORS		= 4096,
+		MAX_SRV_DESCRIPTORS		= 32768,	// bumped from 4096 — wraps mid-frame at high SRV-bind counts (e.g. profiler ON + many materials = 633+ binds × 8 slots = >5000 needed). Wrap mid-frame overwrites earlier slots' bindings, corrupting textures (font glyphs appearing on planet surfaces). 32768/8 = 4096 binds/frame headroom — plenty even for proper per-column text alignment in the profiler.
 		MAX_SAMPLER_DESCRIPTORS	= 64,
 		MAX_RTV_DESCRIPTORS		= 32,
 		MAX_DSV_DESCRIPTORS		= 8,
 	};
+
+	// Format used by the FXAA intermediate scene RT.  10-bit-per-channel UNORM
+	// (1024 levels per RGB) instead of 8-bit (256 levels) — same 32 bpp footprint,
+	// 4× finer gradient precision.  Eliminates visible banding in soft sprite
+	// gradients (planet atmospheres, halos) where additive accumulation
+	// compounded 1/255 quantization steps into perceptible rings.  FXAA then
+	// resolves to the R8G8B8A8 swap chain at the end of frame.
+	static const DXGI_FORMAT SCENE_RT_FORMAT = DXGI_FORMAT_R10G10B10A2_UNORM;
 
 	// Types
 	typedef Reference<DisplayDeviceD3D12>		Ref;
@@ -105,6 +113,10 @@ public:
 	virtual bool					endScene();
 	virtual void					abortScene();
 	virtual void					present();
+
+	// Per-frame counters for the profiler overlay.  Surfaces SRV bind /
+	// CB upload / SRV copy issued-vs-skipped pairs accumulated in present().
+	virtual void					getRenderStats( Array<RenderStat> & a_Out ) const;
 
 	virtual DevicePrimitive *		create( const PrimitiveKey & key );
 	virtual bool					push( DevicePrimitive * primitive );
@@ -263,6 +275,97 @@ public:
 	virtual void					mergeParallelRenderState() { mergeWorkerStacks(); }
 	virtual void					ensureParallelWorkerSlots( int nWorkers );
 
+	// Per-worker D3D12 command-recording context for Phase C parallel CL recording.
+	// Each worker owns its own command allocator (per frame slot) + command list
+	// + per-CL bind/cache mirrors so threads can record draw calls into separate
+	// CLs without contending on the shared CB-cache / SRV-bind tracking.
+	//
+	// Lazily initialised by ensureWorkerD3D12Slots() — Stage 2 defines the shape
+	// and lifetime only; no caller invokes it yet.  Stage 3 will spin this up
+	// for the SECONDARY pass (transparency), then later passes.
+	struct WorkerD3D12Context
+	{
+		// Per-frame command allocator (mirrors the main path's
+		// m_pCommandAllocators[FRAME_COUNT]).  Reset against the current
+		// frame's allocator at start-of-pass, the same way resetCommandList
+		// does for the main CL.
+		ComPtr<ID3D12CommandAllocator>		m_pAllocator[FRAME_COUNT];
+		ComPtr<ID3D12GraphicsCommandList>	m_pCommandList;
+		bool								m_bCommandListOpen;
+
+		// Per-CL CB cache mirrors — same redundant-upload-suppression role as
+		// m_LastObjCB / m_LastMatCB / m_LastLightCB on the main device, but
+		// each CL has its own bind state, so caches must be per-CL too.
+		CBPerObject						m_LastObjCB;
+		bool							m_bLastObjCBValid;
+		D3D12_GPU_VIRTUAL_ADDRESS		m_nLastObjCBGpuVA;
+
+		CBPerMaterial					m_LastMatCB;
+		bool							m_bLastMatCBValid;
+		D3D12_GPU_VIRTUAL_ADDRESS		m_nLastMatCBGpuVA;
+
+		CBPerLight						m_LastLightCB;
+		bool							m_bLastLightCBValid;
+		D3D12_GPU_VIRTUAL_ADDRESS		m_nLastLightCBGpuVA;
+
+		// Per-CL SRV root-table bind tracking (mirrors m_nLastBoundSRVBase).
+		UINT							m_nLastBoundSRVBase;
+		bool							m_bLastBoundSRVValid;
+
+		// Per-CL active material's SRV base — set by setupTextures() after it
+		// CAS-claims its 8-slot range (Stage 1b makes the claim race-free).
+		// Workers each get their own copy so two materials being recorded in
+		// parallel don't stomp each other's base.
+		UINT							m_nSRVTextureBase;
+
+		// Per-CL pipeline state mirrors (m_nCurrentBlend, m_bCurrentDoubleSided,
+		// m_mCurrentWorld, m_pMatShader, m_bUsingFixedFunction, m_nTextureStage).
+		// These drive bindPSO and the CB upload paths; if shared they'd cause
+		// stale-PSO selection when two workers interleave.
+		UINT							m_nCurrentBlend;
+		bool							m_bCurrentDoubleSided;
+		bool							m_bUsingFixedFunction;
+		int								m_nTextureStage;
+		// XMFLOAT4X4, not XMMATRIX: XMMATRIX requires 16-byte alignment for
+		// SSE intrinsics, but Array<WorkerD3D12Context> heap-allocates with
+		// only 8-byte alignment on Win32 (compiler warning C4316).  Storage
+		// kept as float matrix; Stage 3 callers convert at use site via
+		// XMLoadFloat4x4 / XMStoreFloat4x4 (zero perf cost — same memcpy).
+		XMFLOAT4X4						m_mCurrentWorld;
+		ShaderD3D12::Ref				m_pMatShader;
+
+		WorkerD3D12Context()
+			: m_bCommandListOpen( false )
+			, m_bLastObjCBValid( false )
+			, m_nLastObjCBGpuVA( 0 )
+			, m_bLastMatCBValid( false )
+			, m_nLastMatCBGpuVA( 0 )
+			, m_bLastLightCBValid( false )
+			, m_nLastLightCBGpuVA( 0 )
+			, m_nLastBoundSRVBase( 0 )
+			, m_bLastBoundSRVValid( false )
+			, m_nSRVTextureBase( 8 )
+			, m_nCurrentBlend( 0 )
+			, m_bCurrentDoubleSided( false )
+			, m_bUsingFixedFunction( false )
+			, m_nTextureStage( 0 )
+		{
+			// Identity matrix — XMFLOAT4X4 has no useful default constructor
+			// for that, so set it explicitly via XMStoreFloat4x4.
+			XMStoreFloat4x4( &m_mCurrentWorld, XMMatrixIdentity() );
+		}
+	};
+
+	Array< WorkerD3D12Context >		m_WorkerD3D12Contexts;
+
+	// Lazily allocate per-worker D3D12 contexts (allocators + CLs) sized to
+	// nWorkers.  Idempotent — safe to call repeatedly.  Returns true on
+	// success.  Stage 3 will call this from the parallel dispatcher.
+	bool							ensureWorkerD3D12Slots( int nWorkers );
+
+	// Release all per-worker D3D12 resources.  Called from freeD3D12().
+	void							releaseWorkerD3D12Resources();
+
 	TextureFormat					m_TextureFormats;
 	bool							m_TextureP2;
 	bool							m_TextureSquare;
@@ -322,7 +425,14 @@ public:
 	// Deferred deletion: primitives whose D3D12 resources may still be referenced
 	// by in-flight command lists.  Cleared per-frame after the GPU fence confirms
 	// the frame is complete.
+	//
+	// Appended to from PrimitiveMaterialD3D12::clear(), which can run on any
+	// thread (smart-ref destructors fire from worker threads when render snapshots
+	// rotate).  Drained on the main thread at the start of beginScene().
+	// m_DeferredPrimsLock guards both sides — single-threaded callers see
+	// uncontended Enter/Leave (~20ns).
 	Array< DevicePrimitive::Ref >	m_DeferredPrimitives[FRAME_COUNT];
+	mutable CriticalSection			m_DeferredPrimsLock;
 
 	// Root signatures
 	ComPtr<ID3D12RootSignature>		m_pRootSignature;
@@ -388,7 +498,10 @@ public:
 	bool							m_bCommandListOpen;
 
 	// Per-frame SRV ring allocator — reset each beginScene(), advanced by setupTextures()
-	UINT							m_nSRVFrameOffset;		// next free slot in m_SRVHeap
+	// and by post-process effects (FXAA/HDR/SSAO).  Atomic so future parallel CL
+	// recording can claim non-overlapping SRV ranges via fetch_add / CAS-loop.
+	// Single-threaded callers see no behaviour change (uncontended atomic ops).
+	std::atomic<UINT>				m_nSRVFrameOffset;		// next free slot in m_SRVHeap
 	UINT							m_nSRVTextureBase;		// base slot for the current material's textures
 
 	// Tracks the last base slot bound to root param 4 so we can skip redundant
@@ -463,6 +576,7 @@ public:
 	ComPtr<ID3D12RootSignature>		m_pFXAARootSig;
 	bool							m_bFXAAEnabled;
 	bool							m_bSceneRTisRT;			// true when m_pSceneRT is in RENDER_TARGET state
+	bool							m_bRenderingPostFXAA;	// true after applyFXAA() bound the swap chain — UI/OVERLAY draws use R8G8B8A8 PSOs
 
 	// Static
 	static ModeList					sm_ModeList;

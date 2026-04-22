@@ -167,17 +167,12 @@
     <ClInclude Include="ShaderD3D12.h" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="Shaders\Common.hlsli" />
-    <None Include="Shaders\Default.hlsl" />
-    <None Include="Shaders\ShadowMap.hlsl" />
-    <None Include="Shaders\PassThrough.hlsl" />
-    <None Include="Shaders\PassThroughL.hlsl" />
-    <None Include="Shaders\PassThroughTL.hlsl" />
-    <None Include="Shaders\PostProcess.hlsl" />
-  </ItemGroup>
-  <ItemGroup>
     <ProjectReference Include="..\Medusa\Medusa.vcxproj">
       <Project>{93ad8e65-fb3a-414d-ba0b-6e8ffddb6cab}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
+    <ProjectReference Include="..\Render3D\Render3D.vcxproj">
+      <Project>{18b80ecb-53ae-47e1-af11-0c994cac2c1d}</Project>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
     </ProjectReference>
   </ItemGroup>

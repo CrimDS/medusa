@@ -9,6 +9,7 @@
 
 #include "DisplayEffectHDR.h"
 #include "Debug/Trace.h"
+#include "Standard/Settings.h"		// for bloomScale config read
 
 //---------------------------------------------------------------------------------------------------
 
@@ -28,8 +29,8 @@ struct CBPostProcess
 //---------------------------------------------------------------------------------------------------
 
 DisplayEffectHDRD3D12::DisplayEffectHDRD3D12() :
-	m_nBloomLevels( 1 ),
-	m_nBloomSize( 4 ),
+	m_nBloomLevels( 3 ),
+	m_nBloomSize( 2 ),		// half-res bloom RT.  Tried full-res (1) — blur kernel is then half as wide in screen space, so the sun's surface-texture detail passed through visibly as wispy dark patches.  Tried quarter-res (4, original) — visible 4x4 blocks.  Half-res with 3 blur passes + linear-clamp sampler at slot 2 is the sweet spot.
 	m_fBloomScale( 0.6f ),
 	m_fBrightThreshold( 0.65f ),
 	m_LastSize( 0, 0 ),
@@ -93,6 +94,19 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	m_BloomSize = SizeInt( width / m_nBloomSize, height / m_nBloomSize );
 	if ( m_BloomSize.width < 1 ) m_BloomSize.width = 1;
 	if ( m_BloomSize.height < 1 ) m_BloomSize.height = 1;
+
+	// Read bloomScale from user config — same key the D3D9 path used and
+	// the in-game options slider writes (ViewOptions.cpp:585).  100 = full
+	// intensity (1.0); user can dial down for subtler bloom.  Read once at
+	// init; changing the slider in-game requires restart to apply (matches
+	// other graphics options).
+#ifdef _DEBUG
+	Settings settings( "ClientD" );
+#else
+	Settings settings( "Client" );
+#endif
+	const int nScalePct = settings.get( "bloomScale", 100 );
+	m_fBloomScale = Clamp<float>( (float)nScalePct / 100.0f, 0.0f, 1.0f );
 
 	// --- Compile PostProcess.hlsl with different entry points ---
 	// Resolve shader path the same way the shader system does
@@ -211,8 +225,11 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pVertBlurPSO) );
 	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create VertBlur PSO" ); return false; }
 
-	// Additive composite PSO (writes bloom onto scene RT with additive blending)
+	// Additive composite PSO (writes bloom onto scene RT with additive blending).
+	// Scene RT is 10-bit (DisplayDeviceD3D12::SCENE_RT_FORMAT) — PSO RTV format
+	// must match exactly, the bright/blur passes above target the 8-bit bloom RT.
 	psoDesc.PS = { m_pPSScale->GetBufferPointer(), m_pPSScale->GetBufferSize() };
+	psoDesc.RTVFormats[0] = DisplayDeviceD3D12::SCENE_RT_FORMAT;
 	psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
 	psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
 	psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
@@ -342,8 +359,11 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	ID3D12DescriptorHeap * heaps[] = { pDev->m_SRVHeap.Get(), pDev->m_SamplerHeap.Get() };
 	cl->SetDescriptorHeaps( _countof(heaps), heaps );
 
-	// Bind sampler table (slot 2)
-	cl->SetGraphicsRootDescriptorTable( 2, pDev->m_SamplerHeap.GetGPUHandle( 0 ) );
+	// Bind sampler table (slot 2 in root sig).  Use the post-process sampler
+	// at sampler heap index 2 (linear + CLAMP) — slot 0 is the material aniso/WRAP
+	// sampler, which makes the 13-tap blur wrap across edges and produces
+	// streaky banding when bright content sits at the screen border.
+	cl->SetGraphicsRootDescriptorTable( 2, pDev->m_SamplerHeap.GetGPUHandle( 2 ) );
 
 	// --- Step 1: Bright pass (m_pSceneRT → bloom[0]) ---
 	if ( pDev->m_bSceneRTisRT )
@@ -367,7 +387,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 
 	// Bind scene SRV (copy from staging to shader-visible heap)
-	UINT sceneSRVSlot = pDev->m_nSRVFrameOffset++;
+	UINT sceneSRVSlot = pDev->m_nSRVFrameOffset.fetch_add( 1, std::memory_order_acq_rel );
 	dev->CopyDescriptorsSimple( 1,
 		pDev->m_SRVHeap.GetCPUHandle( sceneSRVSlot ),
 		pDev->m_SRVStagingHeap.GetCPUHandle( pDev->m_nSceneSRVIndex ),
@@ -403,7 +423,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 		TransitionResource( cl, m_pBloomTextures[1].Get(),
 			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
-		UINT bloomSRV0 = pDev->m_nSRVFrameOffset++;
+		UINT bloomSRV0 = pDev->m_nSRVFrameOffset.fetch_add( 1, std::memory_order_acq_rel );
 		dev->CopyDescriptorsSimple( 1,
 			pDev->m_SRVHeap.GetCPUHandle( bloomSRV0 ),
 			pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[0] ),
@@ -426,7 +446,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 		TransitionResource( cl, m_pBloomTextures[0].Get(),
 			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
-		UINT bloomSRV1 = pDev->m_nSRVFrameOffset++;
+		UINT bloomSRV1 = pDev->m_nSRVFrameOffset.fetch_add( 1, std::memory_order_acq_rel );
 		dev->CopyDescriptorsSimple( 1,
 			pDev->m_SRVHeap.GetCPUHandle( bloomSRV1 ),
 			pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[1] ),
@@ -454,7 +474,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	}
 
 	// Bind bloom[0] as input
-	UINT bloomSRVFinal = pDev->m_nSRVFrameOffset++;
+	UINT bloomSRVFinal = pDev->m_nSRVFrameOffset.fetch_add( 1, std::memory_order_acq_rel );
 	dev->CopyDescriptorsSimple( 1,
 		pDev->m_SRVHeap.GetCPUHandle( bloomSRVFinal ),
 		pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[0] ),

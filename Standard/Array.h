@@ -13,6 +13,90 @@
 #define ARRAY_H
 
 #include <stdlib.h>		// NULL
+#if defined(_WIN32)
+#include <malloc.h>		// _aligned_malloc / _aligned_free for over-aligned types
+#endif
+
+//----------------------------------------------------------------------------
+
+// Block-allocator helpers honouring T's alignment.  Plain `new T[N]` only
+// guarantees alignof(std::max_align_t) (8 bytes on Win32), which trips MSVC
+// warning C4316 for over-aligned types like `alignas(16) ShaderMatrix`-
+// containing structs.  Tag dispatch on alignof(T): over-aligned types route
+// through _aligned_malloc + placement-new + explicit destructors (Win32);
+// normal types fall through to plain new[]/delete[] — byte-for-byte
+// unchanged.  Tag dispatch (vs runtime if / `if constexpr`) means only one
+// overload is instantiated per T, so the compiler never sees `new T[]` for
+// an over-aligned T → no C4316.  `if constexpr` would be cleaner but it's
+// C++17 and the project compiles as C++14.  buffer() (which returns a raw
+// T* the caller delete[]s) stays on plain new[] to preserve its contract.
+
+namespace ArrayDetail
+{
+	struct AlignedTag {};
+	struct NormalTag  {};
+
+	template<bool B> struct PickTag { typedef NormalTag type; };
+	template<>       struct PickTag<true> { typedef AlignedTag type; };
+
+	template<class T>
+	inline T * allocBlock( int count, NormalTag )
+	{
+		return new T[ count ];
+	}
+
+	template<class T>
+	inline T * allocBlock( int count, AlignedTag )
+	{
+#if defined(_WIN32)
+		void * mem = _aligned_malloc( sizeof(T) * count, alignof(T) );
+		T * arr = static_cast<T*>( mem );
+		for ( int i = 0; i < count; ++i )
+			new ( arr + i ) T();
+		return arr;
+#else
+		// Non-Windows: no over-aligned Array<T> users in the Linux build
+		// (DisplayD3D12 is Windows-only).  Fall back to plain new[] —
+		// alignment may not be honoured but no caller exercises this path.
+		return new T[ count ];
+#endif
+	}
+
+	template<class T>
+	inline void freeBlock( T * arr, int /*count*/, NormalTag )
+	{
+		delete [] arr;
+	}
+
+	template<class T>
+	inline void freeBlock( T * arr, int count, AlignedTag )
+	{
+#if defined(_WIN32)
+		for ( int i = 0; i < count; ++i )
+			arr[i].~T();
+		_aligned_free( arr );
+#else
+		(void)count;
+		delete [] arr;
+#endif
+	}
+}
+
+template<class T>
+inline T * Array_allocBlock( int count )
+{
+	typedef typename ArrayDetail::PickTag<( alignof(T) > 8 )>::type Tag;
+	return ArrayDetail::allocBlock<T>( count, Tag() );
+}
+
+template<class T>
+inline void Array_freeBlock( T * arr, int count )
+{
+	if ( arr == NULL )
+		return;
+	typedef typename ArrayDetail::PickTag<( alignof(T) > 8 )>::type Tag;
+	ArrayDetail::freeBlock<T>( arr, count, Tag() );
+}
 
 //----------------------------------------------------------------------------
 
@@ -326,8 +410,8 @@ inline void Array<T>::release()
 	if ( m_pBlocks != NULL )
 	{
 		for(int i=0;i<blockCount();i++)
-			delete [] m_pBlocks[i];
-		
+			Array_freeBlock( m_pBlocks[i], BLOCK_SIZE );
+
 		delete [] m_pBlocks;
 		m_pBlocks = NULL;
 	}
@@ -470,7 +554,7 @@ void Array<T>::growArray( int newSize )
 			newBlocks[i] = m_pBlocks[i];
 		// allocate any new blocks
 		for(i=m_BlockCount;i<blocksNeeded;i++)
-			newBlocks[i] = new T[ BLOCK_SIZE ];
+			newBlocks[i] = Array_allocBlock<T>( BLOCK_SIZE );
 
 		delete [] m_pBlocks;
 		m_pBlocks = newBlocks;
@@ -494,7 +578,7 @@ void Array<T>::cullArray()
 				newBlocks[i] = m_pBlocks[i];
 			// free up no longer needed blocks
 			for(i=blocksNeeded;i<m_BlockCount;i++)
-				delete [] m_pBlocks[i];
+				Array_freeBlock( m_pBlocks[i], BLOCK_SIZE );
 
 			delete [] m_pBlocks;
 			m_pBlocks = newBlocks;

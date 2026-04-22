@@ -6,10 +6,16 @@
 #include "Debug/Assert.h"
 #include "Debug/Trace.h"
 #include "Debug/Profile.h"
+#include "Standard/AutoLock.h"
+#include "Render3D/RenderContext.h"
 #include "PrimitiveMaterialD3D12.h"
 #include "PrimitiveSurfaceD3D12.h"
 #include "PrimitiveFactory.h"
 #include "DisplayD3D12/PrimitiveSetTransformD3D12.h"
+
+#include <algorithm>
+#include <climits>
+#include <vector>
 
 //------------------------------------------------------------------------------------
 
@@ -22,6 +28,7 @@ PrimitiveMaterialD3D12::PrimitiveMaterialD3D12()
 	m_DoubleSided = false;
 	m_LightEnable = true;
 	m_bPushed = false;
+	m_nFirstClaimChild = INT_MAX;
 	m_nFilterMode = FILTER_ON;
 	m_bUpdateShaders = false;
 
@@ -281,6 +288,9 @@ void PrimitiveMaterialD3D12::clear()
 	DisplayDeviceD3D12 * pDevice = (DisplayDeviceD3D12 *)m_pDevice;
 	if ( pDevice && m_Children.size() > 0 )
 	{
+		// Lock the per-frame deferred list — clear() can run on worker threads
+		// when smart-ref chains release primitives during parallel work.
+		AutoLock lock( &pDevice->m_DeferredPrimsLock );
 		Array< DevicePrimitive::Ref > & deferred = pDevice->m_DeferredPrimitives[ pDevice->m_nFrameIndex ];
 		for ( int i = 0; i < m_Children.size(); ++i )
 		{
@@ -289,16 +299,20 @@ void PrimitiveMaterialD3D12::clear()
 		}
 	}
 	m_Children.release();
+	m_ChildOrder.release();
 	m_TopTransform = NULL;
 	m_bPushed = false;
+	m_nFirstClaimChild = INT_MAX;
 }
 
 void PrimitiveMaterialD3D12::release()
 {
 	m_Children.release();
+	m_ChildOrder.release();
 	m_Surfaces.release();
 	m_TopTransform = NULL;
 	m_bPushed = false;
+	m_nFirstClaimChild = INT_MAX;
 
 	m_nPass = DisplayDevice::PRIMARY;
 	m_Blending = NONE;
@@ -381,6 +395,11 @@ void PrimitiveMaterialD3D12::clearSurfaces()
 
 int PrimitiveMaterialD3D12::addChild( DevicePrimitive * pPrimitive )
 {
+	// Tag every addChild with the current parallel-dispatch child index so
+	// executeChildren can stable-sort into traversal order.  -1 on the main
+	// thread / outside parallel dispatch — ties resolve stably to push order.
+	const int nChildOrder = RenderContext::currentPreRenderChildIndex();
+
 	if ( pPrimitive->primitiveKey() == PrimitiveSetTransform::staticPrimitiveKey() )
 	{
 		if ( m_TopTransform == pPrimitive )
@@ -393,25 +412,45 @@ int PrimitiveMaterialD3D12::addChild( DevicePrimitive * pPrimitive )
 			DevicePrimitive * pLastPrimitive = m_Children.last();
 			if ( pLastPrimitive->primitiveKey() == PrimitiveSetTransform::staticPrimitiveKey() )
 			{
-				m_Children[ m_Children.size() - 1 ] = pPrimitive;
-				return m_Children.size() - 1;
+				const int nLast = m_Children.size() - 1;
+				const int nLastOrder = ( nLast < m_ChildOrder.size() ) ? m_ChildOrder[ nLast ] : -1;
+				// Only collapse back-to-back transforms when they came from the
+				// SAME caller (same preRender child index).  In serial mode both
+				// are -1 and the original peephole still fires.  In parallel mode
+				// two workers can push transforms back-to-back for *different*
+				// children; collapsing those drops the first child's transform
+				// and renders its geometry with the second child's matrix —
+				// visible as the same mesh at two rotations.
+				if ( nLastOrder == nChildOrder )
+				{
+					m_Children[ nLast ] = pPrimitive;
+					if ( nLast < m_ChildOrder.size() )
+						m_ChildOrder[ nLast ] = nChildOrder;
+					return nLast;
+				}
 			}
 		}
 	}
 
 	m_Children.push( pPrimitive );
+	m_ChildOrder.push( nChildOrder );
 	return m_Children.size() - 1;
 }
 
 void PrimitiveMaterialD3D12::removeChild( int n )
 {
 	if ( m_Children.isValid( n ) )
+	{
 		m_Children.remove( n );
+		if ( n < m_ChildOrder.size() )
+			m_ChildOrder.remove( n );
+	}
 }
 
 void PrimitiveMaterialD3D12::clearChildren()
 {
 	m_Children.release();
+	m_ChildOrder.release();
 }
 
 void PrimitiveMaterialD3D12::shadowPass()
@@ -469,16 +508,24 @@ bool PrimitiveMaterialD3D12::setupTextures()
 	// Must cover the full descriptor table range declared in the root signature (8 slots).
 	// Wrap BEFORE allocation to ensure all 8 slots fit within the heap.
 	// Slots 0-7 are permanent null SRVs; allocate from slot 8 onward.
-	if ( pDevice->m_nSRVFrameOffset + 8 > DisplayDeviceD3D12::MAX_SRV_DESCRIPTORS )
+	//
+	// Lock-free CAS loop: claim a contiguous 8-slot range, wrapping to slot 8
+	// if the current head can't fit 8 more slots.  Wrap-on-exhaust requires
+	// read-modify-write rather than a simple fetch_add.  Single-threaded
+	// callers spin at most once.  When the ring wraps, earlier materials'
+	// descriptors get overwritten — same trade-off as the old serial version.
+	UINT current = pDevice->m_nSRVFrameOffset.load( std::memory_order_relaxed );
+	UINT base;
+	for (;;)
 	{
-		// Ring is exhausted — wrap to start. Earlier materials' descriptors will be
-		// overwritten, but those draw calls are already recorded in the command list
-		// with their GPU descriptor handles, so they reference the correct GPU-side
-		// copies made at draw time.
-		pDevice->m_nSRVFrameOffset = 8;
+		base = ( current + 8 > DisplayDeviceD3D12::MAX_SRV_DESCRIPTORS ) ? 8u : current;
+		const UINT next = base + 8;
+		if ( pDevice->m_nSRVFrameOffset.compare_exchange_weak(
+				current, next,
+				std::memory_order_acq_rel, std::memory_order_relaxed ) )
+			break;
 	}
-	pDevice->m_nSRVTextureBase = pDevice->m_nSRVFrameOffset;
-	pDevice->m_nSRVFrameOffset += 8;
+	pDevice->m_nSRVTextureBase = base;
 
 	for ( int i = 0; i < m_Surfaces.size(); i++ )
 	{
@@ -507,8 +554,29 @@ bool PrimitiveMaterialD3D12::executeChildren()
 {
 	DisplayDeviceD3D12 * pDevice = (DisplayDeviceD3D12 *)m_pDevice;
 
-	for ( int i = 0; i < m_Children.size(); i++ )
+	const int nChildren = m_Children.size();
+
+	// Build an index permutation that visits children in traversal order (by
+	// m_ChildOrder, stable).  When sm_bParallelPreRender is on, two workers
+	// adding children to the same shared material interleave in lock-acquire
+	// order — flicker on SECONDARY-pass transparency.  Sorting by m_ChildOrder
+	// restores the order serial rendering produces.  When parallel is off,
+	// every entry is -1 and stable_sort is a near no-op on already-sorted data.
+	std::vector<int> order( nChildren );
+	for ( int i = 0; i < nChildren; ++i )
+		order[i] = i;
+	if ( nChildren == m_ChildOrder.size() )
 	{
+		std::stable_sort( order.begin(), order.end(),
+			[this]( int a, int b )
+			{
+				return m_ChildOrder[a] < m_ChildOrder[b];
+			} );
+	}
+
+	for ( int pos = 0; pos < nChildren; ++pos )
+	{
+		const int i = order[pos];
 		DevicePrimitive * pPrimitive = m_Children[i];
 		if ( !pPrimitive )
 			continue;

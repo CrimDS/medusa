@@ -4,7 +4,7 @@
 */
 
 #include "World/RenderSnapshot.h"
-#include "Standard/Atomic.h"
+#include "World/WorldClient.h"		// for WorldClient::sm_bPipelinedSimRender — see setAssertSnapshotCoverage
 
 //---------------------------------------------------------------------------------------------------
 
@@ -13,6 +13,23 @@ static thread_local bool tl_bRenderingFromSnapshot = false;
 
 bool isRenderingFromSnapshot()			{ return tl_bRenderingFromSnapshot; }
 void setRenderingFromSnapshot( bool a_bOn ) { tl_bRenderingFromSnapshot = a_bOn; }
+
+//---------------------------------------------------------------------------------------------------
+
+// Phase D coverage-assertion flag — see header.  Gated internally on
+// sm_bPipelinedSimRender so InterfaceContext can enable unconditionally; the
+// macro is also a no-op in Release builds, so this static cost is debug-only.
+static thread_local bool tl_bAssertSnapshotCoverage = false;
+
+bool assertSnapshotCoverageEnabled()		{ return tl_bAssertSnapshotCoverage; }
+void setAssertSnapshotCoverage( bool a_bOn )
+{
+	// Arm if either: sim is genuinely pipelined (race risk → must avoid
+	// live), OR audit mode is on (no race, but we want assertions to
+	// surface unmigrated reads without enabling the still-flaky sim thread).
+	tl_bAssertSnapshotCoverage = a_bOn &&
+		( WorldClient::sm_bPipelinedSimRender || WorldClient::sm_bAssertSnapshotCoverage );
+}
 
 //---------------------------------------------------------------------------------------------------
 
@@ -35,6 +52,16 @@ void RenderSnapshot::clear()
 	m_WorldFrames.clear();
 	m_Velocities.clear();
 	m_NodeFlags.clear();
+	m_ShipEnergy.clear();
+	m_ShipMaxEnergy.clear();
+	m_ShipDamage.clear();
+	m_ShipMaxDamage.clear();
+	m_ShipSignature.clear();
+	m_ShipVelocity.clear();
+	m_ShipMaxVelocity.clear();
+	m_ShipView.clear();
+	m_ShipVisibility.clear();
+	m_ShipSensor.clear();
 	m_KeyToIndex.clear();
 }
 
@@ -54,7 +81,48 @@ void RenderSnapshot::addNoun( WidgetKey nKey,
 	m_WorldFrames.push_back( mWorldFrame );
 	m_Velocities.push_back( vVelocity );
 	m_NodeFlags.push_back( nNodeFlags );
+	// Default ship state — overwritten by NounShip::captureSnapshotState
+	// for ship nouns; non-ship nouns keep these zeros.
+	m_ShipEnergy.push_back( 0 );
+	m_ShipMaxEnergy.push_back( 0 );
+	m_ShipDamage.push_back( 0 );
+	m_ShipMaxDamage.push_back( 0 );
+	m_ShipSignature.push_back( 0.0f );
+	m_ShipVelocity.push_back( 0.0f );
+	m_ShipMaxVelocity.push_back( 0.0f );
+	m_ShipView.push_back( 0.0f );
+	m_ShipVisibility.push_back( 0.0f );
+	m_ShipSensor.push_back( 0.0f );
 	m_KeyToIndex[ nKey.m_Id ] = nIndex;
+}
+
+void RenderSnapshot::setShipState( int idx,
+		int nEnergy, int nMaxEnergy,
+		int nDamage, int nMaxDamage,
+		float fSignature )
+{
+	m_ShipEnergy[ idx ]    = nEnergy;
+	m_ShipMaxEnergy[ idx ] = nMaxEnergy;
+	m_ShipDamage[ idx ]    = nDamage;
+	m_ShipMaxDamage[ idx ] = nMaxDamage;
+	m_ShipSignature[ idx ] = fSignature;
+}
+
+void RenderSnapshot::setShipMotion( int idx,
+		float fVelocity, float fMaxVelocity,
+		float fView, float fVisibility, float fSensor )
+{
+	m_ShipVelocity[ idx ]    = fVelocity;
+	m_ShipMaxVelocity[ idx ] = fMaxVelocity;
+	m_ShipView[ idx ]        = fView;
+	m_ShipVisibility[ idx ]  = fVisibility;
+	m_ShipSensor[ idx ]      = fSensor;
+}
+
+void RenderSnapshot::setNounDamage( int idx, int nDamage, int nMaxDamage )
+{
+	m_ShipDamage[ idx ]    = nDamage;
+	m_ShipMaxDamage[ idx ] = nMaxDamage;
 }
 
 int RenderSnapshot::findIndex( const WidgetKey & nKey ) const
@@ -84,10 +152,14 @@ RenderSnapshot & RenderSnapshotRing::writeSlot()
 	// race on the slot data.  Cheap to avoid.
 	for ( int retry = 0; retry < 4; ++retry )
 	{
-		const int pinned    = m_nReaderPinned;
-		const int published = m_nLatestPublished;
+		// Acquire so we see the slot data the reader last finished with
+		// before it released, and so we see the latest publish from a
+		// prior sim tick (publish is a release on m_nLatestPublished).
+		const int pinned    = m_nReaderPinned.load( std::memory_order_acquire );
+		const int published = m_nLatestPublished.load( std::memory_order_acquire );
 
-		int slot = m_nWriteSlot;
+		// m_nWriteSlot is producer-private — only this thread writes it.
+		int slot = m_nWriteSlot.load( std::memory_order_relaxed );
 		for ( int tries = 0; tries < NUM_SLOTS; ++tries )
 		{
 			if ( slot != pinned && slot != published )
@@ -96,15 +168,16 @@ RenderSnapshot & RenderSnapshotRing::writeSlot()
 		}
 
 		// Re-check pinned didn't change while we were picking.
-		if ( m_nReaderPinned == pinned )
+		if ( m_nReaderPinned.load( std::memory_order_acquire ) == pinned )
 		{
-			Atomic::swap( (volatile int *)&m_nWriteSlot, slot );
+			// Relaxed: no other thread reads m_nWriteSlot.
+			m_nWriteSlot.store( slot, std::memory_order_relaxed );
 			return m_Slots[ slot ];
 		}
 	}
 
 	// Fallback if we keep losing the race — use whatever m_nWriteSlot is.
-	return m_Slots[ m_nWriteSlot ];
+	return m_Slots[ m_nWriteSlot.load( std::memory_order_relaxed ) ];
 }
 
 const RenderSnapshot & RenderSnapshotRing::pinForFrame()
@@ -113,26 +186,32 @@ const RenderSnapshot & RenderSnapshotRing::pinForFrame()
 	// Per-noun lookups will go through readSlot() which returns this same
 	// slot, so all nouns rendered in the frame see a consistent snapshot
 	// even if sim publishes a newer one mid-frame.
-	int slot = m_nLatestPublished;
+	// Acquire: synchronize-with the release in publish() so the slot's
+	// vectors are fully visible before we start reading them.
+	int slot = m_nLatestPublished.load( std::memory_order_acquire );
 	if ( slot < 0 )
 		slot = 0;
-	Atomic::swap( (volatile int *)&m_nReaderPinned, slot );
+	// Release: the writer's next writeSlot() must see this pin before it
+	// picks a slot, otherwise it could race on the slot we just pinned.
+	m_nReaderPinned.store( slot, std::memory_order_release );
 	return m_Slots[ slot ];
 }
 
 void RenderSnapshotRing::releaseFrame()
 {
-	Atomic::swap( (volatile int *)&m_nReaderPinned, -1 );
+	// Release: the writer's next writeSlot() sees the slot as free only
+	// after the reader has stopped touching it.
+	m_nReaderPinned.store( -1, std::memory_order_release );
 }
 
 const RenderSnapshot & RenderSnapshotRing::readSlot() const
 {
 	// Prefer the pinned slot during a frame; fall back to latest-published
 	// for code paths that read outside a pin window (e.g. profiler dumps).
-	int slot = m_nReaderPinned;
+	int slot = m_nReaderPinned.load( std::memory_order_acquire );
 	if ( slot < 0 )
 	{
-		slot = m_nLatestPublished;
+		slot = m_nLatestPublished.load( std::memory_order_acquire );
 		if ( slot < 0 )
 			slot = 0;
 	}
@@ -141,9 +220,11 @@ const RenderSnapshot & RenderSnapshotRing::readSlot() const
 
 void RenderSnapshotRing::publish()
 {
-	// Release-store the just-filled slot index so a future render frame
-	// pinForFrame() picks it up.  Reader's currently-pinned slot is unaffected.
-	Atomic::swap( (volatile int *)&m_nLatestPublished, m_nWriteSlot );
+	// Release: all snapshot writes must complete before the index update
+	// becomes visible.  Pairs with pinForFrame()'s acquire load and
+	// readSlot()'s acquire fallback.
+	m_nLatestPublished.store( m_nWriteSlot.load( std::memory_order_relaxed ),
+							  std::memory_order_release );
 }
 
 RenderSnapshotRing & RenderSnapshotRing::instance()

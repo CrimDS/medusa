@@ -93,6 +93,18 @@ bool UserStorage::load( const char * a_pFileName, dword a_nUserID )
 
 bool UserStorage::save(bool a_bCloseFile)
 {
+	// Client-side guard: UserStorage instances created on the client receive
+	// only the TRANSMIT properties from the server (m_nUserId / m_Storage /
+	// m_pGroup) — m_sFileName is ADD_PROPERTY (disk-only) and stays empty.
+	// The destructor (~UserStorage) unconditionally calls save(true), which
+	// previously hit the re-open path below with m_sFileName="" and logged a
+	// noisy error every shutdown.  Nothing is being persisted on the client
+	// (no file association exists), so just return cleanly.
+	// NB: in this codebase String::empty() is a MUTATOR that clears the
+	// string — use length() for the query.
+	if ( m_sFileName.length() == 0 )
+		return false;
+
 	if (! m_pFileDisk && m_nUserId != 0 )
 	{
 		// attempt to re-lock the file so we can save..

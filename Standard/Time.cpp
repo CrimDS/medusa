@@ -98,6 +98,35 @@ qword Time::CPU()
 	return rdtsc();
 }
 
+qword Time::ticks()
+{
+#if defined(_WIN32)
+	LARGE_INTEGER t;
+	QueryPerformanceCounter( &t );
+	return (qword)t.QuadPart;
+#else
+	timespec ts;
+	clock_gettime( CLOCK_MONOTONIC, &ts );
+	return (qword)ts.tv_sec * 1000000000ULL + (qword)ts.tv_nsec;
+#endif
+}
+
+qword Time::ticksPerSecond()
+{
+#if defined(_WIN32)
+	static qword s_freq = 0;
+	if ( s_freq == 0 )
+	{
+		LARGE_INTEGER f;
+		QueryPerformanceFrequency( &f );
+		s_freq = (qword)f.QuadPart;
+	}
+	return s_freq;
+#else
+	return 1000000000ULL;
+#endif
+}
+
 dword Time::seconds()
 {
 #if defined(_WIN32)

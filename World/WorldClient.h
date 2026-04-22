@@ -18,6 +18,8 @@
 #include "Network/Client.h"
 #include "Network/UDPServer.h"
 
+#include <atomic>
+
 #include "GCQ/MetaClient.h"
 #include "Profile.h"
 #include "Noun.h"
@@ -280,8 +282,8 @@ public:
 	Noun *				focus() const;						// our focus object, by default the players ship
 	Noun *				target() const;						// our current target
 
-	int					chatCount() const;					// number of chat messages buffered
-	const char *		chat( int n ) const;				// get chat message
+	int					chatCount() const;					// number of chat messages buffered (locked)
+	CharString			chat( int n ) const;				// get chat message by copy (thread-safe)
 
 	int					storageCount() const;				// how many items do we have in storage
 	WidgetKey			storageKey( int n ) const;			// get the key for stored item
@@ -405,12 +407,19 @@ protected:
 	bool				m_bEnableFilter;	// true if we should filter all chat text
 	CharString			m_sFilterFile;		// file containing the filter
 	bool				m_bConnectedUDP;	// true if our UDP connection to the server is active
-	bool				m_LoggedIn;			// true if we are logged in
+	// MetaUpdate thread reads m_LoggedIn (line 937 of .cpp) while the main
+	// thread writes it under m_Lock.  MetaUpdate also writes m_bBanned
+	// unprotected while the main thread reads via isBanned() on the frame
+	// path.  Both races are low-frequency but real; atomic<bool> gives us
+	// correct visibility and inhibits compiler hoisting, with implicit
+	// operator bool() / operator=(bool) so existing access sites compile
+	// unchanged (seq_cst — fine, these aren't hot-path).
+	std::atomic<bool>	m_LoggedIn;			// true if we are logged in
 	bool				m_bProxy;			// true if this is a proxy login
 	WidgetKey			m_nProxyId;			// id of our proxy object
 	int					m_nProxyFactionId;	// id of our proxy faction
 	bool				m_bServer;			// true if we are logged in as a server
-	bool				m_bBanned;			// true if this client is banned
+	std::atomic<bool>	m_bBanned;			// true if this client is banned
 	int					m_nQueuePosition;
 	int					m_nQueueSize;
 	Event				m_LoginEvent;
@@ -504,6 +513,14 @@ public:
 	// Default off — set "pipelinedSimRender=1" in config.ini to enable.
 	// Auto-enables sm_bUseRenderSnapshot when on.
 	static bool			sm_bPipelinedSimRender;
+
+	// Phase D audit flag — when true, SNAPSHOT_ASSERT_COVERED markers in
+	// instrumented accessors fire during scene render even when sim is on
+	// the main thread.  Lets us discover unmigrated live-state reads WITHOUT
+	// spawning the sim thread (which has known intermittent deadlock issues
+	// pending the rest of Phase D).  Debug-only macro, so this is debug-only
+	// behaviour regardless.  Default off.
+	static bool			sm_bAssertSnapshotCoverage;
 
 	//-------------------------------------------------------------------------------
 };
@@ -664,11 +681,24 @@ inline Noun * WorldClient::target() const
 
 inline int WorldClient::chatCount() const
 {
+	// Snap the count under the lock.  pushChat() / flushChat() on the
+	// MetaUpdate thread reallocates m_Chat's backing store; an unlocked
+	// read paired with a later chat(n) can dereference freed memory.
+	AutoLock lock( const_cast<CriticalSection *>( &m_Lock ) );
 	return m_Chat.size();
 }
 
-inline const char * WorldClient::chat( int n ) const
+inline CharString WorldClient::chat( int n ) const
 {
+	// Return a deep copy under the lock.  The previous signature
+	// (const char *) handed callers a raw pointer into the Array that
+	// could be invalidated mid-iteration by pushChat's growArray.
+	// CharString has an implicit `operator const char *()` so call sites
+	// like `log += pClient->chat(i)` and `new WindowMessage(this, pClient->chat(i))`
+	// still compile unchanged.
+	AutoLock lock( const_cast<CriticalSection *>( &m_Lock ) );
+	if ( n < 0 || n >= m_Chat.size() )
+		return CharString();
 	return m_Chat[ n ];
 }
 

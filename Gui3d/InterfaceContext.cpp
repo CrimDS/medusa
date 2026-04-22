@@ -57,16 +57,27 @@ static float GetPercent( qword nCPU, qword nTotalCPU )
 
 #ifndef PROFILE_OFF
 
-// One row of the per-thread profile tree.  Pre-formatted into a single
-// WideString — pushing one Font::push per row keeps the dynamic vertex
-// ring under control (a previous design pushed each column separately and
-// the ~5× allocation rate corrupted the vertex buffer ring, manifesting
-// as huge scattered glyphs over the screen).  Column alignment relies on
-// printf width specifiers + the font being close-enough-to-monospace.
+// One row of the per-thread profile tree.  Cell data stored separately
+// so the renderer can place each column at a fixed pixel X — pixel-perfect
+// alignment regardless of font glyph widths.  Was previously a single
+// pre-formatted WideString rendered with one Font::push per row (relying
+// on a near-monospace font for column alignment); the per-cell variant
+// caused streak corruption back when MAX_SRV_DESCRIPTORS was 4096 and the
+// 5× SRV allocation rate wrapped the descriptor heap mid-frame.  After the
+// bump to 32768 (DisplayDeviceD3D12.h), per-cell rendering is safe again.
+// Bar resolution — 12 cells across [###---] makes each cell ~8.3% of
+// thread time.  Shared between the row builder and the renderer.
+static const int kBarWidth = 12;
+
 struct ProfileLine
 {
-	WideString	text;
+	WideString	name;		// indented label with tree prefix, pre-padded
+	double		ms;
+	int			filledBars;	// 0..kBarWidth for the "[####....]" bar
+	double		pctThread;
+	dword		hits;
 	Color		color;
+	bool		isOrphan;	// orphan rows render "??" prefix + dashed bar
 };
 
 struct ProfileRenderCtx
@@ -151,41 +162,38 @@ static void renderProfileChildren( ProfileRenderCtx & ctx,
 		const double ms        = (double)cs.nAvCPU * 1000.0 / (double)nSafeTotal;
 		const double pctThread = 100.0 * (double)cs.nAvCPU / (double)nSafeThread;
 
-		// 12-char bar.  Each cell = ~8.3% of thread time.
-		const int kBarWidth = 12;
+		// kBarWidth = 12 (file-scope).  Each cell = ~8.3% of thread time.
 		int filled = (int)( pctThread * kBarWidth / 100.0 + 0.5 );
 		if ( filled > kBarWidth ) filled = kBarWidth;
 		if ( filled < 0 )         filled = 0;
-		WideString bar;
-		for ( int b = 0; b < filled;     ++b ) bar += STR("#");
-		for ( int b = filled; b < kBarWidth; ++b ) bar += STR(".");
 
-		// Build the indented name, truncate or right-pad to a fixed character
-		// count so the rest of the columns line up.  44 chars covers most
-		// names (~30 chars) plus tree depth (~10 chars) without truncation.
+		// Build the indented name with tree prefix.  No fixed-width padding
+		// — the renderer measures actual widths and sizes the name column
+		// to fit the longest name in this frame.  Cap at 80 chars to keep
+		// pathological names from blowing out the column.
 		WideString label;
 		label.format( STR("%s%s %S"),
 			pPrefix,
 			bLast ? STR("`-") : STR("+-"),
 			cs.pName );
 
-		const int kNameWidth = 44;
-		if ( label.length() > kNameWidth )
+		const int kNameMax = 80;
+		if ( label.length() > kNameMax )
 		{
-			label.left( kNameWidth - 3 );
+			label.left( kNameMax - 3 );
 			label += STR("...");
 		}
-		while ( label.length() < kNameWidth )
-			label += STR(" ");
 
-		// Right-align numerics with printf width specifiers — relies on the
-		// debug font being close-enough-to-monospace for the columns to line
-		// up.  %9.2f → "  XXX.XX", %5.1f → "XX.X ", %6u → " XXXXX".
+		// Cell values stored separately; renderer places each column at a
+		// fixed pixel X for pixel-perfect alignment with any font.
 		ProfileLine & out = ctx.pLines->push();
-		out.color = profileRowColor( pctThread );
-		out.text.format( STR("%s %9.2f ms  [%s] %5.1f%%  %6u/s"),
-			(const wchar *)label, ms,
-			(const wchar *)bar, pctThread, cs.nAvHits );
+		out.color      = profileRowColor( pctThread );
+		out.name       = label;
+		out.ms         = ms;
+		out.filledBars = filled;
+		out.pctThread  = pctThread;
+		out.hits       = cs.nAvHits;
+		out.isOrphan   = false;
 
 		// Recurse: children get an extended prefix that draws either a
 		// vertical pipe (more siblings to come at this level) or spaces
@@ -617,7 +625,12 @@ bool InterfaceContext::render()
 	// mutations on ancestors).  No-op when sim is not pipelined.
 	RenderSnapshotRing::instance().pinForFrame();
 	setRenderingFromSnapshot( true );
+	// Phase D: arm the snapshot-coverage assertion for the duration of scene
+	// render.  Internally gated on sm_bPipelinedSimRender — no-op when sim
+	// is on the main thread.  Macro is debug-only.
+	setAssertSnapshotCoverage( true );
 	m_Context.render( m_pRootWindow );
+	setAssertSnapshotCoverage( false );
 	setRenderingFromSnapshot( false );
 	RenderSnapshotRing::instance().releaseFrame();
 	PROFILE_END();
@@ -744,6 +757,13 @@ bool InterfaceContext::render()
 		};
 		Array<ProfileBlock> blocks;
 
+		// Filter accumulator — collapsed summary for low-cost threads
+		// (typically per-zone NodeZone::simulate workers in a multi-zone
+		// focus area).  Rendered as one extra line after the last block.
+		int    nFilteredCount = 0;
+		double fFilteredMs    = 0.0;
+		double fFilteredPct   = 0.0;
+
 		for(int k=0;k<Profiler::threadCount();k++)
 		{
 			const dword nThread = Profiler::thread( k );
@@ -764,11 +784,26 @@ bool InterfaceContext::render()
 				continue;	// idle thread
 
 			const qword nSafeTotal = nTotalCPU > 0 ? nTotalCPU : 1;
+			const double thread_ms  = (double)nThreadTotal * 1000.0 / (double)nSafeTotal;
+			const double thread_pct = 100.0 * (double)nThreadTotal / (double)nSafeTotal;
+
+			// Threshold: skip thread blocks under 1% CPU AND under 1ms/s.
+			// These are usually the per-zone NodeZone::simulate workers when
+			// the camera focus spans many zones in a constellation — each is
+			// idle but eats a full block of screen real estate.  We sum
+			// their cost into a summary line at the end of the block list.
+			if ( thread_pct < 1.0 && thread_ms < 1.0 )
+			{
+				nFilteredCount   += 1;
+				fFilteredMs      += thread_ms;
+				fFilteredPct     += thread_pct;
+				continue;
+			}
 
 			ProfileBlock & blk = blocks.push();
 			blk.threadId   = nThread;
-			blk.thread_ms  = (double)nThreadTotal * 1000.0 / (double)nSafeTotal;
-			blk.thread_pct = 100.0 * (double)nThreadTotal / (double)nSafeTotal;
+			blk.thread_ms  = thread_ms;
+			blk.thread_pct = thread_pct;
 
 			// Per-CallSite visit flags so the recursive walker doesn't
 			// double-render anything (it's already a DAG by construction
@@ -806,30 +841,53 @@ bool InterfaceContext::render()
 										 (double)( nThreadTotal > 0 ? nThreadTotal : 1 );
 
 				// Orphan row — flagged with "?? " prefix, dimmed colour.
-				// Same column layout as the tree rows so totals line up.
+				// No padding; renderer auto-sizes name column.
+				WideString orphanName;
+				orphanName.format( STR("?? %S"), cs.pName );
 				ProfileLine & out = blk.lines.push();
-				out.color = GREY;
-				out.text.format( STR("?? %-41.41S %9.2f ms  [............] %5.1f%%  %6u/s"),
-					cs.pName, ms, pctThread, cs.nAvHits );
+				out.color      = GREY;
+				out.name       = orphanName;
+				out.ms         = ms;
+				out.filledBars = 0;
+				out.pctThread  = pctThread;
+				out.hits       = cs.nAvHits;
+				out.isOrphan   = true;
 			}
 		}
 
-		// Column layout.  Measure a worst-case row to size each column;
-		// then fit as many columns side-by-side as the screen allows.  The
-		// header row spans one line above the column's tree.  When more
-		// blocks exist than columns, wrap onto a new "row of columns" below
-		// the tallest block in the current row.  Each row is a single
-		// pre-formatted line — column alignment relies on printf width
-		// specifiers + a close-enough-to-monospace font.  A previous design
-		// pushed each cell as a separate Font::push for pixel-precise
-		// alignment but the 5× allocation pressure on the dynamic vertex
-		// ring corrupted other glyph rendering on screen.
+		// Column layout.  Each cell rendered with its own Font::push at a
+		// fixed pixel X within the block — pixel-perfect alignment for any
+		// font.  Column widths are measured once from worst-case sample
+		// strings using the actual font metrics, so M-wide and i-wide glyphs
+		// don't drift the columns.  Block width = sum of column widths.
+		// Per-row push count = 5 (name, ms, bar, pct, hits); SRV bind cost
+		// covered by MAX_SRV_DESCRIPTORS=32768 in DisplayDeviceD3D12.h.
 		if ( blocks.size() > 0 )
 		{
-			WideString sample;
-			for ( int i = 0; i < 90; ++i )
-				sample += STR("M");
-			const int colWidth = pFont->size( (const wchar *)sample ).width + 16;
+			// Name column auto-sized to the widest actual label this frame;
+			// numerics column-sized by worst-case formatted samples.  Saves
+			// horizontal space when names are short, expands when needed.
+			int nameColW = 0;
+			for ( int b = 0; b < blocks.size(); ++b )
+			{
+				const ProfileBlock & blk = blocks[b];
+				for ( int li = 0; li < blk.lines.size(); ++li )
+				{
+					const int w = pFont->size(
+						(const wchar *)blk.lines[li].name ).width;
+					if ( w > nameColW )
+						nameColW = w;
+				}
+			}
+			const int msColW   = pFont->size( STR("99999.99 ms") ).width;
+			const int barColW  = pFont->size( STR("[############]") ).width;
+			const int pctColW  = pFont->size( STR("999.9%") ).width;
+			const int hitsColW = pFont->size( STR("999999/s") ).width;
+
+			const int colGap   = pFont->size( STR("  ") ).width;	// 2-space gap between cells
+			const int colWidth = nameColW + colGap + msColW + colGap +
+								 barColW  + colGap + pctColW + colGap +
+								 hitsColW + colGap;
 			const int screenW  = pDisplay->clientWindow().width();
 
 			int nColumns = colWidth > 0 ? screenW / colWidth : 1;
@@ -837,6 +895,14 @@ bool InterfaceContext::render()
 				nColumns = 1;
 			if ( nColumns > blocks.size() )
 				nColumns = blocks.size();
+
+			// Per-cell X offsets within a block.  Numeric cells are
+			// right-aligned within their column; bar/name are left-aligned.
+			const int xName       = 0;
+			const int xMsRight    = xName    + nameColW + colGap + msColW;	// right edge for ms
+			const int xBar        = xMsRight + colGap;
+			const int xPctRight   = xBar     + barColW  + colGap + pctColW;
+			const int xHitsRight  = xPctRight + colGap + hitsColW;
 
 			int rowStartY = y;
 			int curCol = 0;
@@ -847,7 +913,7 @@ bool InterfaceContext::render()
 				const ProfileBlock & blk = blocks[b];
 				const int x = curCol * colWidth;
 
-				// Header
+				// Header — single push, full block width.
 				{
 					Vector3 vecPos( x, rowStartY, 0 );
 					WideString s;
@@ -859,9 +925,49 @@ bool InterfaceContext::render()
 				int yy = rowStartY + lineHeight;
 				for ( int li = 0; li < blk.lines.size(); ++li )
 				{
-					Vector3 vp( x, yy, 0 );
+					const ProfileLine & ln = blk.lines[li];
+
+					// Name (left-aligned, already padded to 44 chars).
+					Font::push( pDisplay, pFont, Vector3( x + xName, yy, 0 ),
+						ln.name, ln.color );
+
+					// ms — right-aligned within msColW.
+					WideString sMs;
+					sMs.format( STR("%.2f ms"), ln.ms );
+					const int wMs = pFont->size( (const wchar *)sMs ).width;
+					Font::push( pDisplay, pFont,
+						Vector3( x + xMsRight - wMs, yy, 0 ), sMs, ln.color );
+
+					// Bar (left-aligned).  Orphan rows show "[............]".
+					WideString sBar = STR("[");
+					if ( ln.isOrphan )
+					{
+						for ( int bb = 0; bb < kBarWidth; ++bb ) sBar += STR(".");
+					}
+					else
+					{
+						for ( int bb = 0; bb < ln.filledBars;            ++bb ) sBar += STR("#");
+						for ( int bb = ln.filledBars; bb < kBarWidth;    ++bb ) sBar += STR(".");
+					}
+					sBar += STR("]");
+					Font::push( pDisplay, pFont, Vector3( x + xBar, yy, 0 ),
+						sBar, ln.color );
+
+					// pct — right-aligned within pctColW.
+					WideString sPct;
+					sPct.format( STR("%.1f%%"), ln.pctThread );
+					const int wPct = pFont->size( (const wchar *)sPct ).width;
+					Font::push( pDisplay, pFont,
+						Vector3( x + xPctRight - wPct, yy, 0 ), sPct, ln.color );
+
+					// hits/s — right-aligned within hitsColW.
+					WideString sHits;
+					sHits.format( STR("%u/s"), ln.hits );
+					const int wHits = pFont->size( (const wchar *)sHits ).width;
+					Font::push( pDisplay, pFont,
+						Vector3( x + xHitsRight - wHits, yy, 0 ), sHits, ln.color );
+
 					yy += lineHeight;
-					Font::push( pDisplay, pFont, vp, blk.lines[li].text, blk.lines[li].color );
 				}
 
 				const int blockHeight = ( blk.lines.size() + 1 ) * lineHeight;
@@ -874,6 +980,136 @@ bool InterfaceContext::render()
 					curCol = 0;
 					rowStartY += maxHeightInRow + lineHeight;	// gap between row-bands
 					maxHeightInRow = 0;
+				}
+			}
+
+			// Summary line for filtered (low-cost) threads.  Renders below
+			// the last row of blocks at column 0.
+			int summaryY = rowStartY;
+			if ( curCol != 0 )
+				summaryY += maxHeightInRow + lineHeight;
+
+			if ( nFilteredCount > 0 )
+			{
+				Vector3 vecPos( 0, summaryY, 0 );
+				WideString s;
+				s.format(STR("(+%d idle threads omitted: %.2f ms/s total, %.1f%% combined)"),
+					nFilteredCount, fFilteredMs, fFilteredPct );
+				Font::push( pDisplay, pFont, vecPos, s, LIGHT_GREY );
+				summaryY += lineHeight + (lineHeight / 2);
+			}
+
+			// Per-frame render-device stats block.  Backends (D3D12, etc.)
+			// fill an Array<RenderStat> via getRenderStats() — surfaces SRV
+			// bind / CB upload / etc. counters with skip-percentage bars.
+			Array<DisplayDevice::RenderStat> deviceStats;
+			pDisplay->getRenderStats( deviceStats );
+			if ( deviceStats.size() > 0 )
+			{
+				// Measure column widths for stats: name, value, valueLabel,
+				// skipped, bar, pct.
+				int statNameW = 0;
+				for ( int i = 0; i < deviceStats.size(); ++i )
+				{
+					WideString sName;
+					sName.format( STR("%S"), deviceStats[i].pName );
+					const int w = pFont->size( (const wchar *)sName ).width;
+					if ( w > statNameW )
+						statNameW = w;
+				}
+				const int statValueW = pFont->size( STR("9999999") ).width;
+				const int statLabelW = pFont->size( STR("uploaded") ).width;
+				const int statSkipW  = pFont->size( STR("9999999 skip") ).width;
+				const int statBarW   = pFont->size( STR("[############]") ).width;
+				const int statPctW   = pFont->size( STR("999%") ).width;
+				const int gap        = pFont->size( STR("  ") ).width;
+
+				// Column X offsets (right edges for numerics, left for text/bar).
+				const int sxName       = 0;
+				const int sxValueRight = sxName + statNameW + gap + statValueW;
+				const int sxLabel      = sxValueRight + gap;
+				const int sxSkipRight  = sxLabel + statLabelW + gap + statSkipW;
+				const int sxBar        = sxSkipRight + gap;
+				const int sxPctRight   = sxBar + statBarW + gap + statPctW;
+
+				// Header
+				{
+					Vector3 vp( 0, summaryY, 0 );
+					Font::push( pDisplay, pFont, vp, STR("== D3D12 Render Stats =="), GOLD );
+					summaryY += lineHeight;
+				}
+
+				const int kStatBarWidth = 12;
+				for ( int i = 0; i < deviceStats.size(); ++i )
+				{
+					const DisplayDevice::RenderStat & s = deviceStats[i];
+
+					// Color: red if mostly redundant (we want low skip % for
+					// "issued" stats; high skip % is good for cache-hit
+					// stats like MatCB — but we colour neutrally here).
+					Color color = WHITE;
+					if      ( s.fSkipPct >= 75.0f ) color = GREEN;	// strong cache effect
+					else if ( s.fSkipPct >= 25.0f ) color = YELLOW;
+					else                            color = LIGHT_GREY;
+
+					// Name (left-aligned)
+					{
+						WideString sName;
+						sName.format( STR("%S"), s.pName );
+						Font::push( pDisplay, pFont,
+							Vector3( sxName, summaryY, 0 ),
+							sName, color );
+					}
+					// Value (right-aligned in its column)
+					{
+						WideString sVal;
+						sVal.format( STR("%u"), s.nValue );
+						const int w = pFont->size( (const wchar *)sVal ).width;
+						Font::push( pDisplay, pFont,
+							Vector3( sxValueRight - w, summaryY, 0 ),
+							sVal, color );
+					}
+					// Value label (left-aligned)
+					{
+						WideString sLab;
+						sLab.format( STR("%S"), s.pValueLabel );
+						Font::push( pDisplay, pFont,
+							Vector3( sxLabel, summaryY, 0 ),
+							sLab, color );
+					}
+					// Skipped (right-aligned)
+					{
+						WideString sSkip;
+						sSkip.format( STR("%u skip"), s.nSkipped );
+						const int w = pFont->size( (const wchar *)sSkip ).width;
+						Font::push( pDisplay, pFont,
+							Vector3( sxSkipRight - w, summaryY, 0 ),
+							sSkip, color );
+					}
+					// Bar (left-aligned), filled by skip percentage
+					{
+						int filled = (int)( s.fSkipPct * kStatBarWidth / 100.0f + 0.5f );
+						if ( filled > kStatBarWidth ) filled = kStatBarWidth;
+						if ( filled < 0 )             filled = 0;
+						WideString sBar = STR("[");
+						for ( int b = 0; b < filled;          ++b ) sBar += STR("#");
+						for ( int b = filled; b < kStatBarWidth; ++b ) sBar += STR(".");
+						sBar += STR("]");
+						Font::push( pDisplay, pFont,
+							Vector3( sxBar, summaryY, 0 ),
+							sBar, color );
+					}
+					// Percent (right-aligned)
+					{
+						WideString sPct;
+						sPct.format( STR("%.0f%%"), s.fSkipPct );
+						const int w = pFont->size( (const wchar *)sPct ).width;
+						Font::push( pDisplay, pFont,
+							Vector3( sxPctRight - w, summaryY, 0 ),
+							sPct, color );
+					}
+
+					summaryY += lineHeight;
 				}
 			}
 		}

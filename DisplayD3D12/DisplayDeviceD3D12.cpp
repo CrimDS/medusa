@@ -25,6 +25,9 @@
 #include "DisplayDeviceD3D12.h"
 
 #include <stdint.h>
+#include <algorithm>
+#include <climits>
+#include <vector>
 #include "PrimitiveFactory.h"
 #include "PrimitiveSurfaceD3D12.h"
 #include "PrimitiveMaterialD3D12.h"
@@ -97,6 +100,7 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_nSceneSRVIndex( UINT(-1) ),
 	m_bFXAAEnabled( true ),
 	m_bSceneRTisRT( false ),
+	m_bRenderingPostFXAA( false ),
 	m_nShadowMapDSVIndex( UINT(-1) ),
 	m_nShadowMapSRVStagingIndex( UINT(-1) ),
 	m_nDepthSRVIndex( UINT(-1) ),
@@ -380,12 +384,6 @@ void DisplayDeviceD3D12::clearZ( float fDepth )
 
 void DisplayDeviceD3D12::setAmbient( Color nColor )
 {
-	static int s_nAmbLog = 0;
-	if ( s_nAmbLog < 10 )
-	{
-		TRACE( "setAmbient: color=(%d,%d,%d,%d)", (int)nColor.m_R, (int)nColor.m_G, (int)nColor.m_B, (int)nColor.m_A );
-		++s_nAmbLog;
-	}
 	m_cAmbientLight = nColor;
 }
 
@@ -408,16 +406,6 @@ int DisplayDeviceD3D12::addDirectionalLight( int nPriority, Color nColor, const 
 	light.specA = light.a = 1.0f;
 
 	m_Lights.insert( std::pair<int, LightInfo>( nPriority, light ) );
-
-	static int s_nDirLog = 0;
-	if ( s_nDirLog < 10 )
-	{
-		TRACE( "addDirectionalLight: priority=%d, color=(%d,%d,%d), dir=(%.2f,%.2f,%.2f), totalLights=%d",
-			nPriority, (int)nColor.r, (int)nColor.g, (int)nColor.b,
-			vDirection.x, vDirection.y, vDirection.z, (int)m_Lights.size() );
-		++s_nDirLog;
-	}
-
 	return (int)m_Lights.size();
 }
 
@@ -520,6 +508,11 @@ bool DisplayDeviceD3D12::beginScene()
 	m_nShadowMapPass = 0;
 	m_ShadowPassList.clear();
 
+	// Frame starts pre-FXAA: material draws target the scene RT (10-bit format).
+	// applyFXAA() flips this true after binding the swap chain so OVERLAY/UI draws
+	// pick up the R8G8B8A8 PSO variant.
+	m_bRenderingPostFXAA = false;
+
 	if ( !m_bCommandListOpen )
 	{
 		PROFILE_START( "beginScene:resetCommandList" );
@@ -570,10 +563,15 @@ bool DisplayDeviceD3D12::beginScene()
 
 		// Release primitives deferred from the previous use of this frame slot.
 		// moveToNextFrame() already waited on the fence, so the GPU is done.
-		m_DeferredPrimitives[m_nFrameIndex].release();
+		// Lock guards against concurrent appends from worker threads (see
+		// PrimitiveMaterialD3D12::clear()).
+		{
+			AutoLock lock( &m_DeferredPrimsLock );
+			m_DeferredPrimitives[m_nFrameIndex].release();
+		}
 
 		// Reset per-frame SRV ring allocator (slots 0-7 are permanent null SRVs)
-		m_nSRVFrameOffset = 8;
+		m_nSRVFrameOffset.store( 8, std::memory_order_release );
 		m_nSRVTextureBase = 8;
 
 		// Reset redundant-bind tracking for the new frame.  The command list is
@@ -1065,34 +1063,16 @@ void DisplayDeviceD3D12::present()
 		{
 			PROFILE_START( "present:OVERLAY_execute" );
 			Array< PrimitiveMaterial::Ref > & materials = m_Stack[ OVERLAY ];
+			const int nOverlayCount = materials.size();	// captured before release() for the profiler message below
 
-			if ( materials.size() > 0 && m_bFXAAEnabled && m_pSceneRT )
+			if ( nOverlayCount > 0 && m_bFXAAEnabled && m_pSceneRT )
 				bindMainRootDefaults();
 
-			static int s_nOverlayLog = 0;
-			static int s_nLastOverlayCount = 0;
-			s_nLastOverlayCount = materials.size();
 			{
 				PROFILE_START( "present:OVERLAY_exec_loop" );
 				for ( int j = 0; j < materials.size(); ++j )
 				{
 					PrimitiveMaterial * pMaterial = materials[j];
-
-					if ( s_nOverlayLog < 3 )
-					{
-						PrimitiveMaterialD3D12 * pMat12 = (PrimitiveMaterialD3D12 *)pMaterial;
-						TRACE( "OVERLAY exec[%d]: pass=%d, children=%d, blend=%d, lightEn=%d",
-							j, pMat12->pass(), pMat12->m_Children.size(),
-							(int)pMat12->m_Blending, pMat12->m_LightEnable ? 1 : 0 );
-						const DirectX::XMFLOAT4X4 & m = m_CBPerFrame.mProjOrtho.m;
-						TRACE( "  ortho row0: %.4f %.4f %.4f %.4f", m._11, m._12, m._13, m._14 );
-						TRACE( "  ortho row1: %.4f %.4f %.4f %.4f", m._21, m._22, m._23, m._24 );
-						TRACE( "  ortho row3: %.4f %.4f %.4f %.4f", m._41, m._42, m._43, m._44 );
-						TRACE( "  frameIdx=%d, rw=%dx%d", m_nFrameIndex,
-							renderWindow().width(), renderWindow().height() );
-						++s_nOverlayLog;
-					}
-
 					pMaterial->execute();
 					pMaterial->clear();
 				}
@@ -1103,7 +1083,7 @@ void DisplayDeviceD3D12::present()
 			// Surface the per-frame overlay material count in the ALT+P overlay
 			// so we can see whether 6% goes into few-big-materials or many-small-ones.
 			PROFILE_LMESSAGE( 12, CharString().format(
-				"OVERLAY materials/frame: %d", s_nLastOverlayCount ) );
+				"OVERLAY materials/frame: %d", nOverlayCount ) );
 #endif
 			PROFILE_END();	// close "present:OVERLAY_execute"
 		}
@@ -1148,37 +1128,33 @@ void DisplayDeviceD3D12::present()
 	drainInfoQueue();
 	PROFILE_END();
 
-#ifndef PROFILE_OFF
-	// Surface per-frame redundant-bind counters in the ALT+P profiler overlay.
-	// Lines 8-11 keep a stable slot in the message list so they don't flap.
-	PROFILE_LMESSAGE( 8, CharString().format(
-		"D3D12 SRV binds: %u issued, %u skipped (%.0f%% skipped)",
-		m_nSRVBindCalls, m_nSRVBindSkipped,
-		(m_nSRVBindCalls + m_nSRVBindSkipped) > 0
-			? (100.0f * m_nSRVBindSkipped / (m_nSRVBindCalls + m_nSRVBindSkipped)) : 0.0f ) );
-	PROFILE_LMESSAGE( 9, CharString().format(
-		"D3D12 MatCB: %u uploaded, %u skipped (%.0f%% skipped)",
-		m_nMatCBUploads, m_nMatCBSkipped,
-		(m_nMatCBUploads + m_nMatCBSkipped) > 0
-			? (100.0f * m_nMatCBSkipped / (m_nMatCBUploads + m_nMatCBSkipped)) : 0.0f ) );
-	PROFILE_LMESSAGE( 10, CharString().format(
-		"D3D12 LightCB: %u uploaded, %u skipped (%.0f%% skipped)",
-		m_nLightCBUploads, m_nLightCBSkipped,
-		(m_nLightCBUploads + m_nLightCBSkipped) > 0
-			? (100.0f * m_nLightCBSkipped / (m_nLightCBUploads + m_nLightCBSkipped)) : 0.0f ) );
-	PROFILE_LMESSAGE( 11, CharString().format(
-		"D3D12 SRV copies: %u issued, %u skipped (%.0f%% skipped)",
-		m_nSRVCopies, m_nSRVCopiesSkipped,
-		(m_nSRVCopies + m_nSRVCopiesSkipped) > 0
-			? (100.0f * m_nSRVCopiesSkipped / (m_nSRVCopies + m_nSRVCopiesSkipped)) : 0.0f ) );
-	PROFILE_LMESSAGE( 13, CharString().format(
-		"D3D12 ObjCB: %u uploaded, %u skipped (%.0f%% skipped)",
-		m_nObjCBUploads, m_nObjCBSkipped,
-		(m_nObjCBUploads + m_nObjCBSkipped) > 0
-			? (100.0f * m_nObjCBSkipped / (m_nObjCBUploads + m_nObjCBSkipped)) : 0.0f ) );
-#endif
+	// Per-frame counters now surfaced via getRenderStats() — rendered as a
+	// tabular block in the profiler overlay, no longer needs PROFILE_LMESSAGE.
 
 	PROFILE_END();
+}
+
+//---------------------------------------------------------------------------------------------------
+
+static void pushStat( Array<DisplayDevice::RenderStat> & out,
+		const char * pName, dword nValue, const char * pValueLabel, dword nSkipped )
+{
+	DisplayDevice::RenderStat & s = out.push();
+	s.pName        = pName;
+	s.nValue       = nValue;
+	s.pValueLabel  = pValueLabel;
+	s.nSkipped     = nSkipped;
+	const dword nTotal = nValue + nSkipped;
+	s.fSkipPct     = ( nTotal > 0 ) ? (100.0f * (float)nSkipped / (float)nTotal) : 0.0f;
+}
+
+void DisplayDeviceD3D12::getRenderStats( Array<RenderStat> & a_Out ) const
+{
+	pushStat( a_Out, "SRV binds",  m_nSRVBindCalls,  "issued",   m_nSRVBindSkipped );
+	pushStat( a_Out, "MatCB",      m_nMatCBUploads,  "uploaded", m_nMatCBSkipped );
+	pushStat( a_Out, "LightCB",    m_nLightCBUploads,"uploaded", m_nLightCBSkipped );
+	pushStat( a_Out, "SRV copies", m_nSRVCopies,     "issued",   m_nSRVCopiesSkipped );
+	pushStat( a_Out, "ObjCB",      m_nObjCBUploads,  "uploaded", m_nObjCBSkipped );
 }
 
 //---------------------------------------------------------------------------------------------------
@@ -1242,6 +1218,17 @@ bool DisplayDeviceD3D12::push( DevicePrimitive * pPrimitive )
 		if ( !m_bShadowPass )
 		{
 			PrimitiveMaterialD3D12 * pMaterial = (PrimitiveMaterialD3D12 *)pPrimitive;
+
+			// Track the minimum child index that has tried to push this
+			// material during the current frame.  Serial pushes (main thread,
+			// outside parallel zone dispatch) report -1 and are ignored — they
+			// go to m_Stack directly and don't need positioning.  Worker-path
+			// updates happen under sm_StateLock (see AutoLock above), so this
+			// is a plain non-atomic min.
+			const int childIdx = RenderContext::currentPreRenderChildIndex();
+			if ( childIdx >= 0 && childIdx < pMaterial->m_nFirstClaimChild )
+				pMaterial->m_nFirstClaimChild = childIdx;
+
 			if ( !pMaterial->m_bPushed )
 			{
 				pStackArray[ pMaterial->m_nPass ].push( pMaterial );
@@ -1287,23 +1274,124 @@ void DisplayDeviceD3D12::ensureParallelWorkerSlots( int nWorkers )
 		m_WorkerStates.allocate( nWorkers );
 }
 
+bool DisplayDeviceD3D12::ensureWorkerD3D12Slots( int nWorkers )
+{
+	// Idempotent: already sized large enough → done.  Existing contexts
+	// keep their allocators/CLs intact.
+	if ( m_WorkerD3D12Contexts.size() >= nWorkers )
+		return true;
+
+	if ( !m_pDevice )
+		return false;
+
+	const int nOldSize = m_WorkerD3D12Contexts.size();
+	m_WorkerD3D12Contexts.allocate( nWorkers );
+
+	// Create allocators + CL for each newly-added worker slot.  Mirrors the
+	// pattern in initializeD3D12 for the main allocators / m_pCommandList.
+	for ( int w = nOldSize; w < nWorkers; ++w )
+	{
+		WorkerD3D12Context & ctx = m_WorkerD3D12Contexts[w];
+		for ( UINT f = 0; f < FRAME_COUNT; ++f )
+		{
+			HRESULT hr = m_pDevice->CreateCommandAllocator(
+				D3D12_COMMAND_LIST_TYPE_DIRECT,
+				IID_PPV_ARGS( &ctx.m_pAllocator[f] ) );
+			if ( FAILED( hr ) )
+			{
+				ThrowIfFailed( hr, "ensureWorkerD3D12Slots: CreateCommandAllocator" );
+				return false;
+			}
+		}
+
+		// Create the CL closed (matches main path).  Stage 3 will Reset()
+		// it against the current frame's allocator at start-of-pass.
+		HRESULT hr = m_pDevice->CreateCommandList(
+			0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+			ctx.m_pAllocator[0].Get(), nullptr,
+			IID_PPV_ARGS( &ctx.m_pCommandList ) );
+		if ( FAILED( hr ) )
+		{
+			ThrowIfFailed( hr, "ensureWorkerD3D12Slots: CreateCommandList" );
+			return false;
+		}
+		ctx.m_pCommandList->Close();
+		ctx.m_bCommandListOpen = false;
+	}
+
+	return true;
+}
+
+void DisplayDeviceD3D12::releaseWorkerD3D12Resources()
+{
+	for ( int w = 0; w < m_WorkerD3D12Contexts.size(); ++w )
+	{
+		WorkerD3D12Context & ctx = m_WorkerD3D12Contexts[w];
+		ctx.m_pCommandList.Reset();
+		for ( UINT f = 0; f < FRAME_COUNT; ++f )
+			ctx.m_pAllocator[f].Reset();
+		ctx.m_pMatShader = NULL;
+	}
+	m_WorkerD3D12Contexts.release();
+}
+
 void DisplayDeviceD3D12::mergeWorkerStacks()
 {
 	// Concatenate each worker's per-pass primitive stack back onto the shared
-	// m_Stack in worker-index order.  Clear each worker's slot so the next
-	// parallel dispatch starts empty.  Called on the main thread after a
-	// parallelFor dispatch of preRender completes, before endScene() reads
-	// m_Stack[pass] to submit draws.
+	// m_Stack in traversal order — i.e. ordered by the lowest child index that
+	// tried to push each material (PrimitiveMaterialD3D12::m_nFirstClaimChild,
+	// tracked in push() under sm_StateLock).  Worker-grab order is non-
+	// deterministic (ThreadPool uses atomic fetch-and-increment), so a naive
+	// worker-index-order concat would cause SECONDARY-pass (transparency)
+	// materials to appear in a frame-dependent order and flicker between
+	// frames.  Stable-sorting by first-claim child index gives the same order
+	// serial rendering produces, deterministic across frames.
+	//
+	// Called on the main thread after parallelFor returns, before endScene()
+	// iterates m_Stack[pass].  Clears each worker's slot on the way out so
+	// the next dispatch starts empty.
+	for ( int pass = 0; pass < PASS_COUNT; ++pass )
+	{
+		struct Entry
+		{
+			PrimitiveMaterial::Ref	pMat;
+			int						nChildIdx;
+			int						nStableIdx;	// tie-break: preserve push order
+		};
+		std::vector< Entry > entries;
+		int nStableCounter = 0;
+		for ( int w = 0; w < m_WorkerStates.size(); ++w )
+		{
+			Array< PrimitiveMaterial::Ref > & src = m_WorkerStates[w].m_Stack[pass];
+			for ( int i = 0; i < src.size(); ++i )
+			{
+				Entry e;
+				e.pMat = src[i];
+				// The cast is safe: every element of m_Stack[pass] came from
+				// push() which only enters this branch with a D3D12 material.
+				PrimitiveMaterialD3D12 * p12 = (PrimitiveMaterialD3D12 *)src[i].pointer();
+				e.nChildIdx = p12 ? p12->m_nFirstClaimChild : INT_MAX;
+				e.nStableIdx = nStableCounter++;
+				entries.push_back( e );
+			}
+		}
+		std::sort( entries.begin(), entries.end(),
+			[]( const Entry & a, const Entry & b )
+			{
+				if ( a.nChildIdx != b.nChildIdx )
+					return a.nChildIdx < b.nChildIdx;
+				return a.nStableIdx < b.nStableIdx;	// stable within same child
+			} );
+		for ( size_t i = 0; i < entries.size(); ++i )
+			m_Stack[pass].push( entries[i].pMat );
+	}
+
+	// Clear per-worker state now that the main m_Stack owns everything.
 	for ( int w = 0; w < m_WorkerStates.size(); ++w )
 	{
 		WorkerRenderState & ws = m_WorkerStates[w];
 		for ( int pass = 0; pass < PASS_COUNT; ++pass )
-		{
-			Array< PrimitiveMaterial::Ref > & src = ws.m_Stack[pass];
-			for ( int i = 0; i < src.size(); ++i )
-				m_Stack[pass].push( src[i] );
-			src.release();
-		}
+			ws.m_Stack[pass].release();
 		ws.m_pCurrentMaterial = NULL;
 		ws.m_pCurrentTransform = NULL;
 	}
@@ -1401,7 +1489,13 @@ void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::T
 	key.doubleSided = m_bCurrentDoubleSided;
 	key.wireframe = (m_eFillMode == FILL_WIREFRAME);
 	key.sampleCount = 1;
-	key.rtvFormat = m_bRenderingShadowMap ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+	// PSO RTV format must match the bound RTV exactly (D3D12 validation enforces this).
+	// Three cases: shadow pass writes a depth-as-color R32F target; FXAA-enabled pre-FXAA
+	// material draws go to the 10-bit scene RT; everything else (FXAA disabled, OVERLAY/UI
+	// after applyFXAA bound the swap chain) writes the R8G8B8A8 backbuffer.
+	key.rtvFormat = m_bRenderingShadowMap ? DXGI_FORMAT_R32_FLOAT
+		: ( m_bFXAAEnabled && m_pSceneRT && !m_bRenderingPostFXAA ) ? SCENE_RT_FORMAT
+		: DXGI_FORMAT_R8G8B8A8_UNORM;
 
 	// Resolve the effective shader for this draw so the PSO cache key
 	// correctly distinguishes different shader programs.
@@ -2148,6 +2242,22 @@ bool DisplayDeviceD3D12::initializeD3D12()
 
 		idx = m_SamplerHeap.Allocate();
 		m_pDevice->CreateSampler( &shadowSamplerDesc, m_SamplerHeap.GetCPUHandle(idx) );
+
+		// Post-process sampler (linear filtering, clamp).  Used by HDR bloom and
+		// any other fullscreen-quad effect that samples a render target.  CLAMP
+		// is required: aniso/WRAP at slot 0 makes the 13-tap Gaussian wrap to
+		// the opposite edge near borders, producing streaky banding when bright
+		// content (e.g. a sun) sits at a screen edge.
+		D3D12_SAMPLER_DESC postSamplerDesc = {};
+		postSamplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+		postSamplerDesc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+		postSamplerDesc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+		postSamplerDesc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+		postSamplerDesc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+		postSamplerDesc.MaxLOD = D3D12_FLOAT32_MAX;
+
+		idx = m_SamplerHeap.Allocate();
+		m_pDevice->CreateSampler( &postSamplerDesc, m_SamplerHeap.GetCPUHandle(idx) );
 	}
 
 	// Enumerate supported texture formats
@@ -2453,6 +2563,10 @@ void DisplayDeviceD3D12::freeD3D12()
 	m_pFXAAPSO.Reset();
 	m_pFXAARootSig.Reset();
 	m_pFXAAShader = NULL;
+
+	// Release per-worker D3D12 contexts before main resources, in case any
+	// per-worker CL still holds an outstanding reference.
+	releaseWorkerD3D12Resources();
 
 	for ( UINT i = 0; i < FRAME_COUNT; i++ )
 	{
@@ -2967,7 +3081,7 @@ bool DisplayDeviceD3D12::createFXAA()
 	rtDesc.Height = height;
 	rtDesc.DepthOrArraySize = 1;
 	rtDesc.MipLevels = 1;
-	rtDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	rtDesc.Format = SCENE_RT_FORMAT;
 	rtDesc.SampleDesc.Count = 1;
 	rtDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
@@ -2975,7 +3089,7 @@ bool DisplayDeviceD3D12::createFXAA()
 	heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
 
 	D3D12_CLEAR_VALUE clearValue = {};
-	clearValue.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	clearValue.Format = SCENE_RT_FORMAT;
 	clearValue.Color[3] = 1.0f;	// match beginScene clear color {0,0,0,1}
 
 	HRESULT hr = m_pDevice->CreateCommittedResource(
@@ -3000,7 +3114,7 @@ bool DisplayDeviceD3D12::createFXAA()
 		m_nSceneSRVIndex = m_SRVStagingHeap.Allocate();
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-	srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	srvDesc.Format = SCENE_RT_FORMAT;
 	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	srvDesc.Texture2D.MipLevels = 1;
@@ -3156,8 +3270,7 @@ void DisplayDeviceD3D12::applyFXAA()
 	m_pCommandList->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 
 	// Copy scene SRV to a slot in the shader-visible SRV heap
-	UINT fxaaSRVSlot = m_nSRVFrameOffset;
-	m_nSRVFrameOffset++;
+	UINT fxaaSRVSlot = m_nSRVFrameOffset.fetch_add( 1, std::memory_order_acq_rel );
 	m_pDevice->CopyDescriptorsSimple( 1,
 		m_SRVHeap.GetCPUHandle( fxaaSRVSlot ),
 		m_SRVStagingHeap.GetCPUHandle( m_nSceneSRVIndex ),
@@ -3170,6 +3283,10 @@ void DisplayDeviceD3D12::applyFXAA()
 	m_pCommandList->IASetPrimitiveTopology( D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
 	m_pCommandList->IASetVertexBuffers( 0, 0, nullptr );
 	m_pCommandList->DrawInstanced( 3, 1, 0, 0 );
+
+	// Subsequent draws (OVERLAY/UI) target the swap chain backbuffer (R8G8B8A8),
+	// not the scene RT — flag this so material PSOs key off the right format.
+	m_bRenderingPostFXAA = true;
 
 	// Leave scene RT in PSR state — beginScene will transition PSR → RT
 }
@@ -3322,8 +3439,13 @@ void DisplayDeviceD3D12::enumerateModes()
 			mode.deviceID = (void *)(intptr_t)i;
 			mode.screenSize = SizeInt( md.Width, md.Height );
 			mode.colorFormat = ColorFormat::RGB8888;
-			mode.modeDescription = CharString().format( "%s - %dx%d",
-				name, md.Width, md.Height );
+			// Format as "WxH" (e.g. "1920x1080") — short enough to fit the
+			// 300px Options listbox column.  Previous format prepended the
+			// adapter name ("NVIDIA GeForce RTX 5080 - 1920x1080") which
+			// overflowed the column on modern long device names.  The
+			// startup match in PlatformWin.cpp does substring + exact-match,
+			// both of which work fine with the short form.
+			mode.modeDescription = CharString().format( "%dx%d", md.Width, md.Height );
 		}
 	}
 }

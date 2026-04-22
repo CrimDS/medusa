@@ -19,6 +19,8 @@ public:
 	static qword		CPU();							// returns CPU cycles
 	static dword		seconds();						// returns the number of seconds since midnight (00:00:00), January 1, 1970
 	static dword		milliseconds();					// returns the number of milliseconds since the machine was started
+	static qword		ticks();						// monotonic high-resolution counter (QPC on Windows); divide deltas by ticksPerSecond() for seconds
+	static qword		ticksPerSecond();				// frequency of ticks() — cached after first call
 
 	static WideString	format( dword nSeconds, 
 							const wchar * pFormat );	// wrapper for strftime()

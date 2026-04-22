@@ -121,17 +121,18 @@ public:
 	// R/W.  Stage 2 will replace this with per-thread state.
 	qword				bumpInstanceKey( qword delta );
 
-	// KNOWN BROKEN — do not enable.  Parallel preRender dispatch was prototyped
-	// but the rendering subsystem has many shared caches (Material, Font,
-	// Texture, PrimitiveFactory pools, etc.) that were designed single-threaded.
-	// Even with locks around the cache creation sites, transparency ordering
-	// breaks because per-worker primitive stacks merge in worker-index order
-	// rather than traversal order, causing visible flicker.  Leave false.
+	// Parallel preRender dispatch.  When true, NodeZone::preRender distributes
+	// its child preRender calls across ThreadPool workers, each pushing into
+	// per-worker primitive stacks (see DisplayDeviceD3D12::m_WorkerStates).
+	// Merge preserves traversal order via PrimitiveMaterialD3D12::m_nFirstClaimChild
+	// — the minimum child index that tried to push the material, tracked under
+	// sm_StateLock during push().  mergeWorkerStacks() then stable-sorts by
+	// that index before concatenating onto the shared m_Stack[pass], so the
+	// SECONDARY (transparency) pass sees the same order serial rendering gives.
 	//
-	// The scaffolding (per-thread instance key, per-worker primitive stacks,
-	// lock points on shared caches) is kept in place because it's correct
-	// when unused and paves the way for a future architectural refactor
-	// (sim/render pipeline split — see darkspace/Docs/Phase3_SimRenderSplit.md).
+	// Default off.  Flip via DarkSpaceClient.cpp after validating visually —
+	// the flag is architecturally safe but may expose latent issues in any
+	// scene-specific code that assumes single-threaded preRender semantics.
 	static bool			sm_bParallelPreRender;
 
 	// Stage 3.2 of the sim/render split: when true, Noun::preRender swaps
@@ -143,6 +144,17 @@ public:
 	// invariants on m_Frame / m_Position are preserved because the actual
 	// live members are what gets read.
 	static bool			sm_bUseRenderSnapshot;
+
+	// Per-thread "current child index being preRender'd" during parallel
+	// zone dispatch.  NodeZone::Dispatch::run sets this before invoking each
+	// child's preRender; DisplayDeviceD3D12::push reads it under sm_StateLock
+	// to record the minimum child index that has tried to push each material.
+	// mergeWorkerStacks stable-sorts by that minimum so the SECONDARY pass
+	// sees materials in traversal order regardless of worker-grab order.
+	// Returns -1 on the main thread outside parallel dispatch.  Cross-DLL,
+	// so exposed as free DLL functions rather than a thread_local member.
+	static int			currentPreRenderChildIndex();
+	static void			setPreRenderChildIndex( int i );
 
 	// Global lock that serializes reads/writes of shared render-traversal
 	// state (instance key, instance data map).  Reentrant.  Acquired
@@ -335,8 +347,8 @@ private:
 		float				m_fShadowRadius;
 		SizeInt				m_szShadowMap;
 
-		dword				m_Clock;							// used to calculate the frames per second
-		float				m_Fps;	
+		qword				m_Clock;							// QPC ticks at last endRender, 0 = uninitialised; used to calculate the frames per second
+		float				m_Fps;
 		float				m_Elapsed;
 	};
 	typedef std::list< State >				StateList;

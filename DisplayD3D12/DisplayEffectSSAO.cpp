@@ -201,8 +201,11 @@ bool DisplayEffectSSAOD3D12::initSSAO( DisplayDeviceD3D12 * pDevice )
 	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pBlurPSO) );
 	if ( FAILED(hr) ) { TRACE( "SSAO: Failed to create Blur PSO" ); return false; }
 
-	// Apply PSO (multiplicative: DST * SRC)
+	// Apply PSO (multiplicative: DST * SRC).  Writes back into the scene RT
+	// (10-bit format), unlike the SSAO/Blur PSOs above which target the 8-bit
+	// AO ping-pong textures.  PSO RTV format must match the bound RTV exactly.
 	psoDesc.PS = { m_pPSApply->GetBufferPointer(), m_pPSApply->GetBufferSize() };
+	psoDesc.RTVFormats[0] = DisplayDeviceD3D12::SCENE_RT_FORMAT;
 	psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
 	psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ZERO;
 	psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_SRC_COLOR;
@@ -364,8 +367,8 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 
 	// Bind depth SRV at t0 (only t0 needed for SSAO pass)
-	UINT depthSlot = pDev->m_nSRVFrameOffset;
-	pDev->m_nSRVFrameOffset += 2;		// reserve 2 slots for t0, t1
+	// fetch_add returns the value before the increment — that's the base of the 2-slot range.
+	UINT depthSlot = pDev->m_nSRVFrameOffset.fetch_add( 2, std::memory_order_acq_rel );
 	dev->CopyDescriptorsSimple( 1,
 		pDev->m_SRVHeap.GetCPUHandle( depthSlot ),
 		pDev->m_SRVStagingHeap.GetCPUHandle( pDev->m_nDepthSRVIndex ),
@@ -403,8 +406,7 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 
 	// Bind AO[0] at t0 and depth at t1
-	UINT blurSlot = pDev->m_nSRVFrameOffset;
-	pDev->m_nSRVFrameOffset += 2;
+	UINT blurSlot = pDev->m_nSRVFrameOffset.fetch_add( 2, std::memory_order_acq_rel );
 	dev->CopyDescriptorsSimple( 1,
 		pDev->m_SRVHeap.GetCPUHandle( blurSlot ),
 		pDev->m_SRVStagingHeap.GetCPUHandle( m_nAOSRVIndex[0] ),
@@ -430,8 +432,7 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE );
 
 	// Bind AO[1] (blurred) at t0
-	UINT applySlot = pDev->m_nSRVFrameOffset;
-	pDev->m_nSRVFrameOffset += 2;
+	UINT applySlot = pDev->m_nSRVFrameOffset.fetch_add( 2, std::memory_order_acq_rel );
 	dev->CopyDescriptorsSimple( 1,
 		pDev->m_SRVHeap.GetCPUHandle( applySlot ),
 		pDev->m_SRVStagingHeap.GetCPUHandle( m_nAOSRVIndex[1] ),

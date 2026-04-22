@@ -155,7 +155,11 @@ bool ShaderD3D12::load( DisplayDeviceD3D12 * pDevice, const char * pShaderName )
 	m_sShaderName = pShaderName;
 	m_bReleased = false;
 
-	// First try to find an HLSL version in the DisplayD3D12/Shaders/ directory
+	// Resolve path via DisplayDevice::sm_sShadersPath which for the game is an
+	// empty string — so paths are relative to the process CWD (the Bin/ dir
+	// that holds the exe), i.e. shaders live under <CWD>/Shaders/.  Dev tools
+	// (ScenePort, MaterialPort) set sm_sShadersPath explicitly; the runtime
+	// engine does not.
 	CharString sHLSLPath;
 	CharString sOriginalPath = DisplayDevice::sm_sShadersPath + m_sShaderName;
 

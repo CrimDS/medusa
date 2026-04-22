@@ -42,6 +42,20 @@ CriticalSection		RenderContext::sm_StateLock;
 // Main thread's initial value is 0; each worker sees 0 at the start of a job.
 static thread_local qword tl_nInstanceKey = 0;
 
+// Per-thread current child index for parallel preRender dispatch.  -1 when
+// not inside a zone's parallel child loop.  See RenderContext.h comment.
+static thread_local int tl_nPreRenderChildIndex = -1;
+
+int RenderContext::currentPreRenderChildIndex()
+{
+	return tl_nPreRenderChildIndex;
+}
+
+void RenderContext::setPreRenderChildIndex( int i )
+{
+	tl_nPreRenderChildIndex = i;
+}
+
 																//---------------------------------------------------------------------------------------------------
 
 RenderContext::RenderContext() : m_nRenderPassGen( 0 )
@@ -526,12 +540,16 @@ void RenderContext::endRender()
 	// remove all lights
 	m_Display->clearLights();
 
+	// Sub-millisecond frame timing: Time::milliseconds() rounds to integer ms,
+	// which at 200+fps causes ~25% dt jitter (5ms frames alternate between 4ms
+	// and 5ms after rounding) — visible as camera-smoothing lurch.  QPC ticks
+	// give sub-microsecond resolution and eliminate the jitter.
+	qword current = Time::ticks();
 	if (m_State.m_Clock != 0)
 	{
-		dword current = Time::milliseconds();
 		if (current > m_State.m_Clock)
 		{
-			m_State.m_Elapsed = float(current - m_State.m_Clock) / 1000.0f;
+			m_State.m_Elapsed = float(current - m_State.m_Clock) / float(Time::ticksPerSecond());
 			m_State.m_Fps = 1.0f / m_State.m_Elapsed;
 		}
 		else
@@ -542,7 +560,7 @@ void RenderContext::endRender()
 		m_State.m_Clock = current;
 	}
 	else
-		m_State.m_Clock = Time::milliseconds();
+		m_State.m_Clock = current;
 
 	// removed untouched instance data
 	for (InstanceDataMap::iterator iInstanceData = m_InstanceDataMap.begin();

@@ -114,6 +114,15 @@ void Broker::flushCache()
 
 //! This starts an asynchronous load of the widget in the background, it will invoked the onLoaded() virtual 
 //! function in the LoadRequest object once the widget has been loaded...
+bool Broker::inLoadingThread()
+{
+	// No lock — sm_pLoadingThread is set once at startLoadingThread time and
+	// cleared at stopLoadingThread.  Reading the pointer is benign; even if
+	// we read a stale NULL we simply return false (not on loader thread),
+	// which is the safe answer.
+	return sm_pLoadingThread != NULL && sm_pLoadingThread->inThread();
+}
+
 bool Broker::requestLoad( const WidgetKey & a_nKey, const ClassKey & a_nType, Request * a_pRequest, bool a_bBlocking )
 {
 	// first, check if widget is already available, if so then just notify the request object and early out.. 

@@ -226,13 +226,22 @@ bool PlatformWin::initialize( Config & context )
 	m_InFullScreen = !context.bWindowed;
 	m_bInvertButtons = context.bInvertButtons;
 
-	int nDevice = 0, nWidth = 0, nHeight = 0, nDepth = 0;
-	if ( sscanf_s( context.displayMode, "%d:%dx%dx%d", &nDevice, &nWidth, &nHeight, &nDepth ) != 4 )
+	// displayMode comes in three historical formats:
+	//   D3D9 backend:        "0:1024x768x32"                             (device:WxHxBPP)
+	//   D3D12 backend (now): "1024x768"                                  (just WxH)
+	//   D3D12 legacy:        "NVIDIA GeForce RTX 5080 - 1024x768"        (device " - " WxH — replaced because long device names
+	//                                                                     overflowed the Options listbox column)
+	// Try in order: D3D9, current D3D12, legacy D3D12 (parse the WxH after " - ").
+	int nDevice = 0, nWidth = 0, nHeight = 0, nDepth = 32;
+	const char * pDash = strstr( context.displayMode, " - " );
+	if ( sscanf_s( context.displayMode, "%d:%dx%dx%d", &nDevice, &nWidth, &nHeight, &nDepth ) != 4
+	  && sscanf_s( context.displayMode, "%dx%d", &nWidth, &nHeight ) != 2
+	  && !( pDash && sscanf_s( pDash + 3, "%dx%d", &nWidth, &nHeight ) == 2 ) )
 	{
-		TRACE( "Failed to parse display mode, falling back to default..." );
+		TRACE( "Failed to parse display mode '%s', falling back to default...", (const char *)context.displayMode );
 
 		nDevice = 0;
-		nWidth = DEFAULT_WINDOW_DEPTH;
+		nWidth = DEFAULT_WINDOW_WIDTH;
 		nHeight = DEFAULT_WINDOW_HEIGHT;
 		nDepth = DEFAULT_WINDOW_DEPTH;
 	}

@@ -66,6 +66,14 @@ public:
 	static bool			stopLoadingThread();
 	static void			flushCache();
 
+	// Returns true when the calling thread IS the broker loading thread —
+	// i.e. we are inside Broker::loadingThread → pBroker->load chain.
+	// Used by deserializers (Material::read) to avoid eagerly touching
+	// device-side state (D3D primitive factory pool, etc) from the loader
+	// thread, which can deadlock against the main thread holding the same
+	// pool's lock during render.  Lazy creation on first render is safe.
+	static bool			inLoadingThread();
+
 	//! This starts an asynchronous load of the widget in the background, it will invoked the onLoaded() virtual 
 	//! function in the LoadRequest object once the widget has been loaded...
 	static bool			requestLoad( const WidgetKey & a_nKey, const ClassKey & a_nType, Request * a_pRequest, bool a_bBlocking );

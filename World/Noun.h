@@ -22,6 +22,7 @@
 
 class WorldContext;		// forward declare
 class NodeZone;
+class RenderSnapshot;
 
 //----------------------------------------------------------------------------
 
@@ -107,9 +108,16 @@ public:
 	virtual void			preRender( RenderContext & context,
 								const Matrix33 & frame,
 								const Vector3 & position );
-	virtual void			render( RenderContext &context, 
-								const Matrix33 & frame, 
+	virtual void			render( RenderContext &context,
+								const Matrix33 & frame,
 								const Vector3 & position );
+
+	// Phase D — write per-noun type-specific render state into the snapshot
+	// slot just appended by WorldContext::captureRenderSnapshot.  Default no-op;
+	// subclasses override to capture extra state (e.g., NounShip writes
+	// energy/damage/signature into RenderSnapshot's per-ship arrays).  Always
+	// called from sim thread context, immediately after addNoun for this noun.
+	virtual void			captureSnapshotState( RenderSnapshot & out, int idx ) const;
 
 	// NodeTransform interface
 	virtual void			setFrame( const Matrix33 &frame );
