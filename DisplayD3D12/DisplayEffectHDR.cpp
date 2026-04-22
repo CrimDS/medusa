@@ -491,7 +491,21 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	cl->RSSetViewports( 1, &sceneVP );
 	cl->RSSetScissorRects( 1, &sceneScissor );
 
-	// Upload composite constants (fScale controls bloom intensity)
+	// Upload composite constants (fScale controls bloom intensity).  Re-read
+	// the bloomScale setting every frame — same pattern as D3D9
+	// (DisplayD3D/DisplayEffectHDR.cpp:133).  This lets the in-game slider
+	// update bloom live without recreating the HDR effect, which previously
+	// released D3D12 command allocators the GPU still had in flight.  The
+	// Settings lookup is an in-memory hash access; the cost is trivial once
+	// per composite vs. the cost of device removal.
+#ifdef _DEBUG
+	Settings liveSettings( "ClientD" );
+#else
+	Settings liveSettings( "Client" );
+#endif
+	const int nLiveScalePct = liveSettings.get( "bloomScale", 100 );
+	m_fBloomScale = Clamp<float>( (float)nLiveScalePct / 100.0f, 0.0f, 1.0f );
+
 	CBPostProcess cbComposite = {};
 	cbComposite.texelSizeX = 1.0f / (float)rw.width();
 	cbComposite.texelSizeY = 1.0f / (float)rw.height();

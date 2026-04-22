@@ -140,6 +140,27 @@ public:
 	void					setNounDamage( int idx,
 								int nDamage, int nMaxDamage );
 
+	// Phase D D.6 — jump drive chain + capture target.  jumpDrive() can be
+	// NULL (no gadget); bJumpHasGadget mirrors that.  Capture target is
+	// stored as a WidgetKey so the render side can resolve via findIndex/
+	// findNoun without dereferencing a sim-mutable pointer.
+	void					setShipJumpDrive( int idx,
+								bool bHasGadget, bool bEngaged, bool bJumping,
+								dword nJumpTime );
+	void					setShipCaptureTarget( int idx, WidgetKey nKey );
+
+	// Phase D D.7 — ship status batch (flags + OOC + rank).  Read every
+	// frame by the HUD — the live accessors mutate per sim tick.
+	void					setShipStatus( int idx,
+								dword nFlags, bool bOutOfCombat,
+								float fOOCTimer, int nRank );
+
+	// Phase D D.8 — planet state.  control() is a racy float (capture
+	// progress); flags() is read by ~10 HUD/UI sites.  Writes to per-noun-
+	// slot arrays — non-planet slots stay at zero.
+	void					setPlanetState( int idx,
+								float fControl, dword nFlags );
+
 	int						shipEnergy( int idx ) const;
 	int						shipMaxEnergy( int idx ) const;
 	int						shipDamage( int idx ) const;
@@ -150,6 +171,23 @@ public:
 	float					shipView( int idx ) const;
 	float					shipVisibility( int idx ) const;
 	float					shipSensor( int idx ) const;
+
+	// D.6
+	bool					shipJumpHasGadget( int idx ) const;
+	bool					shipJumpEngaged( int idx ) const;
+	bool					shipJumping( int idx ) const;
+	dword					shipJumpTime( int idx ) const;
+	WidgetKey				shipCaptureTarget( int idx ) const;
+
+	// D.7
+	dword					shipFlags( int idx ) const;
+	bool					shipIsOutOfCombat( int idx ) const;
+	float					shipOOCTimer( int idx ) const;
+	int						shipRank( int idx ) const;
+
+	// D.8
+	float					planetControl( int idx ) const;
+	dword					planetFlags( int idx ) const;
 
 	// World-state snapshot fields (populated by WorldContext::captureRenderSnapshot).
 	Vector3					m_CameraPosition;
@@ -187,6 +225,24 @@ private:
 	std::vector<float>		m_ShipView;
 	std::vector<float>		m_ShipVisibility;
 	std::vector<float>		m_ShipSensor;
+
+	// Phase D D.6 — jump drive + capture target.  Booleans stored as int
+	// (vector<bool> is the proxy-bit-vector specialization, awkward to use).
+	std::vector<int>		m_ShipJumpHasGadget;
+	std::vector<int>		m_ShipJumpEngaged;
+	std::vector<int>		m_ShipJumping;
+	std::vector<dword>		m_ShipJumpTime;
+	std::vector<qword>		m_ShipCaptureTarget;	// WidgetKey-as-qword; 0 = none
+
+	// Phase D D.7 — ship status batch.
+	std::vector<dword>		m_ShipFlags;
+	std::vector<int>		m_ShipOutOfCombat;
+	std::vector<float>		m_ShipOOCTimer;
+	std::vector<int>		m_ShipRank;
+
+	// Phase D D.8 — planet state.  Per-noun-slot; non-planet slots stay zero.
+	std::vector<float>		m_PlanetControl;
+	std::vector<dword>		m_PlanetFlags;
 
 	// Index into the parallel arrays by noun key.  Populated by addNoun,
 	// cleared by clear().  Lets the render path map a live Noun back to
@@ -344,6 +400,61 @@ inline float RenderSnapshot::shipVisibility( int i ) const
 inline float RenderSnapshot::shipSensor( int i ) const
 {
 	return m_ShipSensor[i];
+}
+
+inline bool RenderSnapshot::shipJumpHasGadget( int i ) const
+{
+	return m_ShipJumpHasGadget[i] != 0;
+}
+
+inline bool RenderSnapshot::shipJumpEngaged( int i ) const
+{
+	return m_ShipJumpEngaged[i] != 0;
+}
+
+inline bool RenderSnapshot::shipJumping( int i ) const
+{
+	return m_ShipJumping[i] != 0;
+}
+
+inline dword RenderSnapshot::shipJumpTime( int i ) const
+{
+	return m_ShipJumpTime[i];
+}
+
+inline WidgetKey RenderSnapshot::shipCaptureTarget( int i ) const
+{
+	return WidgetKey( m_ShipCaptureTarget[i] );
+}
+
+inline dword RenderSnapshot::shipFlags( int i ) const
+{
+	return m_ShipFlags[i];
+}
+
+inline bool RenderSnapshot::shipIsOutOfCombat( int i ) const
+{
+	return m_ShipOutOfCombat[i] != 0;
+}
+
+inline float RenderSnapshot::shipOOCTimer( int i ) const
+{
+	return m_ShipOOCTimer[i];
+}
+
+inline int RenderSnapshot::shipRank( int i ) const
+{
+	return m_ShipRank[i];
+}
+
+inline float RenderSnapshot::planetControl( int i ) const
+{
+	return m_PlanetControl[i];
+}
+
+inline dword RenderSnapshot::planetFlags( int i ) const
+{
+	return m_PlanetFlags[i];
 }
 
 //---------------------------------------------------------------------------------------------------

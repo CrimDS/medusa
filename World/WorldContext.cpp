@@ -41,7 +41,7 @@ bool		WorldContext::sm_bEnableHDR = true;
 bool		WorldContext::sm_bUpdateHDR = false;
 bool		WorldContext::sm_bEnableShadows = true;
 int			WorldContext::sm_nMaxShadowLights = 4;
-bool		WorldContext::sm_bEnableSSAO = true;
+bool		WorldContext::sm_bEnableSSAO = false;	// disabled: artefact-prone on the smooth convex spheres that dominate this game (planets, stars). Re-enable per-scene if SSAO becomes valuable for ships specifically — see reference_ssao_skip_via_no_depth_write memory note for the proper stencil-based per-noun opt-out.
 bool				WorldContext::sm_bParallelSimulate = true;		// default on — cross-zone mutations guarded by sm_SimMutLock
 CriticalSection		WorldContext::sm_SimMutLock;						// coarse lock for cross-zone mutations during parallel simulate
 
@@ -620,8 +620,12 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 				m_pSSAO = NULL;
 		}
 
-		// disable lens flares if HDR is enabled..
-		NodeFlare::sm_bFlareEnabled = !sm_bEnableHDR;
+		// Lens flares left enabled even when HDR is on.  HDR bloom alone
+		// can't produce directional ray streaks (it's an isotropic blur);
+		// the legacy NodeFlare lens-flare chain is what gives stars
+		// outward-pushing rays.  Glare (full-screen wash) is suppressed
+		// per-noun in NounStar::postInitialize instead.
+		NodeFlare::sm_bFlareEnabled = true;
 
 		PROFILE_START( "Rendering scenery" );
 

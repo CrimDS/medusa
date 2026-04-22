@@ -18,6 +18,8 @@
 #include "Debug/Profile.h"
 #include "Standard/Limits.h"
 #include "Display/PrimitiveLineList.h"
+#include <map>				// subdivideAndSpherify edge-midpoint cache
+#include <utility>			// std::pair
 #include "Display/PrimitiveSetTransform.h"
 
 #include "NodeComplexMesh2.h"
@@ -543,6 +545,148 @@ void NodeComplexMesh2::optimize()
 void NodeComplexMesh2::invalidate()
 {
 	m_Primitives.release();
+}
+
+void NodeComplexMesh2::subdivideAndSpherify( int a_nLevels )
+{
+	// Idempotency: original planet .prt meshes have tens-to-low-hundreds of
+	// vertices; after one subdivision pass they're in the hundreds, after two
+	// in the thousands.  A vertex count above this threshold means we've
+	// already subdivided this mesh on a prior planet instance sharing the
+	// same NounContext (planets of the same type share the mesh asset).
+	if ( a_nLevels <= 0 || m_Verts.size() < 3 || m_Verts.size() > 500 )
+		return;
+
+	invalidate();
+
+	for ( int pass = 0; pass < a_nLevels; ++pass )
+	{
+		// Cache: sorted pair of original-vertex indices -> new midpoint
+		// index.  Shared across all materials in this pass so adjacent
+		// triangles (across material boundaries) reuse the same midpoint
+		// vertex — keeps the mesh watertight and avoids T-junctions.
+		std::map< std::pair<int,int>, int > midpointCache;
+
+		// Start with all originals; midpoints are appended.
+		Array< Vertex > newVerts;
+		newVerts.grow( m_Verts.size() );
+		for ( int i = 0; i < m_Verts.size(); ++i )
+			newVerts[i] = m_Verts[i];
+
+		// Pre-compute originals' radii so endpoint averaging matches the
+		// (possibly non-uniform) base mesh — a slightly oblong sphere stays
+		// slightly oblong; a perfect sphere stays perfect.
+		// (Inline the avg-radius math to avoid recomputing in the lambda.)
+
+		// Subdivide each triangle.  Each (i0,i1,i2) becomes 4 sub-triangles
+		// sharing the original 3 corners + 3 midpoints.  Material grouping
+		// is preserved — sub-triangles inherit the parent triangle's material.
+		Array< Array< TriangleList > > newTriangles;
+		newTriangles.grow( m_Triangles.size() );
+		for ( int f = 0; f < m_Triangles.size(); ++f )
+		{
+			newTriangles[f].grow( m_Triangles[f].size() );
+			for ( int matIdx = 0; matIdx < m_Triangles[f].size(); ++matIdx )
+			{
+				const Array< Triangle > & oldTris = m_Triangles[f][matIdx];
+				Array< Triangle > & newTris = newTriangles[f][matIdx];
+				newTris.grow( oldTris.size() * 4 );
+
+				int outIdx = 0;
+				for ( int t = 0; t < oldTris.size(); ++t )
+				{
+					int i0 = oldTris[t].verts[0];
+					int i1 = oldTris[t].verts[1];
+					int i2 = oldTris[t].verts[2];
+
+					// get-or-create the midpoint between two vertex indices
+					int midpointIndices[3];
+					int edgePairs[3][2] = { { i0, i1 }, { i1, i2 }, { i2, i0 } };
+					for ( int e = 0; e < 3; ++e )
+					{
+						int a = edgePairs[e][0];
+						int b = edgePairs[e][1];
+						std::pair<int,int> key = a < b
+							? std::make_pair( a, b )
+							: std::make_pair( b, a );
+						std::map< std::pair<int,int>, int >::iterator it = midpointCache.find( key );
+						if ( it != midpointCache.end() )
+						{
+							midpointIndices[e] = it->second;
+							continue;
+						}
+
+						const Vertex & va = m_Verts[a];
+						const Vertex & vb = m_Verts[b];
+
+						Vertex mid;
+						mid.position = (va.position + vb.position) * 0.5f;
+
+						// Spherify: scale the midpoint to the average
+						// distance-from-origin of the two endpoints.  For a
+						// sphere centered at origin this pushes the new
+						// vertex to the sphere surface; for non-spherical
+						// meshes this is a mild smoothing.
+						const float ra    = va.position.magnitude();
+						const float rb    = vb.position.magnitude();
+						const float rNew  = (ra + rb) * 0.5f;
+						const float rMid  = mid.position.magnitude();
+						if ( rMid > 0.0001f )
+							mid.position = mid.position * (rNew / rMid);
+
+						// Linear-interp UVs.
+						mid.u = (va.u + vb.u) * 0.5f;
+						mid.v = (va.v + vb.v) * 0.5f;
+
+						// Recompute the midpoint normal from the spherified
+						// position, NOT by interpolating endpoint normals.
+						// Interpolation preserves discontinuities from the
+						// original (pre-subdivision) UV-sphere topology at the
+						// original triangle edges — those read as visible
+						// vertical stripes in any shader that uses NdotV,
+						// because the interpolated normals jitter along the
+						// old lat-long boundaries.  For a spherified mesh
+						// centred on the origin the true surface normal IS
+						// just the unit position vector, so use that.
+						const float rNewMag = mid.position.magnitude();
+						if ( rNewMag > 0.0001f )
+							mid.normal = mid.position * (1.0f / rNewMag);
+						else
+							mid.normal = (va.normal + vb.normal) * 0.5f;
+
+						const int newVertIdx = newVerts.size();
+						newVerts.push( mid );
+						midpointCache[ key ] = newVertIdx;
+						midpointIndices[e] = newVertIdx;
+					}
+
+					const int m01 = midpointIndices[0];
+					const int m12 = midpointIndices[1];
+					const int m20 = midpointIndices[2];
+
+					// 4 sub-triangles, same winding order as parent.
+					Triangle t1, t2, t3, t4;
+					t1.verts[0] = (word)i0;  t1.verts[1] = (word)m01; t1.verts[2] = (word)m20;
+					t2.verts[0] = (word)m01; t2.verts[1] = (word)i1;  t2.verts[2] = (word)m12;
+					t3.verts[0] = (word)m20; t3.verts[1] = (word)m12; t3.verts[2] = (word)i2;
+					t4.verts[0] = (word)m01; t4.verts[1] = (word)m12; t4.verts[2] = (word)m20;
+					newTris[outIdx++] = t1;
+					newTris[outIdx++] = t2;
+					newTris[outIdx++] = t3;
+					newTris[outIdx++] = t4;
+				}
+			}
+		}
+
+		m_Verts = newVerts;
+		m_Triangles = newTriangles;
+	}
+
+	// Recompute hull (vertex count grew; spherified midpoints may extend it).
+	calculateHull();
+
+	TRACE( CharString().format( "NodeComplexMesh2::subdivideAndSpherify(%d) -> %d verts, %d triangles",
+		a_nLevels, m_Verts.size(), triangleCount() ) );
 }
 
 void NodeComplexMesh2::scale( float scale )

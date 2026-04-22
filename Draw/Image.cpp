@@ -631,6 +631,12 @@ bool Image::createMipMaps()
 
 ImageCodec::Ref Image::allocateCodec( Format eFormat )
 {
+	// Try the D3D12 codec by name first; fall back to the legacy D3D9 name.
+	// Both backends register under unique factory keys.  When running D3D12
+	// the legacy D3D9 codec was being created and then failing every call
+	// with D3DERR_INVALIDCALL (no D3D9 device exists), spamming 32+
+	// "ImageCodecDXT Direct Draw Error" lines per scene init.  See
+	// medusa/DisplayD3D12/ImageCodecDXT.cpp:30 for the D3D12 names.
 	Widget::Ref pUncasted;
 	switch( eFormat )
 	{
@@ -638,13 +644,19 @@ ImageCodec::Ref Image::allocateCodec( Format eFormat )
 		pUncasted = Factory::createNamedWidget( "ImageCodecJPEG" );
 		break;
 	case ColorFormat::DXT1:
-		pUncasted = Factory::createNamedWidget( "ImageCodecDXT1" );
+		pUncasted = Factory::createNamedWidget( "ImageCodecDXT1D3D12" );
+		if (! pUncasted.valid() )
+			pUncasted = Factory::createNamedWidget( "ImageCodecDXT1" );
 		break;
 	case ColorFormat::DXT3:
-		pUncasted = Factory::createNamedWidget( "ImageCodecDXT3" );
+		pUncasted = Factory::createNamedWidget( "ImageCodecDXT3D3D12" );
+		if (! pUncasted.valid() )
+			pUncasted = Factory::createNamedWidget( "ImageCodecDXT3" );
 		break;
 	case ColorFormat::DXT5:
-		pUncasted = Factory::createNamedWidget( "ImageCodecDXT5" );
+		pUncasted = Factory::createNamedWidget( "ImageCodecDXT5D3D12" );
+		if (! pUncasted.valid() )
+			pUncasted = Factory::createNamedWidget( "ImageCodecDXT5" );
 		break;
 	default:
 		return NULL;

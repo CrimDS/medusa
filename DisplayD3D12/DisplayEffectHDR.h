@@ -27,7 +27,7 @@ public:
 	// Tuning parameters
 	int						m_nBloomLevels;			// number of blur iterations
 	int						m_nBloomSize;			// bloom RT divisor (e.g. 4 = 1/4 screen)
-	float					m_fBloomScale;			// bloom intensity
+	float					m_fBloomScale;			// bloom intensity (re-read from settings per frame in composite)
 	float					m_fBrightThreshold;		// luminance threshold for bright pass
 
 private:

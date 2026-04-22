@@ -62,6 +62,17 @@ void RenderSnapshot::clear()
 	m_ShipView.clear();
 	m_ShipVisibility.clear();
 	m_ShipSensor.clear();
+	m_ShipJumpHasGadget.clear();
+	m_ShipJumpEngaged.clear();
+	m_ShipJumping.clear();
+	m_ShipJumpTime.clear();
+	m_ShipCaptureTarget.clear();
+	m_ShipFlags.clear();
+	m_ShipOutOfCombat.clear();
+	m_ShipOOCTimer.clear();
+	m_ShipRank.clear();
+	m_PlanetControl.clear();
+	m_PlanetFlags.clear();
 	m_KeyToIndex.clear();
 }
 
@@ -93,6 +104,17 @@ void RenderSnapshot::addNoun( WidgetKey nKey,
 	m_ShipView.push_back( 0.0f );
 	m_ShipVisibility.push_back( 0.0f );
 	m_ShipSensor.push_back( 0.0f );
+	m_ShipJumpHasGadget.push_back( 0 );
+	m_ShipJumpEngaged.push_back( 0 );
+	m_ShipJumping.push_back( 0 );
+	m_ShipJumpTime.push_back( 0 );
+	m_ShipCaptureTarget.push_back( 0 );
+	m_ShipFlags.push_back( 0 );
+	m_ShipOutOfCombat.push_back( 0 );
+	m_ShipOOCTimer.push_back( 0.0f );
+	m_ShipRank.push_back( 0 );
+	m_PlanetControl.push_back( 0.0f );
+	m_PlanetFlags.push_back( 0 );
 	m_KeyToIndex[ nKey.m_Id ] = nIndex;
 }
 
@@ -123,6 +145,35 @@ void RenderSnapshot::setNounDamage( int idx, int nDamage, int nMaxDamage )
 {
 	m_ShipDamage[ idx ]    = nDamage;
 	m_ShipMaxDamage[ idx ] = nMaxDamage;
+}
+
+void RenderSnapshot::setShipJumpDrive( int idx,
+		bool bHasGadget, bool bEngaged, bool bJumping, dword nJumpTime )
+{
+	m_ShipJumpHasGadget[ idx ] = bHasGadget ? 1 : 0;
+	m_ShipJumpEngaged[ idx ]   = bEngaged   ? 1 : 0;
+	m_ShipJumping[ idx ]       = bJumping   ? 1 : 0;
+	m_ShipJumpTime[ idx ]      = nJumpTime;
+}
+
+void RenderSnapshot::setShipCaptureTarget( int idx, WidgetKey nKey )
+{
+	m_ShipCaptureTarget[ idx ] = nKey.m_Id;
+}
+
+void RenderSnapshot::setShipStatus( int idx,
+		dword nFlags, bool bOutOfCombat, float fOOCTimer, int nRank )
+{
+	m_ShipFlags[ idx ]        = nFlags;
+	m_ShipOutOfCombat[ idx ]  = bOutOfCombat ? 1 : 0;
+	m_ShipOOCTimer[ idx ]     = fOOCTimer;
+	m_ShipRank[ idx ]         = nRank;
+}
+
+void RenderSnapshot::setPlanetState( int idx, float fControl, dword nFlags )
+{
+	m_PlanetControl[ idx ] = fControl;
+	m_PlanetFlags[ idx ]   = nFlags;
 }
 
 int RenderSnapshot::findIndex( const WidgetKey & nKey ) const

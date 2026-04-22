@@ -103,6 +103,16 @@ public:
 	void				scale( float scale );					// scale this mesh verticies
 	void				release();								// release this mesh
 
+	// Mesh subdivision + spherify for low-poly planet meshes that show
+	// visible polygon facets at the silhouette.  Runs N passes; each pass
+	// splits every triangle into 4 by inserting edge midpoints, then projects
+	// the new midpoint vertices to the average radius of their two endpoints
+	// (so a sphere becomes smoother, while non-spherical meshes are mostly
+	// preserved).  UVs and normals are linearly interpolated.  Idempotent via
+	// a vertex-count threshold — calling twice on the same mesh (planets
+	// share NounContext meshes across instances) is a no-op.
+	void				subdivideAndSpherify( int a_nLevels );
+
 	void				buildDecal( NodeComplexMesh2 * pMesh, const Vector3 & p, const Vector3 & n, const Vector3 & t, 
 							float width, float height, float depth, Material * pMaterial );
 
