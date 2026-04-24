@@ -5,8 +5,6 @@
 	(c)2024 Palestar
 */
 
-#define MEDUSA_TRACE_ON
-
 #include "DisplayEffectHDR.h"
 #include "Debug/Trace.h"
 #include "Standard/Settings.h"		// for bloomScale config read
@@ -387,7 +385,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 
 	// Bind scene SRV (copy from staging to shader-visible heap)
-	UINT sceneSRVSlot = pDev->m_nSRVFrameOffset.fetch_add( 1, std::memory_order_acq_rel );
+	UINT sceneSRVSlot = pDev->allocSRVSlots( 1 );
 	dev->CopyDescriptorsSimple( 1,
 		pDev->m_SRVHeap.GetCPUHandle( sceneSRVSlot ),
 		pDev->m_SRVStagingHeap.GetCPUHandle( pDev->m_nSceneSRVIndex ),
@@ -423,7 +421,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 		TransitionResource( cl, m_pBloomTextures[1].Get(),
 			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
-		UINT bloomSRV0 = pDev->m_nSRVFrameOffset.fetch_add( 1, std::memory_order_acq_rel );
+		UINT bloomSRV0 = pDev->allocSRVSlots( 1 );
 		dev->CopyDescriptorsSimple( 1,
 			pDev->m_SRVHeap.GetCPUHandle( bloomSRV0 ),
 			pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[0] ),
@@ -446,7 +444,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 		TransitionResource( cl, m_pBloomTextures[0].Get(),
 			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
-		UINT bloomSRV1 = pDev->m_nSRVFrameOffset.fetch_add( 1, std::memory_order_acq_rel );
+		UINT bloomSRV1 = pDev->allocSRVSlots( 1 );
 		dev->CopyDescriptorsSimple( 1,
 			pDev->m_SRVHeap.GetCPUHandle( bloomSRV1 ),
 			pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[1] ),
@@ -474,7 +472,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	}
 
 	// Bind bloom[0] as input
-	UINT bloomSRVFinal = pDev->m_nSRVFrameOffset.fetch_add( 1, std::memory_order_acq_rel );
+	UINT bloomSRVFinal = pDev->allocSRVSlots( 1 );
 	dev->CopyDescriptorsSimple( 1,
 		pDev->m_SRVHeap.GetCPUHandle( bloomSRVFinal ),
 		pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[0] ),

@@ -5,8 +5,6 @@
 	(c)2024 Palestar
 */
 
-#define MEDUSA_TRACE_ON
-
 #include "DisplayEffectSSAO.h"
 #include "Debug/Trace.h"
 
@@ -367,8 +365,8 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 
 	// Bind depth SRV at t0 (only t0 needed for SSAO pass)
-	// fetch_add returns the value before the increment — that's the base of the 2-slot range.
-	UINT depthSlot = pDev->m_nSRVFrameOffset.fetch_add( 2, std::memory_order_acq_rel );
+	// allocSRVSlots returns the base of a bounded `count`-slot range, wrapping at heap end.
+	UINT depthSlot = pDev->allocSRVSlots( 2 );
 	dev->CopyDescriptorsSimple( 1,
 		pDev->m_SRVHeap.GetCPUHandle( depthSlot ),
 		pDev->m_SRVStagingHeap.GetCPUHandle( pDev->m_nDepthSRVIndex ),
@@ -406,7 +404,7 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 
 	// Bind AO[0] at t0 and depth at t1
-	UINT blurSlot = pDev->m_nSRVFrameOffset.fetch_add( 2, std::memory_order_acq_rel );
+	UINT blurSlot = pDev->allocSRVSlots( 2 );
 	dev->CopyDescriptorsSimple( 1,
 		pDev->m_SRVHeap.GetCPUHandle( blurSlot ),
 		pDev->m_SRVStagingHeap.GetCPUHandle( m_nAOSRVIndex[0] ),
@@ -432,7 +430,7 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE );
 
 	// Bind AO[1] (blurred) at t0
-	UINT applySlot = pDev->m_nSRVFrameOffset.fetch_add( 2, std::memory_order_acq_rel );
+	UINT applySlot = pDev->allocSRVSlots( 2 );
 	dev->CopyDescriptorsSimple( 1,
 		pDev->m_SRVHeap.GetCPUHandle( applySlot ),
 		pDev->m_SRVStagingHeap.GetCPUHandle( m_nAOSRVIndex[1] ),

@@ -5,7 +5,6 @@
 */
 
 //#define PROFILE_OFF
-#define MEDUSA_TRACE_ON
 
 #include "Debug/Trace.h"
 #include "Debug/Assert.h"
@@ -203,7 +202,11 @@ RectInt DisplayDeviceD3D12::clientWindow() const
 
 RectInt DisplayDeviceD3D12::renderWindow() const
 {
-	if ( m_bWindowed )
+	// Use the tracked client rectangle in both modes.  Borderless fullscreen
+	// sizes the window to the monitor bounds, which may not match m_Mode.screenSize
+	// (the user-configured "mode" is independent of the monitor's actual resolution).
+	// Callers need the actual render surface size, so always report m_ClientRectangle.
+	if ( m_ClientRectangle.width() > 0 && m_ClientRectangle.height() > 0 )
 		return RectInt( PointInt(0,0), m_ClientRectangle.size() );
 	return RectInt( PointInt(0,0), m_Mode.screenSize );
 }
@@ -304,28 +307,154 @@ bool DisplayDeviceD3D12::setMode( const Mode * pMode, bool bWindowed )
 	if ( pMode == NULL && !bWindowed )
 		return false;
 
+	const bool wasWindowed = m_bWindowed;
 	if ( pMode != NULL )
 		m_Mode = *pMode;
 	m_bWindowed = bWindowed;
 
-	// Resize swap chain
+	// ALT+ENTER arrives via WM_SYSKEYDOWN in PlatformWin::winProc and can hit
+	// mid-frame — command list may be open with backbuffer RTV references
+	// recorded.  Close (but don't execute) the partial frame; it would not have
+	// been presented anyway.  ResizeBuffers requires zero outstanding backbuffer
+	// refs including those inside an open command list.
+	if ( m_bCommandListOpen )
+	{
+		m_pCommandList->Close();
+		m_bCommandListOpen = false;
+	}
 	waitForGPU();
 
 	for ( UINT i = 0; i < FRAME_COUNT; i++ )
 		m_pRenderTargets[i].Reset();
 	m_pDepthStencil.Reset();
 
+	// Choose target backbuffer size.  Borderless-fullscreen sizes to the
+	// monitor the window is on; windowed sizes to whatever the HWND's client
+	// rect becomes after the style/placement changes below.
+	UINT targetW = m_Mode.screenSize.width;
+	UINT targetH = m_Mode.screenSize.height;
+
+	if ( IsWindow( m_HWND ) )
+	{
+		if ( !bWindowed )
+		{
+			// Going to (or staying in) borderless fullscreen.
+			// On the first transition out of windowed, capture placement so
+			// we can restore it later.
+			if ( wasWindowed )
+			{
+				m_ClientPlacement.length = sizeof( m_ClientPlacement );
+				GetWindowPlacement( m_HWND, &m_ClientPlacement );
+			}
+
+			HMONITOR hMon = MonitorFromWindow( m_HWND, MONITOR_DEFAULTTONEAREST );
+			MONITORINFO mi = {};
+			mi.cbSize = sizeof( mi );
+			if ( GetMonitorInfo( hMon, &mi ) )
+			{
+				LONG style = GetWindowLong( m_HWND, GWL_STYLE );
+				SetWindowLong( m_HWND, GWL_STYLE, ( style & ~WS_OVERLAPPEDWINDOW ) | WS_POPUP );
+				SetWindowPos( m_HWND, HWND_TOP,
+					mi.rcMonitor.left, mi.rcMonitor.top,
+					mi.rcMonitor.right - mi.rcMonitor.left,
+					mi.rcMonitor.bottom - mi.rcMonitor.top,
+					SWP_NOZORDER | SWP_FRAMECHANGED );
+
+				targetW = (UINT)( mi.rcMonitor.right - mi.rcMonitor.left );
+				targetH = (UINT)( mi.rcMonitor.bottom - mi.rcMonitor.top );
+
+				// Sync m_ClientRectangle so renderWindow() reports the actual
+				// render surface.  updateClientArea's GetClientRect path is
+				// gated on m_bWindowed and won't update this in FS mode.
+				m_ClientRectangle = RectInt(
+					mi.rcMonitor.left, mi.rcMonitor.top,
+					mi.rcMonitor.right - 1, mi.rcMonitor.bottom - 1 );
+			}
+		}
+		else
+		{
+			// Returning to (or staying in) windowed mode.
+			LONG style = GetWindowLong( m_HWND, GWL_STYLE );
+			const LONG newStyle = ( style & ~WS_POPUP ) | WS_OVERLAPPEDWINDOW;
+			SetWindowLong( m_HWND, GWL_STYLE, newStyle );
+
+			if ( !wasWindowed )
+			{
+				// Coming out of fullscreen — restore saved windowed placement.
+				if ( m_ClientPlacement.length == sizeof( m_ClientPlacement ) )
+					SetWindowPlacement( m_HWND, &m_ClientPlacement );
+				SetWindowPos( m_HWND, HWND_TOP, 0, 0, 0, 0,
+					SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED );
+			}
+			else if ( pMode != NULL )
+			{
+				// Staying windowed but the user picked a new mode — resize
+				// the window so the CLIENT area matches the requested mode.
+				// AdjustWindowRect adds border/titlebar overhead so the outer
+				// rect we pass to SetWindowPos produces the right inner size.
+				RECT rect = { 0, 0,
+					(LONG)m_Mode.screenSize.width,
+					(LONG)m_Mode.screenSize.height };
+				AdjustWindowRect( &rect, newStyle, FALSE );
+				SetWindowPos( m_HWND, HWND_TOP, 0, 0,
+					rect.right - rect.left,
+					rect.bottom - rect.top,
+					SWP_NOZORDER | SWP_NOMOVE | SWP_FRAMECHANGED );
+			}
+			else
+			{
+				// No mode change and already windowed — just refresh the frame.
+				SetWindowPos( m_HWND, HWND_TOP, 0, 0, 0, 0,
+					SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED );
+			}
+
+			RECT rc;
+			GetClientRect( m_HWND, &rc );
+			if ( rc.right > rc.left && rc.bottom > rc.top )
+			{
+				targetW = (UINT)( rc.right - rc.left );
+				targetH = (UINT)( rc.bottom - rc.top );
+
+				// Sync m_ClientRectangle now, BEFORE createFXAA runs below.
+				// updateClientArea at the end of setMode would also refresh
+				// this, but it runs after createFXAA — so without this the
+				// scene RT is sized from the stale rect, and next frame
+				// renders into the upper-left corner of an oversized scene RT.
+				POINT tl = { rc.left, rc.top };
+				POINT br = { rc.right, rc.bottom };
+				ClientToScreen( m_HWND, &tl );
+				ClientToScreen( m_HWND, &br );
+				m_ClientRectangle = RectInt( tl.x, tl.y, br.x - 1, br.y - 1 );
+			}
+		}
+	}
+
+	if ( targetW < 1 ) targetW = 1;
+	if ( targetH < 1 ) targetH = 1;
+
 	if ( m_pSwapChain )
 	{
 		HRESULT hr = m_pSwapChain->ResizeBuffers( FRAME_COUNT,
-			m_Mode.screenSize.width, m_Mode.screenSize.height,
+			targetW, targetH,
 			DXGI_FORMAT_R8G8B8A8_UNORM, 0 );
 		if ( FAILED(hr) )
+		{
+			HRESULT removed = m_pDevice ? m_pDevice->GetDeviceRemovedReason() : S_OK;
+			TRACE( "setMode: ResizeBuffers failed hr=0x%08x, DeviceRemovedReason=0x%08x  %ux%u",
+				hr, removed, targetW, targetH );
 			return false;
+		}
+		m_nFrameIndex = m_pSwapChain->GetCurrentBackBufferIndex();
 	}
 
 	createRenderTargets();
 	createDepthStencil();
+
+	// FXAA scene RT is sized to the client; recreate alongside the backbuffers
+	// or the next frame will sample a wrong-dimension scene RT.
+	if ( m_bFXAAEnabled )
+		createFXAA();
+
 	updateClientArea( false );
 
 	return true;
@@ -570,9 +699,13 @@ bool DisplayDeviceD3D12::beginScene()
 			m_DeferredPrimitives[m_nFrameIndex].release();
 		}
 
-		// Reset per-frame SRV ring allocator (slots 0-7 are permanent null SRVs)
-		m_nSRVFrameOffset.store( 8, std::memory_order_release );
-		m_nSRVTextureBase = 8;
+		// Reset per-frame SRV ring allocator.  Per-frame slab means frame N
+		// uses slots [N*MAX, (N+1)*MAX); the first 8 slots of each slab hold
+		// the permanent null SRVs (created at device init, never overwritten
+		// because allocations always start at slab-base + 8).
+		const UINT slabBase = (UINT)m_nFrameIndex * MAX_SRV_DESCRIPTORS;
+		m_nSRVFrameOffset.store( slabBase + 8, std::memory_order_release );
+		m_nSRVTextureBase = slabBase + 8;
 
 		// Reset redundant-bind tracking for the new frame.  The command list is
 		// fresh, so any previously-tracked bindings are invalid.
@@ -597,9 +730,11 @@ bool DisplayDeviceD3D12::beginScene()
 		m_nSRVCopiesSkipped = 0;
 
 		// Per-slot cache of which staging index currently lives in each SRV slot.
-		// Size lazily, then blanket-invalidate each frame (UINT(-1) = empty).
-		if ( m_SRVSlotStagingIndex.size() != (int)MAX_SRV_DESCRIPTORS )
-			m_SRVSlotStagingIndex.allocate( MAX_SRV_DESCRIPTORS );
+		// Sized to cover the full heap (all per-frame slabs) so indexing by
+		// absolute slot works.  Blanket-invalidate each frame (UINT(-1) = empty).
+		const int fullHeapSize = (int)MAX_SRV_DESCRIPTORS * FRAME_COUNT;
+		if ( m_SRVSlotStagingIndex.size() != fullHeapSize )
+			m_SRVSlotStagingIndex.allocate( fullHeapSize );
 		for ( int i = 0; i < m_SRVSlotStagingIndex.size(); ++i )
 			m_SRVSlotStagingIndex[i] = UINT(-1);
 
@@ -1788,6 +1923,43 @@ D3D12_GPU_DESCRIPTOR_HANDLE DisplayDeviceD3D12::getSRVGPUHandle( UINT index )
 	return m_SRVHeap.GetGPUHandle( index );
 }
 
+UINT DisplayDeviceD3D12::allocSRVSlots( UINT count )
+{
+	// CAS-with-wrap bounded to the current frame's slab.  Wrapping back to
+	// this frame's slab-base overwrites earlier in-frame slots (same tradeoff
+	// as always), but stays OUT of other frames' slabs so frame N+1 can't
+	// clobber frame N's in-flight descriptors.
+	const UINT slabBase = (UINT)m_nFrameIndex * MAX_SRV_DESCRIPTORS;
+	const UINT slabEnd  = slabBase + MAX_SRV_DESCRIPTORS;
+	UINT current = m_nSRVFrameOffset.load( std::memory_order_relaxed );
+	UINT base;
+	for (;;)
+	{
+		const bool wrap = ( current + count > slabEnd );
+		base = wrap ? ( slabBase + 8u ) : current;
+		const UINT next = base + count;
+		if ( m_nSRVFrameOffset.compare_exchange_weak(
+				current, next,
+				std::memory_order_acq_rel, std::memory_order_relaxed ) )
+		{
+			// Warn once per session when wrap actually fires — wrap overwrites
+			// earlier in-frame slot bindings and causes visible texture corruption.
+			if ( wrap )
+			{
+				static bool s_warned = false;
+				if ( !s_warned )
+				{
+					s_warned = true;
+					TRACE( "WARN: SRV ring wrap at frame-offset=%u count=%u (MAX=%u). "
+						"Mid-frame wrap = texture corruption. Bump MAX_SRV_DESCRIPTORS.",
+						current, count, (UINT)MAX_SRV_DESCRIPTORS );
+				}
+			}
+			return base;
+		}
+	}
+}
+
 //---------------------------------------------------------------------------------------------------
 // World matrix and constant buffer binding
 //---------------------------------------------------------------------------------------------------
@@ -2171,7 +2343,11 @@ bool DisplayDeviceD3D12::initializeD3D12()
 		return false;
 	if ( !m_DSVHeap.Create(m_pDevice.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, MAX_DSV_DESCRIPTORS, false) )
 		return false;
-	if ( !m_SRVHeap.Create(m_pDevice.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_SRV_DESCRIPTORS, true) )
+	// Shader-visible SRV heap is per-frame slabbed so frame N+1's descriptor
+	// writes don't overwrite slots that frame N's GPU is still reading.
+	// Total heap size = MAX_SRV_DESCRIPTORS * FRAME_COUNT, with each frame
+	// using slots [frameIdx * MAX, (frameIdx+1) * MAX).
+	if ( !m_SRVHeap.Create(m_pDevice.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, MAX_SRV_DESCRIPTORS * FRAME_COUNT, true) )
 		return false;
 	if ( !m_SamplerHeap.Create(m_pDevice.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, MAX_SAMPLER_DESCRIPTORS, true) )
 		return false;
@@ -2212,8 +2388,9 @@ bool DisplayDeviceD3D12::initializeD3D12()
 		nullSRV.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
 		nullSRV.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		nullSRV.Texture2D.MipLevels = 1;
-		// Initialize ALL slots so per-frame SRV ring never has uninitialized descriptors
-		for ( UINT i = 0; i < MAX_SRV_DESCRIPTORS; i++ )
+		// Initialize ALL slots in every frame's slab so per-frame SRV ring
+		// never has uninitialized descriptors.  FRAME_COUNT slabs × MAX slots.
+		for ( UINT i = 0; i < MAX_SRV_DESCRIPTORS * FRAME_COUNT; i++ )
 			m_pDevice->CreateShaderResourceView( nullptr, &nullSRV, m_SRVHeap.GetCPUHandle(i) );
 	}
 
@@ -2693,7 +2870,16 @@ void DisplayDeviceD3D12::waitForGPU()
 		return;
 
 	const UINT64 fence = m_nFenceValues[m_nFrameIndex];
-	m_pCommandQueue->Signal( m_pFence.Get(), fence );
+	HRESULT hrSignal = m_pCommandQueue->Signal( m_pFence.Get(), fence );
+	if ( FAILED(hrSignal) )
+	{
+		// Signal fails when the device has been removed (TDR, driver reset).
+		// GetCompletedValue returns UINT64_MAX in that case so the wait below
+		// is correctly skipped, but surface the removal reason so the log shows
+		// the actual cause instead of a cascade of downstream failures.
+		HRESULT removed = m_pDevice ? m_pDevice->GetDeviceRemovedReason() : S_OK;
+		TRACE( "waitForGPU: Signal failed hr=0x%08x, DeviceRemovedReason=0x%08x", hrSignal, removed );
+	}
 
 	if ( m_pFence->GetCompletedValue() < fence )
 	{
@@ -3069,10 +3255,18 @@ bool DisplayDeviceD3D12::createFXAA()
 	if ( width == 0 || height == 0 )
 		return false;
 
-	// Release old resources if resizing
+	// Only the scene RT dimensions depend on window size.  Shader bytecode,
+	// root signature, and PSO are size-independent — preserve them across
+	// resize so an interactive WM_SIZE drag doesn't recompile HLSL + rebuild
+	// the PSO on every mouse-move event.
 	m_pSceneRT.Reset();
-	m_pFXAAPSO.Reset();
-	m_pFXAARootSig.Reset();
+
+	// Reset state-tracking flag — the new scene RT is created below with
+	// initial state PIXEL_SHADER_RESOURCE.  If this flag is left true from
+	// the previous scene RT's last state, beginScene skips the PSR→RT
+	// transition and the subsequent ClearRenderTargetView hits a resource
+	// that's still in PSR state → GPU validation error and visual corruption.
+	m_bSceneRTisRT = false;
 
 	// Create intermediate render target (same format as swap chain)
 	D3D12_RESOURCE_DESC rtDesc = {};
@@ -3098,7 +3292,10 @@ bool DisplayDeviceD3D12::createFXAA()
 		IID_PPV_ARGS(&m_pSceneRT) );
 	if ( FAILED(hr) )
 	{
-		TRACE( "createFXAA: Failed to create scene render target!" );
+		HRESULT removed = m_pDevice->GetDeviceRemovedReason();
+		TRACE( "createFXAA: CreateCommittedResource failed hr=0x%08x removed=0x%08x  %ux%u fmt=%d  RTVslot=%u SRVslot=%u",
+			hr, removed, width, height, (int)SCENE_RT_FORMAT,
+			m_nSceneRTVIndex, m_nSceneSRVIndex );
 		m_bFXAAEnabled = false;
 		return false;
 	}
@@ -3120,6 +3317,10 @@ bool DisplayDeviceD3D12::createFXAA()
 	srvDesc.Texture2D.MipLevels = 1;
 	m_pDevice->CreateShaderResourceView( m_pSceneRT.Get(), &srvDesc,
 		m_SRVStagingHeap.GetCPUHandle( m_nSceneSRVIndex ) );
+
+	// Pipeline (shader + root sig + PSO) is built on first call only.
+	if ( m_pFXAAPSO && m_pFXAARootSig && m_pFXAAShader.valid() && m_pFXAAShader->valid() )
+		return true;
 
 	// Load FXAA shader
 	m_pFXAAShader = getShader( "Shaders/FXAA.hlsl" );
@@ -3270,7 +3471,7 @@ void DisplayDeviceD3D12::applyFXAA()
 	m_pCommandList->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 
 	// Copy scene SRV to a slot in the shader-visible SRV heap
-	UINT fxaaSRVSlot = m_nSRVFrameOffset.fetch_add( 1, std::memory_order_acq_rel );
+	UINT fxaaSRVSlot = allocSRVSlots( 1 );
 	m_pDevice->CopyDescriptorsSimple( 1,
 		m_SRVHeap.GetCPUHandle( fxaaSRVSlot ),
 		m_SRVStagingHeap.GetCPUHandle( m_nSceneSRVIndex ),
@@ -3312,6 +3513,14 @@ void DisplayDeviceD3D12::enumerateTextures()
 
 bool DisplayDeviceD3D12::updateClientArea( bool a_bAllowReset )
 {
+	// Skip the whole query/resize during an interactive window drag.  The
+	// message pump still ticks during Windows' modal size-move loop, so
+	// present() keeps calling updateClientArea(true) on each WM_SIZE.  We
+	// leave m_ClientRectangle stale; after WM_EXITSIZEMOVE clears the flag
+	// the next frame sees the mismatch and does one coalesced resize.
+	if ( a_bAllowReset && sm_bResizeSuspended )
+		return true;
+
 	if ( m_bWindowed )
 	{
 		RectInt clientWindow;
@@ -3343,10 +3552,20 @@ bool DisplayDeviceD3D12::updateClientArea( bool a_bAllowReset )
 			if ( a_bAllowReset && m_pSwapChain )
 			{
 				// Resize swap chain buffers — wait for all GPU work, then release
-			// back buffer references.  Do NOT reset the descriptor heaps; the
-			// tracked indices (m_nRTVIndices, m_nDSVIndex, etc.) are reused by
-			// createRenderTargets/createDepthStencil.  Resetting the heap would
-			// let future Allocate() return indices already in use.
+				// back buffer references.  Do NOT reset the descriptor heaps; the
+				// tracked indices (m_nRTVIndices, m_nDSVIndex, etc.) are reused by
+				// createRenderTargets/createDepthStencil.  Resetting the heap would
+				// let future Allocate() return indices already in use.
+				//
+				// ResizeBuffers requires zero outstanding backbuffer references,
+				// including those held by a currently-recording command list.
+				// Close (but do NOT execute) any partial frame — it wouldn't have
+				// been presented against the new swap chain anyway.
+				if ( m_bCommandListOpen )
+				{
+					m_pCommandList->Close();
+					m_bCommandListOpen = false;
+				}
 				waitForGPU();
 				for ( UINT i = 0; i < FRAME_COUNT; i++ )
 					m_pRenderTargets[i].Reset();
@@ -3371,11 +3590,35 @@ bool DisplayDeviceD3D12::updateClientArea( bool a_bAllowReset )
 	}
 	else
 	{
-		m_ClientRectangle = RectInt( 0, 0, m_Mode.screenSize );
+		// Borderless fullscreen: the window IS a real HWND (WS_POPUP) sized
+		// to the monitor — use its actual client rect.  Do NOT use
+		// m_Mode.screenSize: that's whatever mode the user selected from the
+		// Mode list and may not match the monitor the window landed on, so
+		// relying on it clobbers the monitor-bounds rect that setMode set
+		// and squishes the whole scene into the upper-left of the backbuffer.
 		if ( IsWindow( m_HWND ) && !IsIconic( m_HWND ) )
-			m_bMinimized = false;
+		{
+			RECT rect;
+			GetClientRect( m_HWND, &rect );
+			ClientToScreen( m_HWND, (POINT *)&rect );
+			ClientToScreen( m_HWND, ((POINT *)&rect) + 1 );
+
+			RectInt clientWindow = RectInt( rect.left, rect.top,
+				rect.right - 1, rect.bottom - 1 );
+			if ( clientWindow.valid() )
+			{
+				m_ClientRectangle = clientWindow;
+				m_bMinimized = false;
+			}
+			else
+			{
+				m_bMinimized = true;
+			}
+		}
 		else
+		{
 			m_bMinimized = true;
+		}
 	}
 	return true;
 }

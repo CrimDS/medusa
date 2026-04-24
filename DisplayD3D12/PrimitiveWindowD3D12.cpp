@@ -22,6 +22,8 @@ bool PrimitiveWindowD3D12::execute()
 	DisplayDeviceD3D12 * pDev = (DisplayDeviceD3D12 *)m_pDevice;
 	UINT dataSize = 6 * sizeof(VertexTL);
 	UploadRingBuffer::Allocation alloc = pDev->allocateDynamic( dataSize, sizeof(VertexTL) );
+	if ( !alloc.cpuAddress )
+		return false;
 	memcpy( alloc.cpuAddress, m_Verts, dataSize );
 
 	ID3D12GraphicsCommandList * cl = pDev->getCommandList();

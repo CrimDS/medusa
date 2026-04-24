@@ -18,6 +18,7 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include "Debug/Trace.h"
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -283,11 +284,16 @@ public:
 		UINT current = m_CurrentOffset.load(std::memory_order_relaxed);
 		UINT alignedOffset;
 		UINT newOffset;
+		bool wrapped = false;
 		for (;;)
 		{
 			alignedOffset = (current + alignment - 1) & ~(alignment - 1);
+			wrapped = false;
 			if (alignedOffset + size > m_BufferSize)
+			{
 				alignedOffset = 0;	// wrap around
+				wrapped = true;
+			}
 			newOffset = alignedOffset + size;
 
 			// Acquire on success so any subsequent reads of the buffer (which
@@ -298,6 +304,21 @@ public:
 					std::memory_order_acq_rel, std::memory_order_relaxed))
 				break;
 			// CAS failure refreshes `current`; retry with the new value.
+		}
+
+		// One-time warning if wrap actually fires.  Within-frame wrap of the
+		// upload ring corrupts earlier-recorded draws' dynamic vertex/CB data
+		// because the GPU reads the ring at command-list execute time.
+		if (wrapped)
+		{
+			static bool s_wrapWarned = false;
+			if (!s_wrapWarned)
+			{
+				s_wrapWarned = true;
+				TRACE( "WARN: UploadRingBuffer wrap at offset=%u size=%u bufSize=%u. "
+					"Within-frame wrap = VB/CB data corruption.",
+					current, size, m_BufferSize );
+			}
 		}
 
 		Allocation alloc;

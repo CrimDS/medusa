@@ -37,7 +37,7 @@ public:
 		PRIMITIVE_STACK_SIZE	= 1024 * 8,
 		DYNAMIC_VB_SIZE			= 1024 * 1024 * 64, 		// 64MB ring buffer per frame
 		DYNAMIC_CB_SIZE			= 1024 * 1024 * 8, 		// 8MB for constant buffers per frame
-		MAX_SRV_DESCRIPTORS		= 32768,	// bumped from 4096 — wraps mid-frame at high SRV-bind counts (e.g. profiler ON + many materials = 633+ binds × 8 slots = >5000 needed). Wrap mid-frame overwrites earlier slots' bindings, corrupting textures (font glyphs appearing on planet surfaces). 32768/8 = 4096 binds/frame headroom — plenty even for proper per-column text alignment in the profiler.
+		MAX_SRV_DESCRIPTORS		= 131072,	// bumped 4096 → 32768 → 131072.  Wrap mid-frame overwrites earlier slots' bindings, corrupting textures ("font glyphs appearing on planet surfaces", random squares / letters painted on meshes when the camera moves in fullscreen).  32768 was fine for windowed 1280x960 but fullscreen at native resolution pushes past 4096 binds/frame (wider FOV → more visible ships/planets + larger HUD).  131072/8 = 16384 binds/frame headroom.  512KB VRAM for the heap = trivial.  Proper fix is flush-on-wrap or per-frame slab; this is a higher cap, not a real fix.
 		MAX_SAMPLER_DESCRIPTORS	= 64,
 		MAX_RTV_DESCRIPTORS		= 32,
 		MAX_DSV_DESCRIPTORS		= 8,
@@ -145,6 +145,12 @@ public:
 	UINT							allocateSRV();
 	D3D12_CPU_DESCRIPTOR_HANDLE		getSRVCPUHandle( UINT index );
 	D3D12_GPU_DESCRIPTOR_HANDLE		getSRVGPUHandle( UINT index );
+
+	// Claim a contiguous run of `count` slots from the shader-visible SRV ring,
+	// wrapping back to slot 8 (past the permanent-null range) if the request
+	// would overflow MAX_SRV_DESCRIPTORS.  Raw fetch_add on m_nSRVFrameOffset
+	// is unsafe because GetCPUHandle() past the heap end is an OOB pointer.
+	UINT							allocSRVSlots( UINT count );
 
 	// Command list access
 	ID3D12GraphicsCommandList *		getCommandList() const { return m_pCommandList.Get(); }

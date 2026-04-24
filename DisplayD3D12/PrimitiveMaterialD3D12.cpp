@@ -514,16 +514,32 @@ bool PrimitiveMaterialD3D12::setupTextures()
 	// read-modify-write rather than a simple fetch_add.  Single-threaded
 	// callers spin at most once.  When the ring wraps, earlier materials'
 	// descriptors get overwritten — same trade-off as the old serial version.
+	const UINT slabBase = (UINT)pDevice->m_nFrameIndex * DisplayDeviceD3D12::MAX_SRV_DESCRIPTORS;
+	const UINT slabEnd  = slabBase + DisplayDeviceD3D12::MAX_SRV_DESCRIPTORS;
 	UINT current = pDevice->m_nSRVFrameOffset.load( std::memory_order_relaxed );
 	UINT base;
 	for (;;)
 	{
-		base = ( current + 8 > DisplayDeviceD3D12::MAX_SRV_DESCRIPTORS ) ? 8u : current;
+		const bool wrap = ( current + 8 > slabEnd );
+		base = wrap ? ( slabBase + 8u ) : current;
 		const UINT next = base + 8;
 		if ( pDevice->m_nSRVFrameOffset.compare_exchange_weak(
 				current, next,
 				std::memory_order_acq_rel, std::memory_order_relaxed ) )
+		{
+			if ( wrap )
+			{
+				static bool s_warned = false;
+				if ( !s_warned )
+				{
+					s_warned = true;
+					TRACE( "WARN: SRV ring wrap in material setupTextures at frame-offset=%u "
+						"(MAX=%u). Mid-frame wrap = texture corruption.",
+						current, (UINT)DisplayDeviceD3D12::MAX_SRV_DESCRIPTORS );
+				}
+			}
 			break;
+		}
 	}
 	pDevice->m_nSRVTextureBase = base;
 

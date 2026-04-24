@@ -13,6 +13,7 @@
 #include "System/Messages.h"
 #include "System/CommandTarget.h"
 #include "System/Keyboard.h"
+#include "Display/DisplayDevice.h"
 #include "SystemWin/PlatformWin.h"
 
 //---------------------------------------------------------------------------------------------------
@@ -144,6 +145,15 @@ long PlatformWin::winProc( HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam
 		}
 		break;
 	case WM_SIZE:
+		break;
+	case WM_ENTERSIZEMOVE:
+		// Interactive window drag started.  Each WM_SIZE during the drag
+		// would otherwise trigger a full GPU-flush + ResizeBuffers in the
+		// display backend; suspend that until the drag ends.
+		DisplayDevice::sm_bResizeSuspended = true;
+		break;
+	case WM_EXITSIZEMOVE:
+		DisplayDevice::sm_bResizeSuspended = false;
 		break;
 	case WM_SETCURSOR:
 		return 1;

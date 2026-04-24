@@ -275,6 +275,11 @@ public:
 	static dword					sm_nLinesRendered;					// total number of lines rendered
 	static CharString				sm_sShadersPath;					// base directory of shader files
 	static bool						sm_bEnableShaderDebug;				// if true, then shaders are reloaded from disk when changed
+	// When true, updateClientArea suppresses swap-chain resizes.  Toggled by
+	// the platform layer around Windows' modal size-move loop (WM_ENTERSIZEMOVE
+	// → true, WM_EXITSIZEMOVE → false) so an interactive drag does a single
+	// coalesced ResizeBuffers on release instead of stalling on every WM_SIZE.
+	static bool						sm_bResizeSuspended;
 	static DisplayDevice *			sm_pCacheDevice;					// device for used to precache graphics assets...
 
 	static const char *				describeFSAA( FSAA eFSAA );

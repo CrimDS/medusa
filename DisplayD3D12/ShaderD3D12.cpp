@@ -5,8 +5,6 @@
 	(c)2024 Palestar
 */
 
-#define MEDUSA_TRACE_ON
-
 #include "ShaderD3D12.h"
 #include "DisplayDeviceD3D12.h"
 #include "D3D12Helpers.h"
