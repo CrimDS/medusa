@@ -8,6 +8,7 @@
 #define MEDUSA_TRACE_ON			// force trace messages to stay on
 
 #include "WorldClient.h"
+#include "RenderSnapshot.h"			// Option 2: RenderSnapshotRing::setLocalShipKey
 #include "Debug/Assert.h"
 #include "Debug/Profile.h"
 #include "Standard/Time.h"
@@ -248,6 +249,15 @@ void WorldClient::receiveMessage( bool bUDP, u8 nMessage, const InStream & input
 			if ( m_pSelf.valid() )
 				m_pSelf->setUserId( userId() );
 
+			// Option 2 — tell the render snapshot ring which noun is the local
+			// player's ship so pinForFrame can forward-lerp its position
+			// between 20 Hz sim publishes.  Pass the key unconditionally
+			// (not gated on m_pSelf.valid()) because the noun may not be
+			// resolvable at this moment but will be once the server pushes
+			// its CONTEXT_ADD_NOUN.  pinForFrame's findIndex returns -1
+			// until the key appears in the snapshot — no-op until then.
+			RenderSnapshotRing::setLocalShipKey( nSelf );
+
 			onSetSelf( m_pSelf );
 			user()->onSetSelf( m_pSelf );
 
@@ -438,6 +448,8 @@ void WorldClient::receiveMessage( bool bUDP, u8 nMessage, const InStream & input
 			m_pTarget = NULL;
 			m_pFocus = NULL;
 			m_nTeamId = 0;
+			// Option 2 — disable local-ship extrapolation on context end.
+			RenderSnapshotRing::setLocalShipKey( WidgetKey( (qword)0 ) );
 			//m_Storage.release();
 
 			unlock();

@@ -189,11 +189,50 @@ public:
 	float					planetControl( int idx ) const;
 	dword					planetFlags( int idx ) const;
 
+	// Option 2 — render-time linear extrapolation of the client-local ship.
+	// Advances both local and world position at `idx` by the ship's
+	// horizontal heading direction * shipVelocity(idx) * fDt (heading is
+	// recovered via atan2(worldFrame.k.x, worldFrame.k.z) to match the
+	// sim-side dynamics in NounShipControl::updateDynamics exactly).
+	// Used only for the local player's own ship (remote ships are
+	// Smoother-routed sim-side).  With Option 3 active, called on the
+	// materialized m_Pinned once per pin (not on a source slot), so
+	// per-slot applied-dt tracking is no longer needed.
+	void					extrapLocalShip( int idx, float fDt );
+
+	// Option 3 — materialize this snapshot as the linear interpolation of
+	// two history slots A (older) and B (newer) at fractional time t ∈ [0, 1].
+	// Starts with `*this = B` (structural data — key list, ship scalars,
+	// frames — come from the newer capture) and overrides positions +
+	// velocities with a linear blend between A and B for each noun that
+	// exists in BOTH.  Nouns in B but not A retain B's values (newly
+	// visible, zero lag).  Frames are NOT interpolated — rotation stepping
+	// at 20 Hz is visually imperceptible for typical yaw rates, and a
+	// component-wise matrix lerp of frames caused mesh rendering to go
+	// invisible/translucent in the initial roll-out.  If frame interp is
+	// revisited later, use quaternion slerp and validate before re-enable.
+	void					materialize( const RenderSnapshot & A,
+									const RenderSnapshot & B,
+									float t );
+
+	// Option 3 — copy one noun's pose (local+world position, local+world
+	// frame, velocity) from src[srcIdx] into (*this)[dstIdx].  Used to
+	// overlay the client-local ship's freshest (un-interpolated) pose on
+	// top of the materialized interpolated view before applying
+	// extrapLocalShip.  Structural fields (key, ship scalars) stay at
+	// whatever materialize left them.
+	void					copyPoseFrom( const RenderSnapshot & src,
+									int srcIdx, int dstIdx );
+
 	// World-state snapshot fields (populated by WorldContext::captureRenderSnapshot).
 	Vector3					m_CameraPosition;
 	Matrix33				m_CameraFrame;
 	float					m_Time;
 	dword					m_Tick;
+	// Wall-clock (QPC) ticks stamped at capture time.  The ring's pinForFrame
+	// uses (Time::ticks() - m_CaptureTicks) to decide how much to extrapolate
+	// the local ship between sim publishes.  Zero until the first capture.
+	qword					m_CaptureTicks;
 
 private:
 	// Using std::vector (not medusa's Array) because we want reserve + clear
@@ -252,35 +291,48 @@ private:
 
 //---------------------------------------------------------------------------------------------------
 
-// 3-slot ring buffer.  Sim thread writes into a slot, publishes it, then
-// rotates to the next.  Render thread "pins" the latest published slot for
-// the duration of one frame so per-noun reads see a STABLE snapshot — without
-// pinning, two nouns rendered in the same frame can see different snapshots
-// if sim publishes mid-frame, which causes torn positions and streak artefacts.
+// 4-slot history ring with snapshot-pair render interpolation (Option 3).
 //
-// Why 3 slots: with 2 it's possible for sim to publish twice during a render
-// frame; the second publish would target the slot render is pinning.  With 3,
-// sim writes to slot != pinned && != latest_published, guaranteeing it never
-// overwrites the slot the reader holds.
+// Sim thread publishes captures at the sim-tick rate (20 Hz by default).
+// Render thread, at pinForFrame time, computes a target wall-clock time
+// `now - sm_fPlayoutDelaySeconds` (≈ 50 ms = 1 sim tick by default), finds
+// the two published slots that bracket the target, and LERPs them into
+// m_Pinned.  All render reads (Noun::calculateWorld snapshot short-circuit,
+// shipHeadingForRender and friends) consult m_Pinned via readSlot().
+//
+// Effect: remote nouns move smoothly at render rate (60–144 fps) without
+// extrapolation noise; local ship rides on top via Option 2's velocity-
+// forward extrap from the newest slot for zero input lag.
+//
+// Race model: reader pins two slots (the bracket pair) via an atomic
+// bitmask during materialize, then releases.  Writer's writeSlot() picks
+// a slot that's neither pinned nor the most-recently-published.  With 4
+// slots, at least 1 is always free even when reader holds 2 and the
+// "latest" flag marks a third — pre-materialize writes never race reader
+// reads.  After materialize, m_Pinned is self-contained and the source
+// slots are free to be overwritten; the reader releases its pins
+// immediately, not at end-of-frame.
 class DLL RenderSnapshotRing
 {
 public:
 	RenderSnapshotRing();
 
 	// Sim-side: get the slot to write into.  Always returns a slot that is
-	// neither pinned by the reader nor the most-recently-published slot.
+	// neither in the reader's pin bitmask nor the most-recently-published slot.
 	RenderSnapshot &		writeSlot();
 
-	// Render-side: pin the latest-published snapshot for the duration of one
-	// frame.  All Noun::preRender lookups during the frame consult readSlot()
-	// which returns the pinned slot — guaranteeing consistency across the
-	// whole render even if sim publishes mid-frame.  Match every pinForFrame
-	// with one releaseFrame.
+	// Render-side: materialize the interpolated view into m_Pinned and return
+	// a reference.  All per-noun reads during the frame go through readSlot()
+	// which returns the same m_Pinned, guaranteeing consistency across the
+	// whole render.  The source-slot pins are released internally before
+	// return — m_Pinned is a self-contained copy.  Match every pinForFrame
+	// with one releaseFrame for API symmetry (releaseFrame is a no-op with
+	// the copy-out design but reserved for future extension).
 	const RenderSnapshot &	pinForFrame();
 	void					releaseFrame();
 
-	// Render-side: returns the currently pinned snapshot, or the latest
-	// published one if the reader hasn't pinned (e.g. early-out paths).
+	// Render-side: returns the currently materialized m_Pinned.  Empty until
+	// the first pinForFrame call.
 	const RenderSnapshot &	readSlot() const;
 
 	// Sim-side: publish the slot last returned by writeSlot(), advancing the
@@ -292,20 +344,55 @@ public:
 	// Equivalent to releaseFrame.
 	void					releaseRead() { releaseFrame(); }
 
+	// Option 2 — tell the ring which noun is the client-local player ship.
+	// Set by WorldClient when self is assigned/cleared.  Zero key (default)
+	// disables local-ship extrapolation.  Only the local ship is
+	// extrapolated; remote ships keep their sim-side Smoother output and
+	// ride Option 3's inter-tick interpolation instead.
+	static void				setLocalShipKey( const WidgetKey & nKey );
+
 	// Process-wide singleton.
 	static RenderSnapshotRing & instance();
 
+	// Option 3 — snapshot-pair interpolation master switch.  Default true.
+	// When false, pinForFrame falls back to "use the newest published slot
+	// as-is" (plus local-ship extrap), matching the Option 2 behaviour for
+	// quick comparison / bisection.
+	static bool				sm_bRenderInterpolation;
+	// Option 3 — playout delay in wall-clock seconds.  Render shows the
+	// world as it was `sm_fPlayoutDelaySeconds` ago so interpolation always
+	// has a valid forward bracket (target between two known snapshots).
+	// 0.05 s = one 20 Hz sim tick — the minimum to guarantee forward data.
+	// Bump to ~0.1 s if the sim cadence is jittery and interpolation runs
+	// off the end of the bracket (visible as brief freezes).  Local-ship
+	// extrap layers on top from the newest slot, so this delay affects
+	// remote nouns only.
+	static float			sm_fPlayoutDelaySeconds;
+
 private:
-	enum { NUM_SLOTS = 3 };
+	enum { NUM_SLOTS = 4 };
 	RenderSnapshot			m_Slots[NUM_SLOTS];
-	// C++11 atomics with explicit memory_order on every access.  volatile
-	// is not a barrier under MSVC's default model; it just happens to work
-	// on x86/x64 because InterlockedExchange is seq-cst.  Promoting to
-	// std::atomic documents the handshake and is correct on weakly-ordered
-	// architectures.  See per-site ordering comments in the .cpp.
+	// The interpolated composite returned by pinForFrame / readSlot.
+	// Written only by the render thread, read by the render thread and
+	// any other thread that happens to call readSlot() (rare; profiler
+	// dumps etc.).  Not synchronized — callers that read outside a
+	// pin/release pair see whatever was last materialized.
+	RenderSnapshot			m_Pinned;
+
+	// C++11 atomics with explicit memory_order on every access.  See per-
+	// site ordering comments in the .cpp.
 	std::atomic<int>		m_nLatestPublished;	// index sim last published, -1 if none
 	std::atomic<int>		m_nWriteSlot;		// index sim currently writing into
-	std::atomic<int>		m_nReaderPinned;	// index reader pinned for frame, -1 if idle
+	// Bitmask: bit i = reader pinned slot i.  Set by pinForFrame before it
+	// reads the two bracket slots, cleared after materialize.  writeSlot
+	// avoids any bit that's set.
+	std::atomic<int>		m_nReaderPinMask;
+
+	// WidgetKey (as qword) of the client's own ship, or 0 when no self is
+	// set (pre-login, after logout, or on the server).  Atomic because
+	// WorldClient sets this on the network-message thread while pinForFrame
+	// reads from the render thread.
+	static std::atomic<qword>	sm_LocalShipKey;
 };
 
 //---------------------------------------------------------------------------------------------------

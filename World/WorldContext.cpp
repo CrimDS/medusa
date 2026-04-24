@@ -12,6 +12,7 @@
 #include "File/FileDisk.h"
 #include "Standard/Queue.h"
 #include "Standard/ThreadPool.h"
+#include "Standard/Time.h"			// Option 2: Time::ticks() for captureRenderSnapshot stamp
 #include "Render3D/NodeFlare.h"
 #include "Render3D/NodeTransform.h"
 #include "Display/PrimitiveSetTransform.h"
@@ -317,6 +318,10 @@ void WorldContext::captureRenderSnapshot( RenderSnapshot & out )
 	out.clear();
 	out.m_Time = 0.0f;						// set by caller (InterfaceContext has the clock)
 	out.m_Tick = m_Tick;
+	// Wall-clock stamp for Option 2's render-time local-ship extrapolation.
+	// RenderSnapshotRing::pinForFrame uses (now - m_CaptureTicks) to decide
+	// how far to advance the pinned local ship between sim publishes.
+	out.m_CaptureTicks = Time::ticks();
 
 	// Walk every locked zone.  For each zone, iterate its direct children
 	// (the top-level nouns in that zone) and capture their render-relevant

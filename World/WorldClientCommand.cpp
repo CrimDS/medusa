@@ -399,16 +399,27 @@ bool WorldClient::pushChat( const char * pChat, dword nFromId /*= 0*/)
 	if ( pChat == NULL || pChat[ 0 ] == 0 )
 		return false;
 
-	AutoLock lock( &m_Lock );
-	if ( m_pMetaClient != NULL && m_pMetaClient->isIgnored( nFromId ) )
+	// Guard the buffer mutation with the dedicated chat lock — NOT m_Lock.
+	// pushChat can fire from inside a parallel zone-sim worker (VerbBreakOrbit
+	// → NounShip::message → pushChat); SimThread holds m_Lock across the sim
+	// pass, so acquiring m_Lock here would deadlock against the thread-pool
+	// barrier.  m_ChatLock is never held across sim barriers, breaking the
+	// cycle.  The isIgnored() check reads m_pMetaClient, which is only
+	// assigned during login/shutdown — fine to read under m_ChatLock.
 	{
-		TRACE( CharString().format( "Ignoring chat %s from user %u", pChat, nFromId ) );
-		return false;
+		AutoLock lock( &m_ChatLock );
+		if ( m_pMetaClient != NULL && m_pMetaClient->isIgnored( nFromId ) )
+		{
+			TRACE( CharString().format( "Ignoring chat %s from user %u", pChat, nFromId ) );
+			return false;
+		}
+		m_Chat.push( pChat );
 	}
 
-	// save the chat in the log
-	m_Chat.push( pChat );
-	// notify the user
+	// user()->onChat is the UI callback — release the lock first so the
+	// callback can take any lock it needs (including m_Lock) without risk
+	// of inverted acquisition.  Note: this call may run on a sim-pool worker
+	// thread, which is a pre-existing concern orthogonal to the deadlock fix.
 	user()->onChat( pChat, nFromId );
 
 	return true;
@@ -416,14 +427,14 @@ bool WorldClient::pushChat( const char * pChat, dword nFromId /*= 0*/)
 
 void WorldClient::flushChat()
 {
-	lock();
-	
-	// notify the user before we clear the chat buffer
+	// Preserve original semantics: notify the user BEFORE we clear the
+	// buffer so the callback can iterate the final contents via chat(n).
+	// Held under m_ChatLock (recursive on both Win32 CRITICAL_SECTION and
+	// pthread PTHREAD_MUTEX_RECURSIVE), so chat()/chatCount() re-entry
+	// from the callback is safe.
+	AutoLock lock( &m_ChatLock );
 	user()->onFlushChat();
-	// clear the chat buffer
 	m_Chat.release();
-
-	unlock();
 }
 
 

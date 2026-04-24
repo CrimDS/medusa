@@ -5,6 +5,9 @@
 
 #include "World/RenderSnapshot.h"
 #include "World/WorldClient.h"		// for WorldClient::sm_bPipelinedSimRender — see setAssertSnapshotCoverage
+#include "Standard/Time.h"			// Option 2: Time::ticks() for local-ship extrap dt
+
+#include <math.h>					// atan2f / sinf / cosf in extrapLocalShip
 
 //---------------------------------------------------------------------------------------------------
 
@@ -21,12 +24,43 @@ void setRenderingFromSnapshot( bool a_bOn ) { tl_bRenderingFromSnapshot = a_bOn;
 // macro is also a no-op in Release builds, so this static cost is debug-only.
 static thread_local bool tl_bAssertSnapshotCoverage = false;
 
-bool assertSnapshotCoverageEnabled()		{ return tl_bAssertSnapshotCoverage; }
+bool assertSnapshotCoverageEnabled()
+{
+	// In Debug builds, return the thread-local flag so SNAPSHOT_ASSERT_COVERED
+	// (a debug-only macro) fires during audit passes and so the for-render
+	// helpers' `return <safe-default>` paths still surface any unmigrated
+	// snapshot reads as obviously-wrong HUD values during dev testing.
+	//
+	// In Release builds, ALWAYS return false.  The "safe defaults" the
+	// helpers return on snapshot miss (0 for visibility → ship invisible,
+	// 0 for energy → HUD dead, etc.) are strictly worse than falling
+	// through to the live value.  For single-scalar reads (float, int,
+	// dword) on x86 the "race" with sim is atomic — worst case is a
+	// one-tick-stale value, which is invisible on HUD.  A degenerate
+	// default is visible and wrong.  Returning false here makes every
+	// `if ( assertSnapshotCoverageEnabled() ) return 0;` branch fall
+	// through to `return pShip->visibility();` (or whichever live
+	// accessor), so a snapshot miss degrades to one-tick-stale live
+	// instead of an obvious visual bug.
+	//
+	// This change only matters when a snapshot miss actually happens.
+	// In the normal case (ship in snapshot), `if ( idx >= 0 ) return
+	// s.shipVisibility( idx );` fires first and never reaches the
+	// assertion check.
+#ifdef _DEBUG
+	return tl_bAssertSnapshotCoverage;
+#else
+	return false;
+#endif
+}
 void setAssertSnapshotCoverage( bool a_bOn )
 {
 	// Arm if either: sim is genuinely pipelined (race risk → must avoid
 	// live), OR audit mode is on (no race, but we want assertions to
 	// surface unmigrated reads without enabling the still-flaky sim thread).
+	// Under the #ifdef _DEBUG gate above, this flag is only observed in
+	// debug builds — storing it in release is harmless (no reader) but
+	// keeps the setter/getter pair symmetric.
 	tl_bAssertSnapshotCoverage = a_bOn &&
 		( WorldClient::sm_bPipelinedSimRender || WorldClient::sm_bAssertSnapshotCoverage );
 }
@@ -37,7 +71,8 @@ RenderSnapshot::RenderSnapshot() :
 	m_CameraPosition( true ),
 	m_CameraFrame( Matrix33::IDENTITY ),
 	m_Time( 0.0f ),
-	m_Tick( 0 )
+	m_Tick( 0 ),
+	m_CaptureTicks( 0 )
 {}
 
 void RenderSnapshot::clear()
@@ -184,89 +219,267 @@ int RenderSnapshot::findIndex( const WidgetKey & nKey ) const
 	return it->second;
 }
 
+void RenderSnapshot::extrapLocalShip( int idx, float fDt )
+{
+	// Match NounShipControl's horizontal-plane motion exactly:
+	//   m_Position += Vector3( sin(h), 0, cos(h) ) * m_fVelocity * dt
+	// worldFrame.k nearly equals (sin h, 0, cos h) for a yaw-only ship,
+	// but with non-zero pitch (gravity dip) the K-axis picks up a Y
+	// component that the sim dynamics doesn't apply — so recover the
+	// pure heading via atan2 on the horizontal plane and use that.
+	// Cheap (one atan2 + two trig per local-ship frame) and matches
+	// the sim-side trajectory exactly.
+	const float fV = m_ShipVelocity[ idx ];
+	if ( fV == 0.0f )
+		return;
+	const Vector3 & k = m_WorldFrames[ idx ].k;
+	const float fHeading = atan2f( k.x, k.z );
+	const float fScale   = fV * fDt;
+	const Vector3 d( sinf( fHeading ) * fScale, 0.0f, cosf( fHeading ) * fScale );
+	m_Positions[ idx ]      += d;
+	m_WorldPositions[ idx ] += d;
+}
+
+void RenderSnapshot::copyPoseFrom( const RenderSnapshot & src,
+	int srcIdx, int dstIdx )
+{
+	m_Positions[ dstIdx ]      = src.m_Positions[ srcIdx ];
+	m_WorldPositions[ dstIdx ] = src.m_WorldPositions[ srcIdx ];
+	m_Frames[ dstIdx ]         = src.m_Frames[ srcIdx ];
+	m_WorldFrames[ dstIdx ]    = src.m_WorldFrames[ srcIdx ];
+	m_Velocities[ dstIdx ]     = src.m_Velocities[ srcIdx ];
+}
+
+void RenderSnapshot::materialize( const RenderSnapshot & A,
+	const RenderSnapshot & B, float t )
+{
+	// Deep-copy B as the base — structural fields (key list, ship scalars,
+	// flags, jump state, planet state) are taken wholesale from the newer
+	// capture.  We only override the smoothly-interpolable pose data
+	// (positions + velocities).
+	//
+	// FRAME LERP IS INTENTIONALLY OMITTED.  Rotation stepping at 20 Hz is
+	// visually imperceptible for typical ship yaw rates (≤ 1 rad/s ≈ 3°
+	// per sim tick), and the component-wise-lerp-then-orthoNormalizeXY
+	// path was causing ships to render invisibly / see-through in the
+	// initial Option 3 rollout.  If we ever re-introduce it, use proper
+	// quaternion slerp and verify with a lone-ship test before going back
+	// to wide scenes.
+	*this = B;
+
+	// Defensive: rebuild m_KeyToIndex from m_Keys after the copy.  With
+	// `*this = B` alone, all subsequent findIndex(shipKey) calls were
+	// returning -1 for ships that ARE present in m_Keys — driving every
+	// for-render helper (shipVisibility, shipEnergy, …) into its
+	// assertSnapshotCoverageEnabled() "return 0" safe-default path during
+	// scene render, which made ships render at alpha 0 (invisible for
+	// remotes, clamped to 0.25 see-through for the local ship via the
+	// NounShip::preRender floor).  Fallback path (`m_Pinned = B` with no
+	// subsequent mutation) did NOT trip this — something about the
+	// unordered_map copy under MSVC's DLL-exported-class model fell out
+	// of sync with the vectors in the lerp-then-findIndex sequence.
+	// Rebuilding the index here is O(nounCount) but dwarfed by the
+	// materialize memcpy above, so no measurable cost.
+	m_KeyToIndex.clear();
+	const int nB = (int)m_Keys.size();
+	for ( int i = 0; i < nB; ++i )
+		m_KeyToIndex[ m_Keys[i].m_Id ] = i;
+
+	for ( int i = 0; i < nB; ++i )
+	{
+		// Nouns absent from A keep B's values (no-lerp — zero lag for a
+		// noun that just appeared).  findIndex is a hash lookup on A's
+		// m_KeyToIndex.
+		const int aIdx = A.findIndex( m_Keys[i] );
+		if ( aIdx < 0 )
+			continue;
+
+		const float one_minus_t = 1.0f - t;
+		m_Positions[i]      = A.m_Positions[aIdx]      * one_minus_t + m_Positions[i]      * t;
+		m_WorldPositions[i] = A.m_WorldPositions[aIdx] * one_minus_t + m_WorldPositions[i] * t;
+		m_Velocities[i]     = A.m_Velocities[aIdx]     * one_minus_t + m_Velocities[i]     * t;
+	}
+}
+
 //---------------------------------------------------------------------------------------------------
+
+// Option 2 — local-ship key.  Zero until WorldClient registers self.
+std::atomic<qword> RenderSnapshotRing::sm_LocalShipKey( 0 );
+
+// Option 3 — default-on snapshot-pair interpolation, 50 ms playout delay.
+bool  RenderSnapshotRing::sm_bRenderInterpolation  = true;
+float RenderSnapshotRing::sm_fPlayoutDelaySeconds  = 0.05f;
+
+void RenderSnapshotRing::setLocalShipKey( const WidgetKey & nKey )
+{
+	// Release-store so pinForFrame's acquire-load sees the write alongside
+	// any slot content the sim thread published just before self-assignment.
+	sm_LocalShipKey.store( nKey.m_Id, std::memory_order_release );
+}
 
 RenderSnapshotRing::RenderSnapshotRing() :
 	m_nLatestPublished( -1 ),
 	m_nWriteSlot( 0 ),
-	m_nReaderPinned( -1 )
+	m_nReaderPinMask( 0 )
 {}
 
 RenderSnapshot & RenderSnapshotRing::writeSlot()
 {
-	// Pick a slot that's neither pinned by the reader nor the most-recently-
-	// published one.  With 3 slots and at most 1 reader + 1 writer, exactly
-	// one of the three is always free, so this never has to wait.
-	// Re-read pinned at the END to catch a reader that pinned mid-selection;
-	// if so, retry with the new pinned value.  Bounded retries — at worst we
-	// land on a slot that was just-pinned, in which case reader and writer
-	// race on the slot data.  Cheap to avoid.
+	// Pick a slot that's neither in the reader's pin bitmask nor the most-
+	// recently-published slot.  With 4 slots and at most 2 reader pins + 1
+	// latest, at least 1 slot is always free.  Re-read the pin mask at the
+	// END in case the reader pinned mid-selection; retry if so.  Bounded
+	// retries — fallback uses the most recent m_nWriteSlot if the reader
+	// keeps us racing.
 	for ( int retry = 0; retry < 4; ++retry )
 	{
-		// Acquire so we see the slot data the reader last finished with
-		// before it released, and so we see the latest publish from a
-		// prior sim tick (publish is a release on m_nLatestPublished).
-		const int pinned    = m_nReaderPinned.load( std::memory_order_acquire );
+		const int pinMask   = m_nReaderPinMask.load( std::memory_order_acquire );
 		const int published = m_nLatestPublished.load( std::memory_order_acquire );
 
-		// m_nWriteSlot is producer-private — only this thread writes it.
 		int slot = m_nWriteSlot.load( std::memory_order_relaxed );
 		for ( int tries = 0; tries < NUM_SLOTS; ++tries )
 		{
-			if ( slot != pinned && slot != published )
+			const bool bPinned = ( pinMask & ( 1 << slot ) ) != 0;
+			if ( !bPinned && slot != published )
 				break;
 			slot = ( slot + 1 ) % NUM_SLOTS;
 		}
 
-		// Re-check pinned didn't change while we were picking.
-		if ( m_nReaderPinned.load( std::memory_order_acquire ) == pinned )
+		if ( m_nReaderPinMask.load( std::memory_order_acquire ) == pinMask )
 		{
-			// Relaxed: no other thread reads m_nWriteSlot.
 			m_nWriteSlot.store( slot, std::memory_order_relaxed );
 			return m_Slots[ slot ];
 		}
 	}
 
-	// Fallback if we keep losing the race — use whatever m_nWriteSlot is.
 	return m_Slots[ m_nWriteSlot.load( std::memory_order_relaxed ) ];
 }
 
 const RenderSnapshot & RenderSnapshotRing::pinForFrame()
 {
-	// Pin the latest-published slot for the duration of this render frame.
-	// Per-noun lookups will go through readSlot() which returns this same
-	// slot, so all nouns rendered in the frame see a consistent snapshot
-	// even if sim publishes a newer one mid-frame.
-	// Acquire: synchronize-with the release in publish() so the slot's
-	// vectors are fully visible before we start reading them.
-	int slot = m_nLatestPublished.load( std::memory_order_acquire );
-	if ( slot < 0 )
-		slot = 0;
-	// Release: the writer's next writeSlot() must see this pin before it
-	// picks a slot, otherwise it could race on the slot we just pinned.
-	m_nReaderPinned.store( slot, std::memory_order_release );
-	return m_Slots[ slot ];
+	// Option 3 — snapshot-pair interpolation with playout delay.
+	//
+	// Target: wall-clock "now" minus sm_fPlayoutDelaySeconds (≈ 50 ms =
+	// 1 sim tick).  The reader shows the world as it was that far ago
+	// so interpolation always has a valid forward bracket.  Find the
+	// two published slots that bracket the target, LERP them into
+	// m_Pinned, then overlay the client-local ship's pose from the
+	// NEWEST slot (+ Option 2 velocity-extrap forward to "now") so the
+	// player's own ship has zero input lag while remote nouns ride the
+	// delay-buffered smooth interpolation.
+	//
+	// The bracket pair is pinned via m_nReaderPinMask during the read so
+	// sim's writeSlot() doesn't overwrite either under us.  After
+	// materialize, m_Pinned is a self-contained copy — pins are released
+	// immediately, not at end-of-frame.  releaseFrame() is a no-op under
+	// this design but kept for API symmetry.
+	const int latest = m_nLatestPublished.load( std::memory_order_acquire );
+	if ( latest < 0 )
+	{
+		// No history yet (first frame after start-up).  Leave m_Pinned as
+		// whatever it was; default-constructed it's empty and findIndex
+		// returns -1 for every noun — callers fall through to live reads.
+		return m_Pinned;
+	}
+
+	const int prev = ( latest - 1 + NUM_SLOTS ) % NUM_SLOTS;
+	const int pinMask = ( 1 << latest ) | ( 1 << prev );
+	// Release: sim's next writeSlot() must see these pins before picking a
+	// slot, otherwise it could race us by writing to `prev` (or `latest`).
+	m_nReaderPinMask.store( pinMask, std::memory_order_release );
+
+	const RenderSnapshot & A = m_Slots[ prev ];
+	const RenderSnapshot & B = m_Slots[ latest ];
+
+	if ( !sm_bRenderInterpolation
+		 || A.m_CaptureTicks == 0
+		 || B.m_CaptureTicks == 0
+		 || A.m_CaptureTicks >= B.m_CaptureTicks )
+	{
+		// Fallback: only one valid publish, or interpolation disabled, or
+		// captureTicks got reordered (slot wrapped mid-race).  Use B as-is.
+		m_Pinned = B;
+	}
+	else
+	{
+		const qword nTicksPerSec = Time::ticksPerSecond();
+		const qword nNow         = Time::ticks();
+		const qword nDelay       = qword( double( sm_fPlayoutDelaySeconds )
+		                                  * double( nTicksPerSec ) );
+		const qword nTarget      = nNow > nDelay ? nNow - nDelay : 0;
+
+		if ( nTarget >= B.m_CaptureTicks )
+		{
+			// Target is at or past the newest publish — sim hasn't produced
+			// a forward bracket yet (running slower than delay).  Use B
+			// un-interpolated; Option 2's local-ship extrap below still
+			// advances the player's own ship.
+			m_Pinned = B;
+		}
+		else if ( nTarget <= A.m_CaptureTicks )
+		{
+			// Target is older than our history pair — shouldn't happen in
+			// steady state, but can on initial warm-up.  Use A.
+			m_Pinned = A;
+		}
+		else
+		{
+			const float alpha = float( double( nTarget - A.m_CaptureTicks )
+			                         / double( B.m_CaptureTicks - A.m_CaptureTicks ) );
+			m_Pinned.materialize( A, B, alpha );
+		}
+	}
+
+	// Option 2 overlay — replace the local ship's pose with the NEWEST slot
+	// plus velocity-forward extrap to "now", so the player's own ship has
+	// zero visual input lag.  Remote nouns stay on the interpolated
+	// trajectory (50 ms smoothed playout).  Source is always B (latest)
+	// because its pose is the freshest authoritative ship state — if the
+	// materialized m_Pinned was built from A+B at some alpha, we discard
+	// the ship's interpolated position in favor of B's un-delayed value.
+	// (When materialize fell through to `m_Pinned = B` on a fallback path,
+	// the copy below is a no-op before extrap — also correct.)
+	const qword nLocalKey = sm_LocalShipKey.load( std::memory_order_acquire );
+	if ( nLocalKey != 0 && B.m_CaptureTicks != 0 )
+	{
+		const int pinnedIdx = m_Pinned.findIndex( WidgetKey( nLocalKey ) );
+		const int bIdx      = B.findIndex( WidgetKey( nLocalKey ) );
+		if ( pinnedIdx >= 0 && bIdx >= 0 )
+		{
+			m_Pinned.copyPoseFrom( B, bIdx, pinnedIdx );
+			const qword nNow = Time::ticks();
+			if ( nNow > B.m_CaptureTicks )
+			{
+				float fDt = float( double( nNow - B.m_CaptureTicks )
+				                 / double( Time::ticksPerSecond() ) );
+				if ( fDt > 0.05f ) fDt = 0.05f;
+				if ( fDt > 0.0f )
+					m_Pinned.extrapLocalShip( pinnedIdx, fDt );
+			}
+		}
+	}
+
+	// Release pins — source slots are free for sim to reuse.  m_Pinned is
+	// self-contained and stays valid until the next pinForFrame call.
+	m_nReaderPinMask.store( 0, std::memory_order_release );
+	return m_Pinned;
 }
 
 void RenderSnapshotRing::releaseFrame()
 {
-	// Release: the writer's next writeSlot() sees the slot as free only
-	// after the reader has stopped touching it.
-	m_nReaderPinned.store( -1, std::memory_order_release );
+	// No-op under the materialize-and-copy-out design: pinForFrame already
+	// releases the source-slot pins.  Kept for API symmetry and as an
+	// extension point should we later switch to ref-counted in-place reads.
 }
 
 const RenderSnapshot & RenderSnapshotRing::readSlot() const
 {
-	// Prefer the pinned slot during a frame; fall back to latest-published
-	// for code paths that read outside a pin window (e.g. profiler dumps).
-	int slot = m_nReaderPinned.load( std::memory_order_acquire );
-	if ( slot < 0 )
-	{
-		slot = m_nLatestPublished.load( std::memory_order_acquire );
-		if ( slot < 0 )
-			slot = 0;
-	}
-	return m_Slots[ slot ];
+	// Under the Option 3 materialize design, m_Pinned is the authoritative
+	// per-frame view.  It's populated by pinForFrame; before the first
+	// pinForFrame of the session m_Pinned is default-empty (nounCount == 0,
+	// findIndex returns -1 for every key).  Callers that poll readSlot()
+	// outside a pin/release pair see the most recently materialized view.
+	return m_Pinned;
 }
 
 void RenderSnapshotRing::publish()

@@ -314,14 +314,20 @@ bool DisplayDeviceD3D12::setMode( const Mode * pMode, bool bWindowed )
 
 	// ALT+ENTER arrives via WM_SYSKEYDOWN in PlatformWin::winProc and can hit
 	// mid-frame — command list may be open with backbuffer RTV references
-	// recorded.  Close (but don't execute) the partial frame; it would not have
-	// been presented anyway.  ResizeBuffers requires zero outstanding backbuffer
-	// refs including those inside an open command list.
+	// recorded.  ResizeBuffers requires zero outstanding backbuffer refs
+	// including those inside an open command list.
+	//
+	// flushCommandList closes AND executes the list.  The render commands
+	// target a backbuffer that's about to be discarded — that rendering is
+	// visually lost, which is fine (one throwaway frame).  Crucially,
+	// texture-upload copies queued in the same list by flushPendingUploads
+	// (CopyTextureRegion into D3DPOOL_DEFAULT textures) execute before
+	// waitForGPU.  A bare Close() without Execute() was dropping those
+	// uploads — surface resources survived but with no pixel data, so
+	// first-frame-after-resize sampling returned zero (black-screen at
+	// ~1/3 launches; specific-texture-missing the rest of the time).
 	if ( m_bCommandListOpen )
-	{
-		m_pCommandList->Close();
-		m_bCommandListOpen = false;
-	}
+		flushCommandList();
 	waitForGPU();
 
 	for ( UINT i = 0; i < FRAME_COUNT; i++ )
@@ -3559,13 +3565,17 @@ bool DisplayDeviceD3D12::updateClientArea( bool a_bAllowReset )
 				//
 				// ResizeBuffers requires zero outstanding backbuffer references,
 				// including those held by a currently-recording command list.
-				// Close (but do NOT execute) any partial frame — it wouldn't have
-				// been presented against the new swap chain anyway.
+				// flushCommandList closes AND executes — the render commands
+				// target a backbuffer that's about to be discarded (visually
+				// lost, one throwaway frame), but texture-upload copies
+				// queued in the same list by flushPendingUploads must execute
+				// before we tear the device down.  A bare Close() without
+				// Execute() dropped those uploads, leaving texture resources
+				// intact but with no pixel data — post-resize sampling
+				// returned zero (black-screen at ~1/3 launches; specific
+				// textures missing the rest of the time).
 				if ( m_bCommandListOpen )
-				{
-					m_pCommandList->Close();
-					m_bCommandListOpen = false;
-				}
+					flushCommandList();
 				waitForGPU();
 				for ( UINT i = 0; i < FRAME_COUNT; i++ )
 					m_pRenderTargets[i].Reset();
@@ -3576,15 +3586,33 @@ bool DisplayDeviceD3D12::updateClientArea( bool a_bAllowReset )
 				if ( w < 1 ) w = 1;
 				if ( h < 1 ) h = 1;
 
-				m_pSwapChain->ResizeBuffers( FRAME_COUNT, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, 0 );
+				HRESULT hrResize = m_pSwapChain->ResizeBuffers( FRAME_COUNT, w, h, DXGI_FORMAT_R8G8B8A8_UNORM, 0 );
+				if ( FAILED( hrResize ) )
+				{
+					HRESULT removed = m_pDevice ? m_pDevice->GetDeviceRemovedReason() : S_OK;
+					TRACE( "updateClientArea: ResizeBuffers failed hr=0x%08x, DeviceRemovedReason=0x%08x  %ux%u",
+						hrResize, removed, w, h );
+					// Force a re-resize next frame by invalidating the cached
+					// rectangle.  If the failure was transient (GPU still
+					// draining previous work) the next present will retry; if
+					// it's DEVICE_REMOVED there's nothing sane to do here but
+					// at least we've logged it.
+					m_ClientRectangle = RectInt( 0, 0, -1, -1 );
+					return false;
+				}
 				m_nFrameIndex = m_pSwapChain->GetCurrentBackBufferIndex();
 
-				createRenderTargets();
-				createDepthStencil();
+				if ( !createRenderTargets() )
+					TRACE( "updateClientArea: createRenderTargets failed after resize to %ux%u", w, h );
+				if ( !createDepthStencil() )
+					TRACE( "updateClientArea: createDepthStencil failed after resize to %ux%u", w, h );
 
 				// Recreate FXAA scene RT (needed by FXAA, HDR, SSAO effects)
 				if ( m_bFXAAEnabled )
-					createFXAA();
+				{
+					if ( !createFXAA() )
+						TRACE( "updateClientArea: createFXAA failed after resize to %ux%u", w, h );
+				}
 			}
 		}
 	}

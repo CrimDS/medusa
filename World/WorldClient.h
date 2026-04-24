@@ -445,6 +445,16 @@ protected:
 	Noun::wRef			m_pTarget;			// our target
 
 	Array< CharString >	m_Chat;				// chat buffer
+	// Dedicated lock for m_Chat.  Separate from Client::m_Lock on purpose:
+	// pushChat can be called from within a parallel zone-sim worker (e.g.
+	// VerbBreakOrbit::onExecute → NounShip::message → Noun::clientChat →
+	// pushChat).  SimThread holds m_Lock for the duration of the zone sim,
+	// so acquiring m_Lock from a sim worker deadlocks via the thread-pool
+	// barrier (worker waits for m_Lock held by SimThread; SimThread waits
+	// for the worker to finish).  m_ChatLock is never held across sim-pass
+	// barriers, breaking the cycle.  mutable so const accessors (chat(n),
+	// chatCount()) can lock it.
+	mutable CriticalSection	m_ChatLock;
 	UserStorage::Ref	m_pStorage;			// user persisted data / group
 
 	int					m_LastChatMessage;	// last message index received from the metaserver
@@ -681,22 +691,22 @@ inline Noun * WorldClient::target() const
 
 inline int WorldClient::chatCount() const
 {
-	// Snap the count under the lock.  pushChat() / flushChat() on the
-	// MetaUpdate thread reallocates m_Chat's backing store; an unlocked
-	// read paired with a later chat(n) can dereference freed memory.
-	AutoLock lock( const_cast<CriticalSection *>( &m_Lock ) );
+	// Snap the count under m_ChatLock (dedicated chat-buffer lock, decoupled
+	// from Client::m_Lock so sim-pass workers can pushChat without deadlocking
+	// against SimThread — see m_ChatLock declaration).
+	AutoLock lock( &m_ChatLock );
 	return m_Chat.size();
 }
 
 inline CharString WorldClient::chat( int n ) const
 {
-	// Return a deep copy under the lock.  The previous signature
+	// Return a deep copy under m_ChatLock.  The previous signature
 	// (const char *) handed callers a raw pointer into the Array that
 	// could be invalidated mid-iteration by pushChat's growArray.
 	// CharString has an implicit `operator const char *()` so call sites
 	// like `log += pClient->chat(i)` and `new WindowMessage(this, pClient->chat(i))`
 	// still compile unchanged.
-	AutoLock lock( const_cast<CriticalSection *>( &m_Lock ) );
+	AutoLock lock( &m_ChatLock );
 	if ( n < 0 || n >= m_Chat.size() )
 		return CharString();
 	return m_Chat[ n ];
