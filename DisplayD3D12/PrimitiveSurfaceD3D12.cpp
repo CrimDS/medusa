@@ -173,8 +173,26 @@ void PrimitiveSurfaceD3D12::clear()
 
 void PrimitiveSurfaceD3D12::release()
 {
-	m_Texture.Reset();
-	m_UploadBuffer.Reset();
+	// Defer GPU resource release — the texture (and any pending upload
+	// buffer) may still be referenced by an in-flight command list when
+	// the surface's smart-ref destructor fires from a worker / sim
+	// thread.  Detach transfers the AddRef to the device's per-frame
+	// retention list; the device drops it after the frame's GPU fence
+	// signals.  Also covers the SRV: if m_bSRVCreated, the SRV staging
+	// descriptor still points at the texture, but D3D12 staging
+	// descriptors aren't lifetime-tracked — only the underlying resource
+	// is, and that's what we defer.
+	if ( m_pDevice )
+	{
+		DisplayDeviceD3D12 * pDev = (DisplayDeviceD3D12 *)m_pDevice;
+		if ( m_Texture )      pDev->deferReleaseResource( m_Texture.Detach() );
+		if ( m_UploadBuffer ) pDev->deferReleaseResource( m_UploadBuffer.Detach() );
+	}
+	else
+	{
+		m_Texture.Reset();
+		m_UploadBuffer.Reset();
+	}
 
 	// Free staging working buffer
 	delete[] m_pStagingData;

@@ -153,6 +153,18 @@ struct CBPerFrame
 	// evaluated in the shader via Ramamoorthi 2001 to give directional
 	// ambient fill in place of the legacy hemisphere term.
 	ShaderFloat4	vSHCoefs[9];
+
+	// Chunk 4.5 — celestial occluders for sun shadow-casting.  xyz = world
+	// position, w = radius (world units).  nNumOccluders gives count; up
+	// to 32 (DisplayDevice::MAX_OCCLUDERS).  The shader does ray-sphere
+	// tests from each lit pixel toward the sun's direction and zeroes
+	// directional lighting if any sphere is hit.  Ditto for godrays at
+	// composite, against the sun's actual world position.
+	ShaderFloat4	vOccluders[32];
+	int				nNumOccluders;
+	int				pad_occ0;
+	int				pad_occ1;
+	int				pad_occ2;
 };
 
 struct CBPerObject

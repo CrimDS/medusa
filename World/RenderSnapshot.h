@@ -118,6 +118,14 @@ public:
 	// capture, or wasn't captured because it's not in a locked zone).
 	int						findIndex( const WidgetKey & nKey ) const;
 
+	// Defensive — rebuild m_KeyToIndex from m_Keys.  Must be called after
+	// any `*this = src` / `*this = X` assignment because the unordered_map
+	// copy under MSVC's DLL-exported-class model can fall out of sync with
+	// the parallel vectors (see comment in materialize() for the symptom:
+	// findIndex returns -1 for ships that ARE present, every for-render
+	// helper hits its safe-default path, ships render at alpha 0).
+	void					rebuildKeyToIndex();
+
 	// Phase D — per-ship combat state.  Written by NounShip::captureSnapshot-
 	// State (called from WorldContext::captureRenderSnapshot immediately after
 	// addNoun).  Non-ship slots keep the default zeros pushed by addNoun.

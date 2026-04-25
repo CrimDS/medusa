@@ -480,6 +480,9 @@ bool RenderContext::beginScene()
 	// clear the sun-candidate slot — DisplayEffectGodRays reads this at postRender
 	// time; NounStar::render re-submits the star's world position during scene.
 	m_Display->resetSunCandidate();
+	// clear the celestial occluder list — NounPlanet::render re-submits each
+	// frame; consumed at bindPerFrameCB time and at GodRays composite.
+	m_Display->resetOccluders();
 	// set our shadow pass parameters
 	m_Display->setShadowPass(m_State.m_nMaxShadowLights,
 		m_State.m_vShadowFocus,

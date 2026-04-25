@@ -219,6 +219,14 @@ int RenderSnapshot::findIndex( const WidgetKey & nKey ) const
 	return it->second;
 }
 
+void RenderSnapshot::rebuildKeyToIndex()
+{
+	m_KeyToIndex.clear();
+	const int n = (int)m_Keys.size();
+	for ( int i = 0; i < n; ++i )
+		m_KeyToIndex[ m_Keys[i].m_Id ] = i;
+}
+
 void RenderSnapshot::extrapLocalShip( int idx, float fDt )
 {
 	// Match NounShipControl's horizontal-plane motion exactly:
@@ -274,17 +282,15 @@ void RenderSnapshot::materialize( const RenderSnapshot & A,
 	// assertSnapshotCoverageEnabled() "return 0" safe-default path during
 	// scene render, which made ships render at alpha 0 (invisible for
 	// remotes, clamped to 0.25 see-through for the local ship via the
-	// NounShip::preRender floor).  Fallback path (`m_Pinned = B` with no
-	// subsequent mutation) did NOT trip this — something about the
-	// unordered_map copy under MSVC's DLL-exported-class model fell out
-	// of sync with the vectors in the lerp-then-findIndex sequence.
-	// Rebuilding the index here is O(nounCount) but dwarfed by the
-	// materialize memcpy above, so no measurable cost.
-	m_KeyToIndex.clear();
-	const int nB = (int)m_Keys.size();
-	for ( int i = 0; i < nB; ++i )
-		m_KeyToIndex[ m_Keys[i].m_Id ] = i;
+	// NounShip::preRender floor).  Initially observed only here in
+	// materialize where the lerp-then-findIndex sequence trips MSVC's
+	// DLL-exported-class unordered_map copy.  Now applied defensively to
+	// every `m_Pinned = X` path in pinForFrame() too because the bug has
+	// been observed regressing under different builds — cost is
+	// O(nounCount), dwarfed by the assignment.
+	rebuildKeyToIndex();
 
+	const int nB = (int)m_Keys.size();
 	for ( int i = 0; i < nB; ++i )
 	{
 		// Nouns absent from A keep B's values (no-lerp — zero lag for a
@@ -399,6 +405,7 @@ const RenderSnapshot & RenderSnapshotRing::pinForFrame()
 		// Fallback: only one valid publish, or interpolation disabled, or
 		// captureTicks got reordered (slot wrapped mid-race).  Use B as-is.
 		m_Pinned = B;
+		m_Pinned.rebuildKeyToIndex();	// defensive — see RenderSnapshot.cpp materialize() comment
 	}
 	else
 	{
@@ -415,12 +422,14 @@ const RenderSnapshot & RenderSnapshotRing::pinForFrame()
 			// un-interpolated; Option 2's local-ship extrap below still
 			// advances the player's own ship.
 			m_Pinned = B;
+			m_Pinned.rebuildKeyToIndex();	// defensive
 		}
 		else if ( nTarget <= A.m_CaptureTicks )
 		{
 			// Target is older than our history pair — shouldn't happen in
 			// steady state, but can on initial warm-up.  Use A.
 			m_Pinned = A;
+			m_Pinned.rebuildKeyToIndex();	// defensive
 		}
 		else
 		{

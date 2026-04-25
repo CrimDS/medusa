@@ -133,6 +133,18 @@ public:
 	bool							releaseShader( const char * pShader );
 	void							releaseShaders();
 
+	// Defer release of a raw D3D12 resource until the current frame's GPU
+	// fence has signalled.  Takes ownership of one AddRef — caller should
+	// Detach from its ComPtr or AddRef before passing in.  Thread-safe;
+	// callable from sim / loader / worker threads as well as the main
+	// thread.  No-op if pResource is null.  Used by the primitive
+	// release() paths so a smart-ref destructor on a non-render thread
+	// (e.g. NodeComplexMesh2::invalidate from NounPlanet::postInitialize
+	// running on SimThread) doesn't drop the GPU resource while it's
+	// still bound in an in-flight command list — the device retains it
+	// until the corresponding frame's fence signals.
+	void							deferReleaseResource( ID3D12Resource * pResource );
+
 	// Effect factory registration
 	void							registerEffect( const char * pName, Factory * pFactory );
 
@@ -443,6 +455,15 @@ public:
 	// m_DeferredPrimsLock guards both sides — single-threaded callers see
 	// uncontended Enter/Leave (~20ns).
 	Array< DevicePrimitive::Ref >	m_DeferredPrimitives[FRAME_COUNT];
+	// Raw D3D12 resources (vertex / index / texture buffers) released from
+	// primitives that may still be referenced by an in-flight command list.
+	// Append takes ownership of one AddRef; the per-frame drain calls Release.
+	// Bypasses smart-ref retention, so it works for primitives torn down in
+	// SimThread paths (e.g. NodeComplexMesh2::invalidate from
+	// NounPlanet::postInitialize / subdivideAndSpherify) where the smart-ref
+	// to the primitive itself goes to zero on the sim thread but the raw GPU
+	// resource is still bound in main-thread command list draws.
+	Array< ID3D12Resource * >		m_DeferredResources[FRAME_COUNT];
 	mutable CriticalSection			m_DeferredPrimsLock;
 
 	// Root signatures

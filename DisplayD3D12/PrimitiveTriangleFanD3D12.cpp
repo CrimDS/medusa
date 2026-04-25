@@ -66,7 +66,11 @@ bool PrimitiveTriangleFanD3D12::execute()
 }
 
 void PrimitiveTriangleFanD3D12::clear() {}
-void PrimitiveTriangleFanD3D12::release() { m_VB.Reset(); m_TriangleCount = 0; }
+void PrimitiveTriangleFanD3D12::release() {
+	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
+	else m_VB.Reset();
+	m_TriangleCount = 0;
+}
 
 bool PrimitiveTriangleFanD3D12::initialize( int vertexCount, const Vertex * pVerts )
 {
@@ -155,7 +159,11 @@ bool PrimitiveTriangleFanLD3D12::execute()
 }
 
 void PrimitiveTriangleFanLD3D12::clear() {}
-void PrimitiveTriangleFanLD3D12::release() { m_VB.Reset(); m_TriangleCount = 0; }
+void PrimitiveTriangleFanLD3D12::release() {
+	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
+	else m_VB.Reset();
+	m_TriangleCount = 0;
+}
 
 bool PrimitiveTriangleFanLD3D12::initialize( int vertexCount, const VertexL * pVerts )
 {

@@ -44,7 +44,11 @@ bool PrimitiveLineStripD3D12::execute()
 }
 
 void PrimitiveLineStripD3D12::clear() {}
-void PrimitiveLineStripD3D12::release() { m_VB.Reset(); m_VertexCount = 0; }
+void PrimitiveLineStripD3D12::release() {
+	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
+	else m_VB.Reset();
+	m_VertexCount = 0;
+}
 
 bool PrimitiveLineStripD3D12::initialize(int vertexCount, const Vertex * pVerts)
 {
@@ -79,7 +83,11 @@ bool PrimitiveLineStripLD3D12::execute()
 }
 
 void PrimitiveLineStripLD3D12::clear() {}
-void PrimitiveLineStripLD3D12::release() { m_VB.Reset(); m_VertexCount = 0; }
+void PrimitiveLineStripLD3D12::release() {
+	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
+	else m_VB.Reset();
+	m_VertexCount = 0;
+}
 
 bool PrimitiveLineStripLD3D12::initialize(int vertexCount, const VertexL * pVerts)
 {
@@ -145,7 +153,11 @@ bool PrimitiveLineStripTLD3D12::execute()
 }
 
 void PrimitiveLineStripTLD3D12::clear() {}
-void PrimitiveLineStripTLD3D12::release() { m_VB.Reset(); m_VertexCount = 0; }
+void PrimitiveLineStripTLD3D12::release() {
+	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
+	else m_VB.Reset();
+	m_VertexCount = 0;
+}
 
 bool PrimitiveLineStripTLD3D12::initialize(int vertexCount, const VertexTL * pVerts)
 {

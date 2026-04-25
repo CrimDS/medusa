@@ -268,6 +268,40 @@ public:
 	void							resetSunCandidate();
 	bool							getSunCandidate( Vector3 & outWorldPos ) const;
 
+	// Celestial body shadow casting (Chunk 4.5).  NounPlanet (and any other
+	// large-body Noun) submits its world position + radius each frame; the
+	// device keeps the top-N entries by angular size as seen from the camera
+	// (radius / distance) so the shaders only see the bodies that actually
+	// matter as occluders.  Default.hlsl ray-tests the directional sun
+	// against these spheres so a planet behind another planet falls into
+	// shadow; GodRays.hlsl tests at composite time so screen-space rays
+	// don't appear in 3D shadow cones.
+	struct OccluderInfo
+	{
+		Vector3			worldPos;
+		float			radius;
+		const char *	pName;		// borrowed pointer to BaseNode::name() — stable for noun lifetime
+		bool			bShadowed;	// set by finalizeOccluders if this body's centre is in another occluder's 3D sun-shadow
+	};
+	enum { MAX_OCCLUDERS = 32 };
+	void							submitOccluder(
+										const Vector3 & worldPos,
+										float radius,
+										float distanceToCamera,	// for top-N priority
+										const char * pName = NULL );
+	void							resetOccluders();
+	int								getOccluderCount() const;
+	const OccluderInfo &			getOccluder( int idx ) const;
+	// Drop occluders that are themselves in another occluder's 3D shadow
+	// from the current sun candidate.  An obscured planet shouldn't act
+	// as a separate occluder because its silhouette area is already
+	// covered by whatever's blocking it from the sun, and treating it
+	// as active would let it contribute its own shadow column even
+	// though it isn't actually receiving sunlight.  Idempotent: safe
+	// to call multiple times per frame; ignored if no sun candidate
+	// is set.  Compacts the active list in place.
+	void							finalizeOccluders();
+
 	// Helpers
 	static DisplayDevice *			create( const char * pClass );		// create a DisplayDevice by key
 	static DisplayDevice *			create();							// create a default display device
@@ -301,6 +335,14 @@ protected:
 	Vector3							m_vSunWorldPos;			// valid only when m_bSunCandidateValid
 	float							m_fSunDistSq;			// best (smallest) submitted distance² this frame
 	bool							m_bSunCandidateValid;	// reset each frame by RenderContext::beginScene
+
+	// Occluders: kept sorted by angular-size priority (radius/distance)
+	// so the highest-impact bodies always win the top-N slots.  Submitted
+	// during scene render, consumed at bindPerFrameCB time.  Reset each
+	// frame by resetOccluders() in RenderContext::beginScene.
+	OccluderInfo					m_Occluders[ MAX_OCCLUDERS ];
+	float							m_OccluderPriority[ MAX_OCCLUDERS ];	// angular size; lowest is the eviction candidate
+	int								m_nOccluderCount;
 };
 
 //----------------------------------------------------------------------------

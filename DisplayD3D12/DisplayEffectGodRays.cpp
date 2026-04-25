@@ -37,13 +37,44 @@ struct CBGodRays
 
 	float	texelSizeX;
 	float	texelSizeY;
-	float	fSunViewZ;			// sun's view-space Z (world units along camera-forward).  Shader recovers per-sample view-Z from depth and compares to (fSunViewZ - SUN_TOLERANCE) for occlusion classification — robust regardless of how far the sun is from the camera.
-	float	fPadCBA;
-
 	float	fProjNear;			// projection near-plane distance, world units
 	float	fProjFar;			// projection far-plane distance, world units
-	float	fPadCBB;
-	float	fPadCBC;
+
+	// Sun's view-space position (xyz in world units, w unused).
+	// .z is the sky/foreground threshold in view-Z; .xy unused now (we
+	// project to UV CPU-side and pass sunU/V in the screen-space slot
+	// above).
+	float	sunViewX;
+	float	sunViewY;
+	float	sunViewZ;
+	float	fPadA;
+
+	// Projection matrix _11 / _22 diagonals — used by the shader to
+	// convert pixel UV into tangent-plane (z=1) coordinates so the
+	// screen-space silhouette test against vOccluders is a true 2D
+	// circle test (a sphere projects to a circle in tangent-plane space).
+	float	fProjM11;
+	float	fProjM22;
+	float	fPadB;
+	float	fPadC;
+
+	// Chunk 4.5 — celestial occluders packed as TANGENT-PLANE silhouette
+	// discs.  Tangent-plane is the z=1 image plane in view space; a
+	// sphere at view-space (X,Y,Z) with radius R projects to a perfect
+	// circle at (X/Z, Y/Z) with radius R/Z there.  Stored as
+	//   xy = tangent-plane centre   (analogous to "screen position")
+	//   z  = tangent-plane radius   (the disc's silhouette radius)
+	//   w  = original view-space Z  (for gating: we only care about
+	//        occluders between camera and sun, i.e. 0 < w < sunViewZ)
+	// PS_Composite does a 2D ray-circle test against these along the
+	// line from input.vUV → sunUV (both also converted to tangent
+	// plane), so a "sky" pixel whose sightline-to-sun crosses any
+	// planet's silhouette gets its rays killed.
+	float	vOccluders[32 * 4];
+	int		nNumOccluders;
+	int		fPadD;
+	int		fPadE;
+	int		fPadF;
 };
 
 //---------------------------------------------------------------------------------------------------
@@ -298,9 +329,11 @@ void DisplayEffectGodRaysD3D12::drawFullscreenTriangle( DisplayDeviceD3D12 * pDe
 //---------------------------------------------------------------------------------------------------
 
 static bool projectSunToScreen( DisplayDeviceD3D12 * pDevice,
-	float & sunU, float & sunV, float & sunVisible, float & sunViewZ )
+	float & sunU, float & sunV, float & sunVisible,
+	float & sunViewX, float & sunViewY, float & sunViewZ )
 {
-	sunU = 0.5f; sunV = 0.5f; sunVisible = 0.0f; sunViewZ = 0.0f;
+	sunU = 0.5f; sunV = 0.5f; sunVisible = 0.0f;
+	sunViewX = 0.0f; sunViewY = 0.0f; sunViewZ = 0.0f;
 
 	Vector3 sunWorld;
 	if ( !pDevice->getSunCandidate( sunWorld ) )
@@ -323,10 +356,12 @@ static bool projectSunToScreen( DisplayDeviceD3D12 * pDevice,
 	sunU =  ndcX * 0.5f + 0.5f;
 	sunV = -ndcY * 0.5f + 0.5f;
 
-	// Sun's view-space Z (camera-forward distance, world units).  This goes
-	// to the shader directly — the occluder test is now a world-space
-	// comparison against this value, robust at any camera-to-sun distance.
+	// Full view-space sun position (Chunk 4.5) — needed for the ray-sphere
+	// occluder test in the composite pass, plus the existing depth/sky
+	// classification (which uses Z only).
 	XMVECTOR sunView = XMVector4Transform( sunHomog, viewMat );
+	sunViewX = XMVectorGetX( sunView );
+	sunViewY = XMVectorGetY( sunView );
 	sunViewZ = XMVectorGetZ( sunView );
 
 	// Accept rays even when the sun is slightly off-screen (they still
@@ -362,15 +397,11 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 	if ( pDev->m_nDepthSRVIndex == UINT(-1) )
 		return true;
 
-	// Resolve the nearest submitted star's screen-space UV + view-space Z.
-	// No star → no rays; behind camera / far off-screen → shader short-
-	// circuits via fSunVisible=0.  sunViewZ is the world-space camera-
-	// forward distance to the sun; the shader recovers per-sample view-Z
-	// from the depth buffer and compares (in world units) to decide
-	// whether each sample is closer than the sun (occluder) or at/beyond
-	// it (sky).
-	float sunU, sunV, sunVis, sunViewZ;
-	if ( !projectSunToScreen( pDev, sunU, sunV, sunVis, sunViewZ ) )
+	// Resolve the nearest submitted star's screen-space UV + view-space
+	// position.  No star → no rays; behind camera / far off-screen →
+	// shader short-circuits via fSunVisible=0.
+	float sunU, sunV, sunVis, sunViewX, sunViewY, sunViewZ;
+	if ( !projectSunToScreen( pDev, sunU, sunV, sunVis, sunViewX, sunViewY, sunViewZ ) )
 		return true;	// no star submitted this frame, nothing to do
 
 	ID3D12GraphicsCommandList * cl = pDev->getCommandList();
@@ -429,9 +460,73 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 	cb.fEclipseStrength = m_fEclipseStrength;
 	cb.texelSizeX = 1.0f / (float)m_RaysSize.width;
 	cb.texelSizeY = 1.0f / (float)m_RaysSize.height;
-	cb.fSunViewZ  = sunViewZ;
 	cb.fProjNear  = pDev->m_Proj.m_fFront;
 	cb.fProjFar   = pDev->m_Proj.m_fBack;
+	cb.sunViewX   = sunViewX;
+	cb.sunViewY   = sunViewY;
+	cb.sunViewZ   = sunViewZ;
+
+	// Projection matrix _11 / _22 diagonals — read directly from the
+	// device's projection matrix.  XMMATRIX.r[0].m128_f32[0] = m11,
+	// .r[1].m128_f32[1] = m22.  These let the shader reconstruct view-X
+	// and view-Y from screen UV + view-Z without needing the full inverse
+	// projection matrix (cheaper CB, simpler shader).
+	XMMATRIX projMat = pDev->getProjMatrix();
+	XMFLOAT4X4 projF;
+	XMStoreFloat4x4( &projF, projMat );
+	cb.fProjM11 = projF.m[0][0];
+	cb.fProjM22 = projF.m[1][1];
+
+	// Pack occluders as TANGENT-PLANE silhouette discs.  See CBGodRays
+	// definition for the format.  Behind-camera and behind-sun occluders
+	// get a sentinel w<=0 so the shader skips them.
+	//
+	// We use the FULL submitted list — no 3D-shadow filtering.  An
+	// obscured planet (one in another's 3D sun-shadow) still has a
+	// visible silhouette on screen, and its tangent-plane disc is what
+	// kills rays at its on-screen rim.  Skipping those would create a
+	// parallax bug: a small body visually well-separated from its
+	// obscurer in the camera's view would lose silhouette shadow even
+	// though geometrically (from the sun's POV) it sits in the larger
+	// body's shadow column.
+	XMMATRIX viewMat = pDev->getViewMatrix();
+	const int occCount = pDev->getOccluderCount();
+	cb.nNumOccluders = (occCount > 32) ? 32 : occCount;
+	for ( int i = 0; i < cb.nNumOccluders; ++i )
+	{
+		const DisplayDevice::OccluderInfo & o = pDev->getOccluder( i );
+		XMVECTOR oWorld = XMVectorSet( o.worldPos.x, o.worldPos.y, o.worldPos.z, 1.0f );
+		XMVECTOR oView  = XMVector4Transform( oWorld, viewMat );
+		float vX = XMVectorGetX( oView );
+		float vY = XMVectorGetY( oView );
+		float vZ = XMVectorGetZ( oView );
+		if ( vZ > 0.001f )
+		{
+			cb.vOccluders[i*4 + 0] = vX / vZ;			// tangent-plane centre x
+			cb.vOccluders[i*4 + 1] = vY / vZ;			// tangent-plane centre y
+			cb.vOccluders[i*4 + 2] = o.radius / vZ;		// tangent-plane radius
+			// Encode bShadowed in the sign of the view-Z gate value.
+			// Shader uses abs(w) for the actual view-Z and (w<0) as the
+			// shadowed flag.  Sentinel (skip) is now w == 0.
+			cb.vOccluders[i*4 + 3] = o.bShadowed ? -vZ : vZ;
+		}
+		else
+		{
+			// Behind / on the camera plane — sentinel skip (w == 0).
+			cb.vOccluders[i*4 + 0] = 0.0f;
+			cb.vOccluders[i*4 + 1] = 0.0f;
+			cb.vOccluders[i*4 + 2] = 0.0f;
+			cb.vOccluders[i*4 + 3] = 0.0f;
+		}
+	}
+	for ( int i = cb.nNumOccluders; i < 32; ++i )
+	{
+		cb.vOccluders[i*4 + 0] = 0.0f;
+		cb.vOccluders[i*4 + 1] = 0.0f;
+		cb.vOccluders[i*4 + 2] = 0.0f;
+		cb.vOccluders[i*4 + 3] = 0.0f;	// sentinel (skip)
+	}
+
 	uploadCB( cb );
 
 	bindSRVs( pDev->m_nSceneSRVIndex, pDev->m_nDepthSRVIndex );

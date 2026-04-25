@@ -743,6 +743,14 @@ bool DisplayDeviceD3D12::beginScene()
 		{
 			AutoLock lock( &m_DeferredPrimsLock );
 			m_DeferredPrimitives[m_nFrameIndex].release();
+			// Raw D3D12 resources deferred from primitives torn down on
+			// non-main threads.  Each entry holds one AddRef — Release here
+			// drops it.  After moveToNextFrame's fence wait, the GPU is
+			// guaranteed past any draw that referenced these.
+			Array< ID3D12Resource * > & res = m_DeferredResources[m_nFrameIndex];
+			for ( int i = 0; i < res.size(); ++i )
+				if ( res[i] ) res[i]->Release();
+			res.release();
 		}
 
 		// Reset per-frame SRV ring allocator.  Per-frame slab means frame N
@@ -2047,6 +2055,38 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 	// Chunk 4 — diffuse SH coefficients for IBL ambient.
 	computeDiffuseSH( m_CBPerFrame.vSHCoefs );
 
+	// Chunk 4.5 — pack celestial occluders submitted this frame by
+	// NounPlanet::render et al.  Drive the directional sun shadow test
+	// in Default.hlsl (per-pixel) and the screen-space silhouette test
+	// in GodRays.hlsl (per-pixel against tangent-plane discs).
+	//
+	// We do NOT filter occluders that are themselves in another's 3D
+	// shadow.  Reasons:
+	//  - Default.hlsl iterates all occluders per surface point and the
+	//    geometry naturally handles the case (an obscured planet's
+	//    surface ray-tests against the obscurer and gets shadowed).
+	//  - GodRays.hlsl needs every visible silhouette in the list,
+	//    including obscured ones — their tangent-plane disc catches
+	//    sky pixels near their on-screen rim regardless of whether the
+	//    planet is in another's 3D shadow.  Filtering them out (as an
+	//    earlier finalizeOccluders pass did) created a parallax bug
+	//    where a small body visually well-separated from a larger
+	//    obscurer in screen-space lost its shadow contribution and
+	//    leaked rays at its silhouette.
+	finalizeOccluders();		// diagnostic trace only — no longer compacts
+	int occCount = getOccluderCount();
+	if ( occCount < 0 ) occCount = 0;
+	if ( occCount > 32 ) occCount = 32;
+	m_CBPerFrame.nNumOccluders = occCount;
+	for ( int i = 0; i < occCount; ++i )
+	{
+		const OccluderInfo & o = getOccluder( i );
+		m_CBPerFrame.vOccluders[i] = ShaderFloat4(
+			o.worldPos.x, o.worldPos.y, o.worldPos.z, o.radius );
+	}
+	for ( int i = occCount; i < 32; ++i )
+		m_CBPerFrame.vOccluders[i] = ShaderFloat4( 0, 0, 0, 0 );
+
 	UploadRingBuffer::Allocation alloc = allocateCB( sizeof(CBPerFrame) );
 	memcpy( alloc.cpuAddress, &m_CBPerFrame, sizeof(CBPerFrame) );
 
@@ -2941,6 +2981,13 @@ void DisplayDeviceD3D12::freeD3D12()
 	for ( UINT i = 0; i < FRAME_COUNT; i++ )
 	{
 		m_DeferredPrimitives[i].release();
+		// Drain any deferred raw resources still held — at shutdown time the
+		// GPU is idle (resetCommandList's fence wait happened during release()
+		// path), so these are safe to release immediately.
+		Array< ID3D12Resource * > & res = m_DeferredResources[i];
+		for ( int j = 0; j < res.size(); ++j )
+			if ( res[j] ) res[j]->Release();
+		res.release();
 		m_DynamicVB[i].Release();
 		m_DynamicCB[i].Release();
 		m_pRenderTargets[i].Reset();
@@ -3341,6 +3388,23 @@ void DisplayDeviceD3D12::immediateTextureUpload( PrimitiveSurfaceD3D12 * pSurfac
 	}
 
 	pSurface->m_bUploaded = true;
+}
+
+void DisplayDeviceD3D12::deferReleaseResource( ID3D12Resource * pResource )
+{
+	if ( !pResource )
+		return;
+	// Take ownership of one AddRef.  Caller passes a pointer that already has
+	// a reference (typically from ComPtr::Detach()); we hold it on this
+	// frame's deferred list and Release at beginScene of frame N+FRAME_COUNT
+	// (after fence confirms GPU is past the last draw that referenced it).
+	AutoLock lock( &m_DeferredPrimsLock );
+	// Read m_nFrameIndex under the lock — main thread updates it in
+	// moveToNextFrame, sim/loader threads read here.  A torn read at worst
+	// pushes to the wrong frame index, which only delays the release one
+	// frame; never lets us release while the GPU is still using it.
+	const UINT idx = m_nFrameIndex;
+	m_DeferredResources[idx].push( pResource );
 }
 
 void DisplayDeviceD3D12::flushCommandList()
