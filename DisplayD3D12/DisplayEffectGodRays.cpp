@@ -37,8 +37,13 @@ struct CBGodRays
 
 	float	texelSizeX;
 	float	texelSizeY;
-	float	fSunDepth;		// sun's projected NDC z; shader rejects samples with depth < fSunDepth as occluders
-	float	pad;
+	float	fSunViewZ;			// sun's view-space Z (world units along camera-forward).  Shader recovers per-sample view-Z from depth and compares to (fSunViewZ - SUN_TOLERANCE) for occlusion classification — robust regardless of how far the sun is from the camera.
+	float	fPadCBA;
+
+	float	fProjNear;			// projection near-plane distance, world units
+	float	fProjFar;			// projection far-plane distance, world units
+	float	fPadCBB;
+	float	fPadCBC;
 };
 
 //---------------------------------------------------------------------------------------------------
@@ -293,16 +298,20 @@ void DisplayEffectGodRaysD3D12::drawFullscreenTriangle( DisplayDeviceD3D12 * pDe
 //---------------------------------------------------------------------------------------------------
 
 static bool projectSunToScreen( DisplayDeviceD3D12 * pDevice,
-	float & sunU, float & sunV, float & sunVisible, float & sunDepth )
+	float & sunU, float & sunV, float & sunVisible, float & sunViewZ )
 {
-	sunU = 0.5f; sunV = 0.5f; sunVisible = 0.0f; sunDepth = 1.0f;
+	sunU = 0.5f; sunV = 0.5f; sunVisible = 0.0f; sunViewZ = 0.0f;
 
 	Vector3 sunWorld;
 	if ( !pDevice->getSunCandidate( sunWorld ) )
 		return false;	// no star submitted this frame
 
+	XMMATRIX viewMat = pDevice->getViewMatrix();
+	XMMATRIX projMat = pDevice->getProjMatrix();
+
+	// Project sun's world centre to clip space for screen UV.
 	XMVECTOR sunHomog = XMVectorSet( sunWorld.x, sunWorld.y, sunWorld.z, 1.0f );
-	XMMATRIX viewProj = XMMatrixMultiply( pDevice->getViewMatrix(), pDevice->getProjMatrix() );
+	XMMATRIX viewProj = XMMatrixMultiply( viewMat, projMat );
 	XMVECTOR clip = XMVector4Transform( sunHomog, viewProj );
 
 	float w = XMVectorGetW( clip );
@@ -311,10 +320,14 @@ static bool projectSunToScreen( DisplayDeviceD3D12 * pDevice,
 
 	float ndcX = XMVectorGetX( clip ) / w;
 	float ndcY = XMVectorGetY( clip ) / w;
-	float ndcZ = XMVectorGetZ( clip ) / w;	// [0,1] for D3D — this IS the depth-buffer value the sun would write
 	sunU =  ndcX * 0.5f + 0.5f;
 	sunV = -ndcY * 0.5f + 0.5f;
-	sunDepth = ndcZ;
+
+	// Sun's view-space Z (camera-forward distance, world units).  This goes
+	// to the shader directly — the occluder test is now a world-space
+	// comparison against this value, robust at any camera-to-sun distance.
+	XMVECTOR sunView = XMVector4Transform( sunHomog, viewMat );
+	sunViewZ = XMVectorGetZ( sunView );
 
 	// Accept rays even when the sun is slightly off-screen (they still
 	// converge on the implied point and produce pleasing edge streaks).
@@ -349,13 +362,15 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 	if ( pDev->m_nDepthSRVIndex == UINT(-1) )
 		return true;
 
-	// Resolve the nearest submitted star's screen-space UV + projected
-	// depth.  No star → no rays; behind camera / far off-screen → shader
-	// short-circuits via fSunVisible=0.  sunDepth is the reference depth
-	// against which the foreground-occluder test runs: anything closer
-	// than the sun cuts the ray.
-	float sunU, sunV, sunVis, sunDepth;
-	if ( !projectSunToScreen( pDev, sunU, sunV, sunVis, sunDepth ) )
+	// Resolve the nearest submitted star's screen-space UV + view-space Z.
+	// No star → no rays; behind camera / far off-screen → shader short-
+	// circuits via fSunVisible=0.  sunViewZ is the world-space camera-
+	// forward distance to the sun; the shader recovers per-sample view-Z
+	// from the depth buffer and compares (in world units) to decide
+	// whether each sample is closer than the sun (occluder) or at/beyond
+	// it (sky).
+	float sunU, sunV, sunVis, sunViewZ;
+	if ( !projectSunToScreen( pDev, sunU, sunV, sunVis, sunViewZ ) )
 		return true;	// no star submitted this frame, nothing to do
 
 	ID3D12GraphicsCommandList * cl = pDev->getCommandList();
@@ -414,7 +429,9 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 	cb.fEclipseStrength = m_fEclipseStrength;
 	cb.texelSizeX = 1.0f / (float)m_RaysSize.width;
 	cb.texelSizeY = 1.0f / (float)m_RaysSize.height;
-	cb.fSunDepth  = sunDepth;
+	cb.fSunViewZ  = sunViewZ;
+	cb.fProjNear  = pDev->m_Proj.m_fFront;
+	cb.fProjFar   = pDev->m_Proj.m_fBack;
 	uploadCB( cb );
 
 	bindSRVs( pDev->m_nSceneSRVIndex, pDev->m_nDepthSRVIndex );

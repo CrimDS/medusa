@@ -145,6 +145,14 @@ struct CBPerFrame
 	float			fShadowDistance;
 	float			fShadowDepthRange;	// far - near of shadow map projection (world units)
 	ShaderFloat4	vShadowFocus;		// xyz = world-space shadow focus position, w = unused
+
+	// Chunk 4 — diffuse IBL via Spherical Harmonics.  9 L=2 coefficients
+	// (one per band:  L00, L1-1, L10, L11, L2-2, L2-1, L20, L21, L22).
+	// .xyz = RGB coefficient, .w = unused/padding.  Computed CPU-side from
+	// procedural environment (UNIVERSE_AMBIENT sky + directional sun) and
+	// evaluated in the shader via Ramamoorthi 2001 to give directional
+	// ambient fill in place of the legacy hemisphere term.
+	ShaderFloat4	vSHCoefs[9];
 };
 
 struct CBPerObject

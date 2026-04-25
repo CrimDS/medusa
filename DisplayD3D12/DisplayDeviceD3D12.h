@@ -171,6 +171,7 @@ public:
 	void							bindPerFrameCB();
 	void							bindPerObjectCB();
 	void							bindPerMaterialCB( const CBPerMaterial & mat );
+	void							computeDiffuseSH( ShaderFloat4 outCoefs[9] );	// Chunk 4 — fills 9 SH coefficients from procedural environment
 	void							bindPerLightCB( const CBPerLight & light );
 
 	// Bind the SRV root descriptor table (root param 4) to the given base slot,

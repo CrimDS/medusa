@@ -2044,11 +2044,139 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 	Vector3 vWorldFocus( m_Proj.m_vPosition + (m_Proj.m_mFrame % m_vShadowFocus) );
 	m_CBPerFrame.vShadowFocus = ShaderFloat4( vWorldFocus.x, vWorldFocus.y, vWorldFocus.z, 0.0f );
 
+	// Chunk 4 — diffuse SH coefficients for IBL ambient.
+	computeDiffuseSH( m_CBPerFrame.vSHCoefs );
+
 	UploadRingBuffer::Allocation alloc = allocateCB( sizeof(CBPerFrame) );
 	memcpy( alloc.cpuAddress, &m_CBPerFrame, sizeof(CBPerFrame) );
 
 	// Root parameter 0 = CBV for per-frame constants
 	m_pCommandList->SetGraphicsRootConstantBufferView( 0, alloc.gpuAddress );
+}
+
+//---------------------------------------------------------------------------------------------------
+// Compute Spherical Harmonics coefficients for diffuse environment lighting.
+// Integrates a procedural environment (sky colour + sun fill) over 32 sphere
+// samples (Fibonacci distribution) onto a 9-coefficient L=2 SH basis.
+// Cheap (~300 ALU ops) — runs every frame so the SH adapts immediately when
+// ambient or sun direction changes.  The shader evaluates these via
+// Ramamoorthi 2001's polynomial form for cosine-weighted irradiance.
+//---------------------------------------------------------------------------------------------------
+
+void DisplayDeviceD3D12::computeDiffuseSH( ShaderFloat4 outCoefs[9] )
+{
+	// Find the directional (sun) light for directional fill component.
+	float sunDirX = 0.0f, sunDirY = -1.0f, sunDirZ = 0.0f;
+	float sunR = 0.0f, sunG = 0.0f, sunB = 0.0f;
+	for ( auto it = m_Lights.begin(); it != m_Lights.end(); ++it )
+	{
+		const LightInfo & l = it->second;
+		if ( l.type == 3 /* directional */ )
+		{
+			sunDirX = l.dirX; sunDirY = l.dirY; sunDirZ = l.dirZ;
+			sunR = l.r; sunG = l.g; sunB = l.b;
+			break;
+		}
+	}
+
+	// Linearise sun colour to match the linear lighting math.  No-op when
+	// sRGB pipeline is disabled.
+	float sunLinR = srgbToLinear( sunR );
+	float sunLinG = srgbToLinear( sunG );
+	float sunLinB = srgbToLinear( sunB );
+
+	// Linearised sky colour from m_cAmbientLight (UNIVERSE_AMBIENT).
+	const float inv = 1.0f / 255.0f;
+	float skyR = srgbToLinear( m_cAmbientLight.m_R * inv );
+	float skyG = srgbToLinear( m_cAmbientLight.m_G * inv );
+	float skyB = srgbToLinear( m_cAmbientLight.m_B * inv );
+
+	// Modest scale on the sky term to match the perceived brightness of the
+	// legacy hemisphere ambient (which lerped *0.6→*1.0 of UNIVERSE_AMBIENT
+	// per up-direction).  SH integrates over the full sphere with cosine
+	// weighting so the effective per-pixel contribution is comparable.
+	const float SKY_SCALE = 1.0f;
+	skyR *= SKY_SCALE; skyG *= SKY_SCALE; skyB *= SKY_SCALE;
+
+	// Sun-fill weight — how strongly to inject the sun's directional energy
+	// into the SH.  Low value because the sun is already accounted for via
+	// the directional NodeLight in the per-light pass; this is just for
+	// shadow-side fill that lets the sun's hue tint the dark side.
+	const float SUN_FILL = 0.25f;
+
+	// Accumulation buffers.
+	float coefR[9] = { 0,0,0,0,0,0,0,0,0 };
+	float coefG[9] = { 0,0,0,0,0,0,0,0,0 };
+	float coefB[9] = { 0,0,0,0,0,0,0,0,0 };
+
+	const int N = 32;
+	const float PI = 3.14159265358979f;
+	const float weight = 4.0f * PI / (float)N;	// solid angle per sample
+	const float phi = (1.0f + sqrtf(5.0f)) * 0.5f;	// golden ratio for Fibonacci sphere
+
+	for ( int i = 0; i < N; ++i )
+	{
+		// Fibonacci sphere direction.
+		float t = ((float)i + 0.5f) / (float)N;
+		float incl = acosf( 1.0f - 2.0f * t );
+		float azim = 2.0f * PI * (float)i / phi;
+		float dx = sinf(incl) * cosf(azim);
+		float dy = cosf(incl);
+		float dz = sinf(incl) * sinf(azim);
+
+		// Procedural environment colour at direction d.
+		// Sky term: brighter "up", darker "down".  -toSun direction is
+		// where the sun lives; positive dot means "this sample direction
+		// points toward the sun" → add sun fill.
+		float skyT = dy * 0.5f + 0.5f;	// 0=down, 1=up
+		float skyMul = 0.3f + 0.7f * skyT;	// dim down, full up
+		float L_R = skyR * skyMul;
+		float L_G = skyG * skyMul;
+		float L_B = skyB * skyMul;
+
+		// Sun fill — vLightDirection points AWAY from the light (per
+		// addDirectionalLight convention), so direction TOWARD the sun is
+		// -sunDir.  Soft-power weighting (squared) so the sun tints a
+		// localised hemisphere rather than half the sky.
+		float sunDot = dx * (-sunDirX) + dy * (-sunDirY) + dz * (-sunDirZ);
+		if ( sunDot > 0.0f )
+		{
+			float w = sunDot * sunDot * SUN_FILL;
+			L_R += sunLinR * w;
+			L_G += sunLinG * w;
+			L_B += sunLinB * w;
+		}
+
+		// L=2 real SH basis Y_lm at direction (dx,dy,dz).
+		float Y0 = 0.282095f;
+		float Y1 = 0.488603f * dy;
+		float Y2 = 0.488603f * dz;
+		float Y3 = 0.488603f * dx;
+		float Y4 = 1.092548f * dx * dy;
+		float Y5 = 1.092548f * dy * dz;
+		float Y6 = 0.315392f * (3.0f * dz * dz - 1.0f);
+		float Y7 = 1.092548f * dx * dz;
+		float Y8 = 0.546274f * (dx * dx - dy * dy);
+
+		// Accumulate L * Y * dω.
+		coefR[0] += L_R * Y0 * weight; coefG[0] += L_G * Y0 * weight; coefB[0] += L_B * Y0 * weight;
+		coefR[1] += L_R * Y1 * weight; coefG[1] += L_G * Y1 * weight; coefB[1] += L_B * Y1 * weight;
+		coefR[2] += L_R * Y2 * weight; coefG[2] += L_G * Y2 * weight; coefB[2] += L_B * Y2 * weight;
+		coefR[3] += L_R * Y3 * weight; coefG[3] += L_G * Y3 * weight; coefB[3] += L_B * Y3 * weight;
+		coefR[4] += L_R * Y4 * weight; coefG[4] += L_G * Y4 * weight; coefB[4] += L_B * Y4 * weight;
+		coefR[5] += L_R * Y5 * weight; coefG[5] += L_G * Y5 * weight; coefB[5] += L_B * Y5 * weight;
+		coefR[6] += L_R * Y6 * weight; coefG[6] += L_G * Y6 * weight; coefB[6] += L_B * Y6 * weight;
+		coefR[7] += L_R * Y7 * weight; coefG[7] += L_G * Y7 * weight; coefB[7] += L_B * Y7 * weight;
+		coefR[8] += L_R * Y8 * weight; coefG[8] += L_G * Y8 * weight; coefB[8] += L_B * Y8 * weight;
+	}
+
+	for ( int j = 0; j < 9; ++j )
+	{
+		outCoefs[j].x = coefR[j];
+		outCoefs[j].y = coefG[j];
+		outCoefs[j].z = coefB[j];
+		outCoefs[j].w = 0.0f;
+	}
 }
 
 void DisplayDeviceD3D12::bindPerObjectCB()
