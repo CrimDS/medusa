@@ -468,11 +468,16 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 	}
 
 	// --- Step 3: Rays RT → scene RT (full-res, ONE+ONE additive) ---
-	// Composite only reads t0 (rays RT); t1 is bound to the same descriptor as
-	// a placeholder to satisfy the 2-SRV root table.
-	bindSRVs( m_nRaysSRVIndex, m_nRaysSRVIndex );
+	// Composite reads rays at t0 and depth at t1.  Depth is needed so the
+	// shader can gate by destination-pixel depth — rays composite onto sky
+	// pixels only, never onto foreground occluders (otherwise distant
+	// stars / moons paint rays ON TOP of nearer planets and ships).
+	// Depth is still in PIXEL_SHADER_RESOURCE state from step 1, so no
+	// transition needed here.
+	bindSRVs( m_nRaysSRVIndex, pDev->m_nDepthSRVIndex );
 
-	// CB unchanged from eclipse pass; composite reads fExposure only.
+	// CB unchanged from prior pass; composite reads fExposure, fSunDepth,
+	// fSunVisible.
 	cl->SetPipelineState( m_pCompositePSO.Get() );
 	drawFullscreenTriangle( pDev );
 

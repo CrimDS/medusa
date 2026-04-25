@@ -37,9 +37,9 @@ struct CBExposure
 
 DisplayEffectExposureD3D12::DisplayEffectExposureD3D12() :
 	m_fAdaptRate( 1.5f ),		// per-second — dark→light settles in ~0.7s
-	m_fKey( 0.18f ),			// Reinhard middle grey
+	m_fKey( 0.30f ),			// Chunk-1-follow-up — bumped from canonical 0.18 to lift the scene after sRGB-correct lighting compounded mid-tones darker.
 	m_fMinExposure( 0.10f ),
-	m_fMaxExposure( 6.0f ),
+	m_fMaxExposure( 10.0f ),	// Chunk-1-follow-up — extra headroom for dim scenes where the linear-correct multiplier needs to climb further than the legacy 6.0 cap allowed.
 	m_nFrameIdx( 0 ),
 	m_fLastTickSec( 0.0 ),
 	m_bInitialized( false ),

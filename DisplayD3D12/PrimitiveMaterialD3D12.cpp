@@ -200,8 +200,20 @@ bool PrimitiveMaterialD3D12::execute()
 				// Setup light constant buffer
 				CBPerLight lightCB = {};
 				lightCB.nLightType = light.type;
-				lightCB.vLightDiffuse = ShaderFloat4( light.r, light.g, light.b, light.a );
-				lightCB.vLightSpecular = ShaderFloat4( light.specR, light.specG, light.specB, light.specA );
+				// vLightDiffuse / vLightSpecular are author-time sRGB.  In sRGB-correct
+				// mode they multiply linear texture samples in the shader, so they
+				// must arrive linear.  srgbColorToLinear() leaves alpha untouched
+				// (alpha is already a linear opacity, not a perceptual colour).
+				// g_fLightIntensityScale boosts the linearised RGB to recover the
+				// "apparent light energy" the legacy gamma-wrong path delivered —
+				// keeps lit faces bright relative to dark space without lifting
+				// ambient.
+				ShaderFloat4 ldif = srgbColorToLinear( ShaderFloat4( light.r, light.g, light.b, light.a ) );
+				ShaderFloat4 lspc = srgbColorToLinear( ShaderFloat4( light.specR, light.specG, light.specB, light.specA ) );
+				ldif.x *= g_fLightIntensityScale; ldif.y *= g_fLightIntensityScale; ldif.z *= g_fLightIntensityScale;
+				lspc.x *= g_fLightIntensityScale; lspc.y *= g_fLightIntensityScale; lspc.z *= g_fLightIntensityScale;
+				lightCB.vLightDiffuse  = ldif;
+				lightCB.vLightSpecular = lspc;
 				lightCB.vLightPosition = ShaderFloat4( light.posX, light.posY, light.posZ, 0.0f );
 				lightCB.vLightDirection = ShaderFloat4( light.dirX, light.dirY, light.dirZ, 0.0f );
 
@@ -621,8 +633,16 @@ bool PrimitiveMaterialD3D12::executeChildren()
 
 ShaderFloat4 PrimitiveMaterialD3D12::makeShaderFloat4( const Color & src )
 {
+	// Author-time material colours (vMatDiffuse/Specular/Ambient/Emissive)
+	// are sRGB.  In the sRGB-correct pipeline they multiply linearised
+	// texture samples and accumulate into the linear scene RT, so they
+	// must arrive linear too.  Alpha is already linear (opacity), so
+	// linearise RGB only.  srgbToLinear() is a no-op when the pipeline is
+	// disabled, which makes this call site safe regardless of the global
+	// flag.
 	const float inv = 1.0f / 255.0f;
-	return ShaderFloat4( src.m_R * inv, src.m_G * inv, src.m_B * inv, src.m_A * inv );
+	return srgbColorToLinear( ShaderFloat4(
+		src.m_R * inv, src.m_G * inv, src.m_B * inv, src.m_A * inv ) );
 }
 
 Color PrimitiveMaterialD3D12::makeColor( const ShaderFloat4 & src )

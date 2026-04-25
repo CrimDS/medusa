@@ -7,6 +7,14 @@
 #include "Standard/Bits.h"
 #include "PrimitiveSurfaceD3D12.h"
 #include "PrimitiveFactory.h"
+#include "D3D12Helpers.h"		// g_bSRGBPipeline
+
+// Forward declarations — definitions are further down this file.  Needed
+// because execute() / set() / flushPendingUploads() (defined earlier in
+// this TU) call these helpers before C++ would otherwise see them.
+DXGI_FORMAT GetTypelessFormat( DXGI_FORMAT fmt );
+DXGI_FORMAT GetSRVFormat( DXGI_FORMAT fmt, bool bSRGB );
+bool        IsSRGBColourTexture( PrimitiveSurface::Type eType );
 
 //---------------------------------------------------------------------------------------------------
 
@@ -80,8 +88,12 @@ bool PrimitiveSurfaceD3D12::execute()
 			m_CurrentState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 		}
 
+		// Pick _SRGB SRV view for perceptual-colour textures (DIFFUSE,
+		// LIGHTMAP, DARKMAP, DECALMAP) when the sRGB pipeline is on, so
+		// hardware decodes from sRGB to linear at sample.  Bump / normal /
+		// gloss / shader textures stay UNORM (their data is linear).
 		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.Format = m_DXGIFormat;
+		srvDesc.Format = GetSRVFormat( m_DXGIFormat, IsSRGBColourTexture( m_eType ) );
 		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		srvDesc.Texture2D.MipLevels = m_nLevels;
@@ -246,6 +258,73 @@ static DXGI_FORMAT GetDXGIFormat( ColorFormat::Format eFormat )
 	}
 }
 
+// sRGB-correct pipeline support (Chunk 1).  When a colour texture is created,
+// the resource is allocated as TYPELESS (where a typeless variant exists)
+// so the SRV view can be cast independently to either the linear UNORM or
+// the sRGB UNORM_SRGB form.  Bump / normal / gloss / shader textures hold
+// data, not perceptual colour, and stay UNORM.
+
+// Returns the typeless variant of a UNORM colour format, or the input
+// format unchanged if there's no typeless equivalent.  16-bit packed
+// formats (B5G6R5, B5G5R5A1, B4G4R4A4) have no typeless or sRGB variants
+// and are passed through.
+DXGI_FORMAT GetTypelessFormat( DXGI_FORMAT fmt )
+{
+	switch ( fmt )
+	{
+	case DXGI_FORMAT_B8G8R8A8_UNORM:	return DXGI_FORMAT_B8G8R8A8_TYPELESS;
+	case DXGI_FORMAT_B8G8R8X8_UNORM:	return DXGI_FORMAT_B8G8R8X8_TYPELESS;
+	case DXGI_FORMAT_R8G8B8A8_UNORM:	return DXGI_FORMAT_R8G8B8A8_TYPELESS;
+	case DXGI_FORMAT_BC1_UNORM:			return DXGI_FORMAT_BC1_TYPELESS;
+	case DXGI_FORMAT_BC2_UNORM:			return DXGI_FORMAT_BC2_TYPELESS;
+	case DXGI_FORMAT_BC3_UNORM:			return DXGI_FORMAT_BC3_TYPELESS;
+	default:							return fmt;	// no typeless variant
+	}
+}
+
+// Picks the SRV view format.  When bSRGB is true and the underlying format
+// has an sRGB variant, return the _SRGB form so the hardware decodes to
+// linear at sample.  Otherwise return the plain UNORM form so data
+// textures sample untouched.
+DXGI_FORMAT GetSRVFormat( DXGI_FORMAT fmt, bool bSRGB )
+{
+	if ( !bSRGB )
+		return fmt;
+	switch ( fmt )
+	{
+	case DXGI_FORMAT_B8G8R8A8_UNORM:	return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+	case DXGI_FORMAT_B8G8R8X8_UNORM:	return DXGI_FORMAT_B8G8R8X8_UNORM_SRGB;
+	case DXGI_FORMAT_R8G8B8A8_UNORM:	return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+	case DXGI_FORMAT_BC1_UNORM:			return DXGI_FORMAT_BC1_UNORM_SRGB;
+	case DXGI_FORMAT_BC2_UNORM:			return DXGI_FORMAT_BC2_UNORM_SRGB;
+	case DXGI_FORMAT_BC3_UNORM:			return DXGI_FORMAT_BC3_UNORM_SRGB;
+	default:							return fmt;	// no _SRGB variant
+	}
+}
+
+// Decides whether a texture's SRV should be _SRGB-decoded based on its
+// usage type.  Only perceptual-colour textures get sRGB decoding —
+// normal / bump / gloss / parallax textures store linear data and would
+// be corrupted by gamma decoding.  When the global pipeline flag is off,
+// always returns false (legacy behaviour).
+bool IsSRGBColourTexture( PrimitiveSurface::Type eType )
+{
+	if ( !g_bSRGBPipeline )
+		return false;
+	switch ( eType )
+	{
+	case PrimitiveSurface::DIFFUSE:
+	case PrimitiveSurface::LIGHTMAP:
+	case PrimitiveSurface::DARKMAP:
+	case PrimitiveSurface::DECALMAP:
+		return true;
+	default:
+		// BUMPMAP, DETAILMAP, GLOSSMAP, NORMALMAP, PARALLAXMAP, SHADERMAP —
+		// these store linear data, never gamma-decode.
+		return false;
+	}
+}
+
 int GetBytesPerPixel( DXGI_FORMAT format )
 {
 	switch ( format )
@@ -316,14 +395,24 @@ bool PrimitiveSurfaceD3D12::initialize( int width, int height, Format eFormat, b
 	else
 		m_Pitch = width * GetNativePixelBytes( eFormat );
 
-	// Create the texture resource
+	// Create the texture resource.  When the sRGB pipeline is on, allocate
+	// colour-format resources as TYPELESS so the SRV view can independently
+	// pick _SRGB (for perceptual-colour textures) or _UNORM (for data
+	// textures like bump / normal maps).  Resource memory layout is
+	// identical across the typeless cast — only view interpretation
+	// differs.  Formats without a typeless variant (16-bit packed) pass
+	// through unchanged.
+	const DXGI_FORMAT resourceFormat = g_bSRGBPipeline
+		? GetTypelessFormat( m_DXGIFormat )
+		: m_DXGIFormat;
+
 	D3D12_RESOURCE_DESC texDesc = {};
 	texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	texDesc.Width = width;
 	texDesc.Height = height;
 	texDesc.DepthOrArraySize = 1;
 	texDesc.MipLevels = (UINT16)m_nLevels;
-	texDesc.Format = m_DXGIFormat;
+	texDesc.Format = resourceFormat;
 	texDesc.SampleDesc.Count = 1;
 	texDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 	texDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
@@ -337,11 +426,14 @@ bool PrimitiveSurfaceD3D12::initialize( int width, int height, Format eFormat, b
 	if ( FAILED(hr) )
 	{
 		// Some legacy 16-bit formats (B5G6R5, B5G5R5A1, B4G4R4A4) aren't supported
-		// for Texture2D on all DX12 hardware.  Fall back to B8G8R8A8_UNORM.
+		// for Texture2D on all DX12 hardware.  Fall back to B8G8R8A8_UNORM
+		// (or _TYPELESS in sRGB mode so the SRV view can still cast to _SRGB).
 		if ( m_DXGIFormat != DXGI_FORMAT_B8G8R8A8_UNORM )
 		{
 			m_DXGIFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
-			texDesc.Format = m_DXGIFormat;
+			texDesc.Format = g_bSRGBPipeline
+				? DXGI_FORMAT_B8G8R8A8_TYPELESS
+				: DXGI_FORMAT_B8G8R8A8_UNORM;
 			m_Pitch = width * 4;
 			hr = pDevice->getDevice()->CreateCommittedResource(
 				&heapProps, D3D12_HEAP_FLAG_NONE, &texDesc,
@@ -363,6 +455,21 @@ bool PrimitiveSurfaceD3D12::initialize( int width, int height, Format eFormat, b
 
 void PrimitiveSurfaceD3D12::set( Type eType, int nIndex, int nUV, bool bFiltered, float * pParams /*= NULL*/ )
 {
+	// If the texture type changes after the SRV was already created, the
+	// cached SRV may be wrong for sRGB-correctness — e.g. an early SRV
+	// created with the default DIFFUSE type uses an _SRGB view, but a
+	// later set(NORMALMAP) means the data is linear and must NOT decode.
+	// Force a fresh staging slot so the per-frame slot cache (keyed on
+	// m_SRVIndex) misses correctly and the new descriptor reaches the GPU
+	// heap.  Reusing the old m_SRVIndex would just overwrite the staging
+	// descriptor in place but the cache would still report a hit.
+	if ( m_bSRVCreated && m_eType != eType
+		&& IsSRGBColourTexture( m_eType ) != IsSRGBColourTexture( eType ) )
+	{
+		m_bSRVCreated = false;
+		m_SRVIndex = UINT(-1);	// next execute() allocates a fresh staging slot
+	}
+
 	m_eType = eType;
 	m_nIndex = nIndex;
 	m_nUV = nUV;
@@ -610,11 +717,12 @@ void PrimitiveSurfaceD3D12::flushPendingUploads( DisplayDeviceD3D12 * pDevice )
 		D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 	m_CurrentState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
-	// Create SRV after first upload
+	// Create SRV after first upload — same format-picking logic as the
+	// execute()-path SRV creation above (kept in sync deliberately).
 	if ( !m_bSRVCreated )
 	{
 		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.Format = m_DXGIFormat;
+		srvDesc.Format = GetSRVFormat( m_DXGIFormat, IsSRGBColourTexture( m_eType ) );
 		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		srvDesc.Texture2D.MipLevels = m_nLevels;

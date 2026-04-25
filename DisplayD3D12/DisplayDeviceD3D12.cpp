@@ -43,11 +43,38 @@
 int  GetNativePixelBytes( ColorFormat::Format eFormat );
 int  GetBytesPerPixel( DXGI_FORMAT format );
 bool IsBlockCompressed( DXGI_FORMAT format );
+DXGI_FORMAT GetSRVFormat( DXGI_FORMAT fmt, bool bSRGB );
+bool IsSRGBColourTexture( PrimitiveSurface::Type eType );
 
 //---------------------------------------------------------------------------------------------------
 
 DisplayDeviceD3D12::ModeList	DisplayDeviceD3D12::sm_ModeList;
 DisplayDeviceD3D12::DeviceList	DisplayDeviceD3D12::sm_DeviceList;
+
+// sRGB-correct pipeline (Chunk 1).  When true:
+//  - Colour textures (DIFFUSE / LIGHTMAP / DARKMAP / DECALMAP) are sampled
+//    through an _SRGB SRV view, hardware-decoding to linear at sample.
+//    Bump / normal / gloss / shader textures stay UNORM (linear data).
+//  - Author-time sRGB CB colours (vMatDiffuse/Specular/Ambient/Emissive,
+//    vLightDiffuse/Specular, vGlobalAmbient) are linearised at upload
+//    via srgbToLinear() so they meet linear texture samples in the same
+//    space, making lighting math energy-conserving in linear domain.
+//  - Output gamma encode is NOT applied here — see createRenderTargets
+//    for why.  The existing ACES Narkowicz tonemap (FXAA.hlsl:66-74) is
+//    fitted to the full RRT+ODT.SDR.sRGB curve, so its output is already
+//    sRGB-encoded for direct display.  An _SRGB swap-chain RTV would
+//    double-encode and wash everything out.
+// sRGB-correct pipeline (Chunk 1).  When true, colour textures are sampled
+// through _SRGB SRV views (hardware-decoded to linear), CB colour values
+// are linearised at upload, and lighting math runs in linear space.
+// Toggle to false to restore the legacy gamma-wrong path as an A/B
+// comparison switch.
+bool g_bSRGBPipeline = true;
+
+// Light-intensity scale (Chunk 1 follow-up).  Compensates for the typical
+// sRGB-linearisation darkening of authored light colours.  1.8 was the
+// end-of-Chunk-1 value the user accepted as a baseline.
+float g_fLightIntensityScale = 1.8f;
 
 //---------------------------------------------------------------------------------------------------
 
@@ -2000,10 +2027,15 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 	float fElapsedSeconds = (float)(GetTickCount64() - s_nStartTick) / 1000.0f;
 	m_CBPerFrame.vCameraPos = ShaderFloat4( m_Proj.m_vPosition.x, m_Proj.m_vPosition.y, m_Proj.m_vPosition.z, fElapsedSeconds );
 
+	// vGlobalAmbient is consumed by the shader's hemisphere-ambient term
+	// (Default.hlsl:265) which then multiplies linear texture samples — so
+	// the value uploaded here must be in linear space.  m_cAmbientLight is
+	// authored as sRGB (e.g. UNIVERSE_AMBIENT = (63,36,72)); linearise it
+	// when the sRGB pipeline is on.  srgbToLinear is a no-op when off.
 	const float inv = 1.0f / 255.0f;
-	m_CBPerFrame.vGlobalAmbient = ShaderFloat4(
+	m_CBPerFrame.vGlobalAmbient = srgbColorToLinear( ShaderFloat4(
 		m_cAmbientLight.m_R * inv, m_cAmbientLight.m_G * inv,
-		m_cAmbientLight.m_B * inv, m_cAmbientLight.m_A * inv );
+		m_cAmbientLight.m_B * inv, m_cAmbientLight.m_A * inv ) );
 	m_CBPerFrame.szShadowMap = ShaderFloat2( (float)m_szShadowMap.width, (float)m_szShadowMap.height );
 	m_CBPerFrame.fShadowDistance = m_fShadowRadius;
 	m_CBPerFrame.fShadowDepthRange = m_fShadowDepthRange;
@@ -2531,6 +2563,20 @@ bool DisplayDeviceD3D12::createSwapChain()
 
 bool DisplayDeviceD3D12::createRenderTargets()
 {
+	// IMPORTANT: do NOT cast the back-buffer RTV to _SRGB here even though
+	// Chunk 1 of the lighting plan implies the canonical "sRGB output"
+	// pattern.  The reason is the ACES Narkowicz tonemap in FXAA.hlsl:66-74
+	// is a fit to the full ACES RRT + ODT.SDR.sRGB curve — its [0,1] output
+	// is ALREADY sRGB-encoded for direct display, not linear.  Adding a
+	// hardware gamma encode via an _SRGB RTV double-encodes the scene
+	// (washed-out midtones, glow-everywhere look).  An earlier iteration
+	// did exactly this and produced exactly that artefact.
+	//
+	// If a future chunk swaps the tonemap operator to one that outputs
+	// linear values (proper ACES RRT/ODT split, or any non-sRGB-baked
+	// fit), THEN the RTV should be cast to _SRGB so the hardware encodes
+	// uniformly for both the scene and the post-tonemap UI overlay pass.
+	// Until then, leave the view alone.
 	for ( UINT i = 0; i < FRAME_COUNT; i++ )
 	{
 		if ( FAILED(m_pSwapChain->GetBuffer(i, IID_PPV_ARGS(&m_pRenderTargets[i]))) )
@@ -3147,11 +3193,15 @@ void DisplayDeviceD3D12::immediateTextureUpload( PrimitiveSurfaceD3D12 * pSurfac
 		delete[] pSurface->m_PendingMips[i].pData;
 	pSurface->m_PendingMips.release();
 
-	// Create SRV if needed
+	// Create SRV if needed.  Same _SRGB-aware view-format selection as the
+	// two SRV creation sites in PrimitiveSurfaceD3D12.cpp — kept in sync
+	// deliberately.  Without this, a texture uploaded via the synchronous
+	// path would get a UNORM SRV even when sRGB is on, causing colour
+	// textures to skip the sRGB→linear hardware decode at sample time.
 	if ( !pSurface->m_bSRVCreated )
 	{
 		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.Format = pSurface->m_DXGIFormat;
+		srvDesc.Format = GetSRVFormat( pSurface->m_DXGIFormat, IsSRGBColourTexture( pSurface->m_eType ) );
 		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		srvDesc.Texture2D.MipLevels = pSurface->m_nLevels;

@@ -588,25 +588,16 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 
 	if (! bProxy )
 	{
-		// Push order matters: effects iterate in REVERSE push order during
-		// postRender, so first-pushed = last-executed.  Target execution
-		// order (in the order each pass actually runs):
+		// Chunk-1-era push order: Exposure first, GodRays, HDR, SSAO.
+		// Effects iterate in REVERSE push order during postRender, so
+		// first-pushed = last-executed.  Execution order:
 		//
 		//     SSAO  →  HDR/bloom  →  GodRays  →  Exposure
 		//
-		// Why this order:
-		//  - GodRays must run AFTER HDR so bloom (an isotropic blur) doesn't
-		//    smear ray glow back across foreground occluder edges.  When
-		//    bloom runs first it sees a scene without rays, so no bleed.
-		//  - Exposure must run LAST so the auto-exposure 1x1 luminance
-		//    sample reflects the FINAL scene (including rays).  If exposure
-		//    runs before rays, it underestimates scene brightness, computes
-		//    too high a multiplier, and the tonemap (which consumes that
-		//    multiplier at present time) over-brightens the whole frame —
-		//    sky, nebula, everything.
-		//
-		// To achieve [SSAO → HDR → GodRays → Exposure] execution we push in
-		// reverse: Exposure first, then GodRays, then HDR, then SSAO.
+		// GodRays runs AFTER HDR so bloom (an isotropic blur) doesn't
+		// smear ray glow across foreground occluder edges.  Exposure
+		// runs LAST so the auto-exposure 1×1 luminance sample reflects
+		// the FINAL scene (including rays).
 
 		if ( sm_bEnableExposure )
 		{

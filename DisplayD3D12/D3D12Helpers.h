@@ -70,6 +70,53 @@ struct ShaderFloat4
 	ShaderFloat4(float _x, float _y, float _z, float _w) : x(_x), y(_y), z(_z), w(_w) {}
 };
 
+//----------------------------------------------------------------------------
+// sRGB-correct pipeline (Chunk 1 of the lighting upgrade plan).
+//
+// When true, the renderer treats colour textures as sRGB-encoded (decoded
+// to linear at sample), runs all lighting math in linear space, and gamma-
+// encodes at the final blit via an sRGB swap-chain RTV view.  Constant-
+// buffer colour values authored as sRGB (material diffuse / specular /
+// ambient / emissive, light diffuse / specular, global ambient) must be
+// linearised at upload time so they meet the linear texture samples in
+// the same colour space.
+//
+// Flipping back to false restores the legacy gamma-wrong behaviour as a
+// single-flag escape hatch — useful for A/B comparison.  Defined in
+// DisplayDeviceD3D12.cpp.
+extern bool g_bSRGBPipeline;
+
+// Light-intensity scale (Chunk 1 follow-up).  Multiplied into vLightDiffuse
+// and vLightSpecular at CB upload to compensate for the loss of "apparent
+// light energy" that comes from linearising authored sRGB light colours.
+// Background: a warm-sunlight light authored at (1.0, 0.9, 0.8) sRGB
+// becomes (1.0, 0.776, 0.604) in linear space — physically correct but
+// ~25-30% less energy reaching surfaces than the legacy gamma-wrong path
+// delivered.  Auto-exposure lifts everything globally, but lit faces vs
+// dark space need different brightness; this knob scales lit surfaces
+// only, leaving ambient and unlit areas alone.  Tunable: drop toward 1.0
+// for less lift, push toward 2.5 for very strong directional lighting.
+extern float g_fLightIntensityScale;
+
+// IEC 61966-2-1 sRGB → linear (per channel).  Piecewise — matches what the
+// hardware does when sampling an sRGB-typed SRV, so author-time sRGB CB
+// colours decode the same way texture samples do.  A no-op when the sRGB
+// pipeline is disabled; safe to call at every upload site without a guard
+// at the call site.
+inline float srgbToLinear(float x)
+{
+	if (!g_bSRGBPipeline)
+		return x;
+	return (x <= 0.04045f) ? (x / 12.92f) : powf((x + 0.055f) / 1.055f, 2.4f);
+}
+
+// RGB-only conversion: linearise xyz, leave w (alpha) alone.  Alpha is
+// already a linear quantity (opacity, not a perceptual colour value).
+inline ShaderFloat4 srgbColorToLinear(const ShaderFloat4 & c)
+{
+	return ShaderFloat4(srgbToLinear(c.x), srgbToLinear(c.y), srgbToLinear(c.z), c.w);
+}
+
 struct ShaderFloat3
 {
 	float x, y, z;
