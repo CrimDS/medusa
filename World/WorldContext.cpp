@@ -39,10 +39,13 @@ static Constant SLEEP_MODE_UPDATE_RATE( "SLEEP_MODE_UPDATE_RATE", 5.0f );
 //---------------------------------------------------------------------------------------------------
 
 bool		WorldContext::sm_bEnableHDR = true;
+bool		WorldContext::sm_bEnableGodRays = true;		// volumetric sun shafts (DisplayEffectGodRays) — cheap quarter-res radial blur from directional light's screen-space vanishing point; big vista impact for a space sim
+bool		WorldContext::sm_bEnableExposure = true;	// auto-exposure (DisplayEffectExposure) — 1x1 EMA-smoothed luminance multiplier consumed by FXAA tonemap. Disabling pins exposure to 1.0 via FXAA's fallback texture.
 bool		WorldContext::sm_bUpdateHDR = false;
 bool		WorldContext::sm_bEnableShadows = true;
 int			WorldContext::sm_nMaxShadowLights = 4;
-bool		WorldContext::sm_bEnableSSAO = false;	// disabled: artefact-prone on the smooth convex spheres that dominate this game (planets, stars). Re-enable per-scene if SSAO becomes valuable for ships specifically — see reference_ssao_skip_via_no_depth_write memory note for the proper stencil-based per-noun opt-out.
+bool		WorldContext::sm_bEnableSSAO = false;	// Temporarily off 2026-04-25 to focus on god rays; GTAO implementation (horizon-based, Jiménez 2016) can be re-enabled by flipping to true. Doesn't produce the silhouette-halo artefacts of the old Crytek hemisphere-sampling SSAO on smooth convex spheres, so the "disable because of planets/stars" concern no longer applies.
+bool		WorldContext::sm_bGameView = false;	// set true by ViewTactical around its render call; gates god rays so they only appear in the main game view, not planet/navigation/observer/engineering sub-views.
 bool				WorldContext::sm_bParallelSimulate = true;		// default on — cross-zone mutations guarded by sm_SimMutLock
 CriticalSection		WorldContext::sm_SimMutLock;						// coarse lock for cross-zone mutations during parallel simulate
 
@@ -585,6 +588,56 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 
 	if (! bProxy )
 	{
+		// Push order matters: effects iterate in REVERSE push order during
+		// postRender, so first-pushed = last-executed.  Target execution
+		// order (in the order each pass actually runs):
+		//
+		//     SSAO  →  HDR/bloom  →  GodRays  →  Exposure
+		//
+		// Why this order:
+		//  - GodRays must run AFTER HDR so bloom (an isotropic blur) doesn't
+		//    smear ray glow back across foreground occluder edges.  When
+		//    bloom runs first it sees a scene without rays, so no bleed.
+		//  - Exposure must run LAST so the auto-exposure 1x1 luminance
+		//    sample reflects the FINAL scene (including rays).  If exposure
+		//    runs before rays, it underestimates scene brightness, computes
+		//    too high a multiplier, and the tonemap (which consumes that
+		//    multiplier at present time) over-brightens the whole frame —
+		//    sky, nebula, everything.
+		//
+		// To achieve [SSAO → HDR → GodRays → Exposure] execution we push in
+		// reverse: Exposure first, then GodRays, then HDR, then SSAO.
+
+		if ( sm_bEnableExposure )
+		{
+			if ( !m_pExposure.valid() )
+				m_pExposure = pDisplay->createEffect( "EXPOSURE" );
+
+			if ( m_pExposure.valid() )
+				pDisplay->push( m_pExposure );
+			else
+				sm_bEnableExposure = false;
+		}
+		else
+		{
+			if ( m_pExposure.valid() )
+				m_pExposure = NULL;
+		}
+
+		if ( sm_bEnableGodRays && sm_bGameView )
+		{
+			if ( !m_pGodRays.valid() )
+				m_pGodRays = pDisplay->createEffect( "GODRAYS" );
+
+			if ( m_pGodRays.valid() )
+				pDisplay->push( m_pGodRays );
+			else
+				sm_bEnableGodRays = false;
+		}
+		// Note: m_pGodRays is kept alive when sm_bGameView is false — we just
+		// don't push it this frame.  Avoids destroy/recreate churn as the user
+		// toggles between gameview and sub-views.
+
 		if ( sm_bEnableHDR )
 		{
 			if ( sm_bUpdateHDR )
@@ -595,7 +648,7 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 
 			if (! m_pHDR.valid() )
 				m_pHDR = pDisplay->createEffect( "HDR" );
-		
+
 			// push our bloom effect
 			if ( m_pHDR.valid() )
 				pDisplay->push( m_pHDR );
@@ -605,7 +658,7 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 		else
 		{
 			if ( m_pHDR.valid() )
-				m_pHDR = NULL;		
+				m_pHDR = NULL;
 		}
 
 		// Push SSAO effect

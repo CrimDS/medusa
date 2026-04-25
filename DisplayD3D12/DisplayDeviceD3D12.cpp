@@ -34,6 +34,8 @@
 #include "DisplayEffectHDR.h"
 #include "DisplayEffectBlur.h"
 #include "DisplayEffectSSAO.h"
+#include "DisplayEffectGodRays.h"
+#include "DisplayEffectExposure.h"
 
 #include <math.h>
 
@@ -100,6 +102,10 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_bFXAAEnabled( true ),
 	m_bSceneRTisRT( false ),
 	m_bRenderingPostFXAA( false ),
+	m_nDefaultExposureSRVIndex( UINT(-1) ),
+	m_nDefaultExposureRTVIndex( UINT(-1) ),
+	m_bDefaultExposureInitialized( false ),
+	m_nCurrentExposureSRVIndex( UINT(-1) ),
 	m_nShadowMapDSVIndex( UINT(-1) ),
 	m_nShadowMapSRVStagingIndex( UINT(-1) ),
 	m_nDepthSRVIndex( UINT(-1) ),
@@ -143,6 +149,8 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	registerEffect( "HDR", DisplayEffectHDRD3D12::staticFactory() );
 	registerEffect( "BLUR", DisplayEffectBlurD3D12::staticFactory() );
 	registerEffect( "SSAO", DisplayEffectSSAOD3D12::staticFactory() );
+	registerEffect( "GODRAYS", DisplayEffectGodRaysD3D12::staticFactory() );
+	registerEffect( "EXPOSURE", DisplayEffectExposureD3D12::staticFactory() );
 }
 
 DisplayDeviceD3D12::~DisplayDeviceD3D12()
@@ -643,10 +651,15 @@ bool DisplayDeviceD3D12::beginScene()
 	m_nShadowMapPass = 0;
 	m_ShadowPassList.clear();
 
-	// Frame starts pre-FXAA: material draws target the scene RT (10-bit format).
+	// Frame starts pre-FXAA: material draws target the scene RT (HDR float).
 	// applyFXAA() flips this true after binding the swap chain so OVERLAY/UI draws
 	// pick up the R8G8B8A8 PSO variant.
 	m_bRenderingPostFXAA = false;
+
+	// Clear the per-frame exposure pointer so a disabled/removed exposure
+	// effect doesn't leak a stale SRV into applyFXAA.  If the effect runs,
+	// its postRender sets this to the fresh ping-pong SRV.
+	m_nCurrentExposureSRVIndex = UINT(-1);
 
 	if ( !m_bCommandListOpen )
 	{
@@ -1632,7 +1645,7 @@ void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::T
 	key.sampleCount = 1;
 	// PSO RTV format must match the bound RTV exactly (D3D12 validation enforces this).
 	// Three cases: shadow pass writes a depth-as-color R32F target; FXAA-enabled pre-FXAA
-	// material draws go to the 10-bit scene RT; everything else (FXAA disabled, OVERLAY/UI
+	// material draws go to the HDR float scene RT; everything else (FXAA disabled, OVERLAY/UI
 	// after applyFXAA bound the swap chain) writes the R8G8B8A8 backbuffer.
 	key.rtvFormat = m_bRenderingShadowMap ? DXGI_FORMAT_R32_FLOAT
 		: ( m_bFXAAEnabled && m_pSceneRT && !m_bRenderingPostFXAA ) ? SCENE_RT_FORMAT
@@ -3348,9 +3361,11 @@ bool DisplayDeviceD3D12::createFXAA()
 	fxaaParams[0].Descriptor.RegisterSpace = 0;
 	fxaaParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+	// 2-SRV table: t0 = scene RT, t1 = 1x1 R32F exposure multiplier (from
+	// DisplayEffectExposure or the default fallback set at createFXAA time).
 	D3D12_DESCRIPTOR_RANGE srvRange = {};
 	srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-	srvRange.NumDescriptors = 1;
+	srvRange.NumDescriptors = 2;
 	srvRange.BaseShaderRegister = 0;
 	srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -3425,6 +3440,65 @@ void DisplayDeviceD3D12::applyFXAA()
 	if ( !m_bFXAAEnabled || !m_pSceneRT || !m_pFXAAPSO || !m_bCommandListOpen )
 		return;
 
+	// Lazy-init the 1x1 R32F=1.0 fallback exposure texture.  Done here rather
+	// than createFXAA() because that function runs outside a valid command
+	// list context (called from resize paths that have just flushed the CL).
+	// Clear-to-1.0 + transition-to-PSR needs an open CL, which we only have
+	// once the first frame is in flight.
+	if ( !m_bDefaultExposureInitialized )
+	{
+		D3D12_RESOURCE_DESC expDesc = {};
+		expDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		expDesc.Width  = 1;
+		expDesc.Height = 1;
+		expDesc.DepthOrArraySize = 1;
+		expDesc.MipLevels = 1;
+		expDesc.Format = DXGI_FORMAT_R32_FLOAT;
+		expDesc.SampleDesc.Count = 1;
+		expDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+		D3D12_HEAP_PROPERTIES heapProps = {};
+		heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+		D3D12_CLEAR_VALUE cv = {};
+		cv.Format = DXGI_FORMAT_R32_FLOAT;
+		cv.Color[0] = 1.0f;
+
+		HRESULT hrExp = m_pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
+			&expDesc, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
+			IID_PPV_ARGS(&m_pDefaultExposureTex) );
+		if ( SUCCEEDED(hrExp) )
+		{
+			if ( m_nDefaultExposureRTVIndex == UINT(-1) )
+				m_nDefaultExposureRTVIndex = m_RTVHeap.Allocate();
+			m_pDevice->CreateRenderTargetView( m_pDefaultExposureTex.Get(), nullptr,
+				m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ) );
+
+			if ( m_nDefaultExposureSRVIndex == UINT(-1) )
+				m_nDefaultExposureSRVIndex = m_SRVStagingHeap.Allocate();
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDesc.Texture2D.MipLevels = 1;
+			m_pDevice->CreateShaderResourceView( m_pDefaultExposureTex.Get(), &srvDesc,
+				m_SRVStagingHeap.GetCPUHandle( m_nDefaultExposureSRVIndex ) );
+
+			// Clear to 1.0 (only R channel matters for R32_FLOAT) and
+			// transition to PSR for sampling.  Clear vector must exactly
+			// match the optimized clear value set at resource-creation
+			// time ({1, 0, 0, 0}) or D3D12 logs a
+			// CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE warning every
+			// first-frame, which over many launches pollutes the trace.
+			float white[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+			m_pCommandList->ClearRenderTargetView(
+				m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ), white, 0, nullptr );
+			TransitionResource( m_pCommandList.Get(), m_pDefaultExposureTex.Get(),
+				D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+			m_bDefaultExposureInitialized = true;
+		}
+	}
+
 	RectInt rw = renderWindow();
 	float width  = (float)rw.width();
 	float height = (float)rw.height();
@@ -3476,12 +3550,27 @@ void DisplayDeviceD3D12::applyFXAA()
 	memcpy( cbAlloc.cpuAddress, &cb, sizeof(cb) );
 	m_pCommandList->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 
-	// Copy scene SRV to a slot in the shader-visible SRV heap
-	UINT fxaaSRVSlot = allocSRVSlots( 1 );
+	// Copy scene SRV + exposure SRV into a 2-slot run in the shader-visible heap.
+	// t0 = scene RT, t1 = 1x1 R32F exposure multiplier.  DisplayEffectExposure
+	// sets m_nCurrentExposureSRVIndex each frame to its ping-pong write target;
+	// if no exposure effect ran this frame (or exposure is disabled), it stays
+	// at m_nDefaultExposureSRVIndex which points at a 1x1 R32F=1.0 fallback.
+	UINT fxaaSRVSlot = allocSRVSlots( 2 );
 	m_pDevice->CopyDescriptorsSimple( 1,
 		m_SRVHeap.GetCPUHandle( fxaaSRVSlot ),
 		m_SRVStagingHeap.GetCPUHandle( m_nSceneSRVIndex ),
 		D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+
+	UINT exposureSrc = ( m_nCurrentExposureSRVIndex != UINT(-1) )
+		? m_nCurrentExposureSRVIndex
+		: m_nDefaultExposureSRVIndex;
+	if ( exposureSrc != UINT(-1) )
+	{
+		m_pDevice->CopyDescriptorsSimple( 1,
+			m_SRVHeap.GetCPUHandle( fxaaSRVSlot + 1 ),
+			m_SRVStagingHeap.GetCPUHandle( exposureSrc ),
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+	}
 
 	m_pCommandList->SetGraphicsRootDescriptorTable( 1, m_SRVHeap.GetGPUHandle( fxaaSRVSlot ) );
 	m_pCommandList->SetGraphicsRootDescriptorTable( 2, m_SamplerHeap.GetGPUHandle( 0 ) );

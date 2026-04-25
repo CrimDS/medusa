@@ -47,7 +47,39 @@ void LoadDisplayLibs()
 IMPLEMENT_ABSTRACT_FACTORY( DisplayDevice, Widget );
 
 DisplayDevice::DisplayDevice()
+	: m_vSunWorldPos( Vector3::ZERO )
+	, m_fSunDistSq( 0.0f )
+	, m_bSunCandidateValid( false )
 {}
+
+//----------------------------------------------------------------------------
+// Sun candidate tracking — see DisplayDevice.h comments.  Closest submission
+// wins; resetSunCandidate runs at beginScene so stale state from a previous
+// scene (e.g. ship-select lobby → gameplay) doesn't leak in.
+//----------------------------------------------------------------------------
+
+void DisplayDevice::submitSunCandidate( const Vector3 & worldPos, float distanceSq )
+{
+	if ( !m_bSunCandidateValid || distanceSq < m_fSunDistSq )
+	{
+		m_vSunWorldPos       = worldPos;
+		m_fSunDistSq         = distanceSq;
+		m_bSunCandidateValid = true;
+	}
+}
+
+void DisplayDevice::resetSunCandidate()
+{
+	m_bSunCandidateValid = false;
+}
+
+bool DisplayDevice::getSunCandidate( Vector3 & outWorldPos ) const
+{
+	if ( !m_bSunCandidateValid )
+		return false;
+	outWorldPos = m_vSunWorldPos;
+	return true;
+}
 
 
 //----------------------------------------------------------------------------

@@ -256,6 +256,18 @@ public:
 
 	virtual bool					capture( const char * pFilename ) = 0;	// save screenshot to given file, returns true on success!
 
+	// Sun candidate tracking — game code (e.g. NounStar::render) submits each
+	// star's world-space position; the closest submission wins per-frame.
+	// DisplayEffectGodRays reads the result at postRender time and projects
+	// to screen space as the ray origin.  RenderContext::beginScene resets
+	// the candidate so each frame starts clean.  Non-virtual base-class
+	// storage so both D3D9 and D3D12 paths get it for free.
+	void							submitSunCandidate(
+										const Vector3 & worldPos,
+										float distanceSq );		// closer distance wins
+	void							resetSunCandidate();
+	bool							getSunCandidate( Vector3 & outWorldPos ) const;
+
 	// Helpers
 	static DisplayDevice *			create( const char * pClass );		// create a DisplayDevice by key
 	static DisplayDevice *			create();							// create a default display device
@@ -284,6 +296,11 @@ public:
 
 	static const char *				describeFSAA( FSAA eFSAA );
 	static FSAA						findFSAA( const char * pText );
+
+protected:
+	Vector3							m_vSunWorldPos;			// valid only when m_bSunCandidateValid
+	float							m_fSunDistSq;			// best (smallest) submitted distance² this frame
+	bool							m_bSunCandidateValid;	// reset each frame by RenderContext::beginScene
 };
 
 //----------------------------------------------------------------------------

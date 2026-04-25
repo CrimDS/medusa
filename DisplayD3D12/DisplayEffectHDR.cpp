@@ -1,7 +1,10 @@
 /*
 	DisplayEffectHDR.cpp - D3D12 version
-	Bloom post-processing: bright pass → Gaussian blur → additive composite.
-	Operates on m_pSceneRT (FXAA intermediate RT) after materials render.
+	Karis / Unreal-style bloom: progressive mip-chain downsample (13-tap
+	filtered, partial-Karis firefly suppression) + 3x3 tent upsample with
+	additive blending, then additive composite into the HDR scene RT.
+	Operates on m_pSceneRT (FXAA intermediate RT, R11G11B10_FLOAT) after
+	materials render.
 	(c)2024 Palestar
 */
 
@@ -27,17 +30,19 @@ struct CBPostProcess
 //---------------------------------------------------------------------------------------------------
 
 DisplayEffectHDRD3D12::DisplayEffectHDRD3D12() :
-	m_nBloomLevels( 3 ),
-	m_nBloomSize( 2 ),		// half-res bloom RT.  Tried full-res (1) — blur kernel is then half as wide in screen space, so the sun's surface-texture detail passed through visibly as wispy dark patches.  Tried quarter-res (4, original) — visible 4x4 blocks.  Half-res with 3 blur passes + linear-clamp sampler at slot 2 is the sweet spot.
+	m_nMipCount( 6 ),			// 6 mips: widest halo is 1/64 of screen width — full-screen glow without a muddy wash
 	m_fBloomScale( 0.6f ),
 	m_fBrightThreshold( 0.65f ),
 	m_LastSize( 0, 0 ),
-	m_BloomSize( 0, 0 ),
 	m_bInitialized( false ),
 	m_bBloomFailed( false )
 {
-	memset( m_nBloomRTVIndex, 0xff, sizeof(m_nBloomRTVIndex) );
-	memset( m_nBloomSRVIndex, 0xff, sizeof(m_nBloomSRVIndex) );
+	for ( int i = 0; i < MAX_MIPS; ++i )
+	{
+		m_nMipRTVIndex[i] = UINT(-1);
+		m_nMipSRVIndex[i] = UINT(-1);
+		m_MipSizes[i] = SizeInt( 0, 0 );
+	}
 }
 
 DisplayEffectHDRD3D12::~DisplayEffectHDRD3D12()
@@ -89,15 +94,24 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	m_bBloomFailed = true;		// assume failure until we succeed
 
 	m_LastSize = currentSize;
-	m_BloomSize = SizeInt( width / m_nBloomSize, height / m_nBloomSize );
-	if ( m_BloomSize.width < 1 ) m_BloomSize.width = 1;
-	if ( m_BloomSize.height < 1 ) m_BloomSize.height = 1;
 
-	// Read bloomScale from user config — same key the D3D9 path used and
-	// the in-game options slider writes (ViewOptions.cpp:585).  100 = full
-	// intensity (1.0); user can dial down for subtler bloom.  Read once at
-	// init; changing the slider in-game requires restart to apply (matches
-	// other graphics options).
+	// Clamp mip count so the smallest mip is at least 4x4 px — below that the
+	// 13-tap downsample kernel's ±2-texel reach goes out of bounds and the
+	// Karis filter loses its anti-firefly property.
+	int nActiveMips = Clamp<int>( m_nMipCount, 2, MAX_MIPS );
+	while ( nActiveMips > 2 )
+	{
+		int wMin = (int)width  >> nActiveMips;
+		int hMin = (int)height >> nActiveMips;
+		if ( wMin >= 4 && hMin >= 4 )
+			break;
+		--nActiveMips;
+	}
+	m_nMipCount = nActiveMips;
+
+	// Read bloomScale from user config — same key the D3D9 path used and the
+	// in-game options slider writes (ViewOptions.cpp:585).  100 = full
+	// intensity (1.0); user can dial down for subtler bloom.
 #ifdef _DEBUG
 	Settings settings( "ClientD" );
 #else
@@ -107,41 +121,18 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	m_fBloomScale = Clamp<float>( (float)nScalePct / 100.0f, 0.0f, 1.0f );
 
 	// --- Compile PostProcess.hlsl with different entry points ---
-	// Resolve shader path the same way the shader system does
 	CharString sPath = DisplayDevice::sm_sShadersPath + "Shaders/PostProcess.hlsl";
 	wchar_t wszPath[MAX_PATH];
 	MultiByteToWideChar( CP_ACP, 0, sPath, -1, wszPath, MAX_PATH );
 
-	if ( !compileShaderEntry( wszPath, "vs_main", "vs_5_1", m_pVSBlob ) )
-	{
-		TRACE( "Bloom: Failed to compile VS" );
-		return false;
-	}
-	if ( !compileShaderEntry( wszPath, "PS_BrightPass", "ps_5_1", m_pPSBrightPass ) )
-	{
-		TRACE( "Bloom: Failed to compile PS_BrightPass" );
-		return false;
-	}
-	if ( !compileShaderEntry( wszPath, "PS_HorzBlur", "ps_5_1", m_pPSHorzBlur ) )
-	{
-		TRACE( "Bloom: Failed to compile PS_HorzBlur" );
-		return false;
-	}
-	if ( !compileShaderEntry( wszPath, "PS_VertBlur", "ps_5_1", m_pPSVertBlur ) )
-	{
-		TRACE( "Bloom: Failed to compile PS_VertBlur" );
-		return false;
-	}
-	if ( !compileShaderEntry( wszPath, "PS_Scale", "ps_5_1", m_pPSScale ) )
-	{
-		TRACE( "Bloom: Failed to compile PS_Scale" );
-		return false;
-	}
+	if ( !compileShaderEntry( wszPath, "vs_main",        "vs_5_1", m_pVSBlob ) )        { TRACE( "Bloom: Failed to compile VS" );            return false; }
+	if ( !compileShaderEntry( wszPath, "PS_BrightPass",  "ps_5_1", m_pPSBrightPass ) )  { TRACE( "Bloom: Failed to compile PS_BrightPass" );  return false; }
+	if ( !compileShaderEntry( wszPath, "PS_Downsample",  "ps_5_1", m_pPSDownsample ) )  { TRACE( "Bloom: Failed to compile PS_Downsample" );  return false; }
+	if ( !compileShaderEntry( wszPath, "PS_Upsample",    "ps_5_1", m_pPSUpsample ) )    { TRACE( "Bloom: Failed to compile PS_Upsample" );    return false; }
+	if ( !compileShaderEntry( wszPath, "PS_Scale",       "ps_5_1", m_pPSScale ) )       { TRACE( "Bloom: Failed to compile PS_Scale" );       return false; }
 
 	// --- Create bloom root signature ---
-	// [0] CBV at b0 (post-process constants)
-	// [1] SRV table: 1 SRV at t0
-	// [2] Sampler table: 1 sampler at s0
+	// [0] CBV at b0  [1] SRV table (1 srv @ t0)  [2] Sampler table (1 sampler @ s0)
 	D3D12_ROOT_PARAMETER params[3] = {};
 
 	params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -193,7 +184,9 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	}
 
 	// --- Create PSOs ---
-	// Base PSO desc shared by all bloom passes
+	// Base PSO desc shared by all bloom passes.  Bloom mips are now the same
+	// format as the scene RT (HDR float) so the composite PSO does not need
+	// to swap formats before writing back.
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
 	psoDesc.pRootSignature = m_pBloomRootSig.Get();
 	psoDesc.VS = { m_pVSBlob->GetBufferPointer(), m_pVSBlob->GetBufferSize() };
@@ -204,48 +197,50 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	psoDesc.DepthStencilState.DepthEnable = FALSE;
 	psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
 	psoDesc.NumRenderTargets = 1;
-	psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+	psoDesc.RTVFormats[0] = DisplayDeviceD3D12::SCENE_RT_FORMAT;
 	psoDesc.SampleDesc.Count = 1;
 	psoDesc.SampleMask = UINT_MAX;
 
-	// Bright pass PSO
+	// Bright-pass PSO (no blend, writes mip[0])
 	psoDesc.PS = { m_pPSBrightPass->GetBufferPointer(), m_pPSBrightPass->GetBufferSize() };
 	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pBrightPassPSO) );
 	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create BrightPass PSO" ); return false; }
 
-	// Horz blur PSO
-	psoDesc.PS = { m_pPSHorzBlur->GetBufferPointer(), m_pPSHorzBlur->GetBufferSize() };
-	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pHorzBlurPSO) );
-	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create HorzBlur PSO" ); return false; }
+	// Downsample PSO (no blend, overwrites dest mip)
+	psoDesc.PS = { m_pPSDownsample->GetBufferPointer(), m_pPSDownsample->GetBufferSize() };
+	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pDownsamplePSO) );
+	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create Downsample PSO" ); return false; }
 
-	// Vert blur PSO
-	psoDesc.PS = { m_pPSVertBlur->GetBufferPointer(), m_pPSVertBlur->GetBufferSize() };
-	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pVertBlurPSO) );
-	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create VertBlur PSO" ); return false; }
-
-	// Additive composite PSO (writes bloom onto scene RT with additive blending).
-	// Scene RT is 10-bit (DisplayDeviceD3D12::SCENE_RT_FORMAT) — PSO RTV format
-	// must match exactly, the bright/blur passes above target the 8-bit bloom RT.
-	psoDesc.PS = { m_pPSScale->GetBufferPointer(), m_pPSScale->GetBufferSize() };
-	psoDesc.RTVFormats[0] = DisplayDeviceD3D12::SCENE_RT_FORMAT;
+	// Upsample PSO — ONE+ONE additive so each upsample level ACCUMULATES onto
+	// the larger mip it targets.  This is what gives the Karis chain its
+	// wide, smooth halo: each mip contributes its own spatial band.
+	psoDesc.PS = { m_pPSUpsample->GetBufferPointer(), m_pPSUpsample->GetBufferSize() };
 	psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
-	psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-	psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
-	psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-	psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+	psoDesc.BlendState.RenderTarget[0].SrcBlend     = D3D12_BLEND_ONE;
+	psoDesc.BlendState.RenderTarget[0].DestBlend    = D3D12_BLEND_ONE;
+	psoDesc.BlendState.RenderTarget[0].BlendOp      = D3D12_BLEND_OP_ADD;
+	psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha  = D3D12_BLEND_ONE;
 	psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
-	psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	psoDesc.BlendState.RenderTarget[0].BlendOpAlpha   = D3D12_BLEND_OP_ADD;
+	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pUpsamplePSO) );
+	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create Upsample PSO" ); return false; }
+
+	// Final composite PSO (ONE+ONE additive, writes bloom mip[0] onto scene RT
+	// scaled by the slider).
+	psoDesc.PS = { m_pPSScale->GetBufferPointer(), m_pPSScale->GetBufferSize() };
+	// (blend state unchanged from upsample PSO)
 	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pAdditivePSO) );
 	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create Additive PSO" ); return false; }
 
-	// --- Create bloom render targets (2 ping-pong textures at 1/N screen size) ---
+	// --- Create bloom mip chain ---
+	// mip[0] is half-res (first downsample of scene in bright-pass), mip[i]
+	// is mip[i-1] downsampled by 2.  Each mip gets its own committed resource,
+	// RTV, and SRV staging slot — independent so we can ping between any pair.
 	D3D12_RESOURCE_DESC rtDesc = {};
 	rtDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-	rtDesc.Width = m_BloomSize.width;
-	rtDesc.Height = m_BloomSize.height;
 	rtDesc.DepthOrArraySize = 1;
 	rtDesc.MipLevels = 1;
-	rtDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	rtDesc.Format = DisplayDeviceD3D12::SCENE_RT_FORMAT;
 	rtDesc.SampleDesc.Count = 1;
 	rtDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
 
@@ -253,54 +248,65 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
 
 	D3D12_CLEAR_VALUE clearValue = {};
-	clearValue.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	clearValue.Format = DisplayDeviceD3D12::SCENE_RT_FORMAT;
 
-	for ( int i = 0; i < 2; ++i )
+	for ( int i = 0; i < m_nMipCount; ++i )
 	{
+		int mipW = (int)width  >> (i + 1);
+		int mipH = (int)height >> (i + 1);
+		if ( mipW < 1 ) mipW = 1;
+		if ( mipH < 1 ) mipH = 1;
+		m_MipSizes[i] = SizeInt( mipW, mipH );
+
+		rtDesc.Width  = (UINT64)mipW;
+		rtDesc.Height = (UINT)mipH;
+
 		hr = pDevice->getDevice()->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
 			&rtDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clearValue,
-			IID_PPV_ARGS(&m_pBloomTextures[i]) );
+			IID_PPV_ARGS(&m_pMipRTs[i]) );
 		if ( FAILED(hr) )
 		{
-			TRACE( "Bloom: Failed to create bloom RT %d", i );
+			TRACE( "Bloom: Failed to create mip RT %d (%dx%d)", i, mipW, mipH );
 			return false;
 		}
 
-		// Allocate RTV — reuse existing index if already allocated (resize case)
-		if ( m_nBloomRTVIndex[i] == UINT(-1) )
-			m_nBloomRTVIndex[i] = pDevice->m_RTVHeap.Allocate();
-		if ( m_nBloomRTVIndex[i] == UINT(-1) )
+		// Allocate RTV in the main RTV heap — reuse existing index if already allocated
+		if ( m_nMipRTVIndex[i] == UINT(-1) )
+			m_nMipRTVIndex[i] = pDevice->m_RTVHeap.Allocate();
+		if ( m_nMipRTVIndex[i] == UINT(-1) )
 		{
-			TRACE( "Bloom: Failed to allocate RTV %d", i );
+			TRACE( "Bloom: Failed to allocate RTV for mip %d", i );
 			return false;
 		}
-		pDevice->getDevice()->CreateRenderTargetView( m_pBloomTextures[i].Get(), nullptr,
-			pDevice->m_RTVHeap.GetCPUHandle( m_nBloomRTVIndex[i] ) );
+		pDevice->getDevice()->CreateRenderTargetView( m_pMipRTs[i].Get(), nullptr,
+			pDevice->m_RTVHeap.GetCPUHandle( m_nMipRTVIndex[i] ) );
 
-		// Allocate SRV in staging heap — reuse existing index if already allocated
-		if ( m_nBloomSRVIndex[i] == UINT(-1) )
-			m_nBloomSRVIndex[i] = pDevice->m_SRVStagingHeap.Allocate();
-		if ( m_nBloomSRVIndex[i] == UINT(-1) )
+		// Allocate SRV in staging heap
+		if ( m_nMipSRVIndex[i] == UINT(-1) )
+			m_nMipSRVIndex[i] = pDevice->m_SRVStagingHeap.Allocate();
+		if ( m_nMipSRVIndex[i] == UINT(-1) )
 		{
-			TRACE( "Bloom: Failed to allocate SRV %d", i );
+			TRACE( "Bloom: Failed to allocate SRV for mip %d", i );
 			return false;
 		}
 
 		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		srvDesc.Format = DisplayDeviceD3D12::SCENE_RT_FORMAT;
 		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		srvDesc.Texture2D.MipLevels = 1;
-		pDevice->getDevice()->CreateShaderResourceView( m_pBloomTextures[i].Get(), &srvDesc,
-			pDevice->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[i] ) );
+		pDevice->getDevice()->CreateShaderResourceView( m_pMipRTs[i].Get(), &srvDesc,
+			pDevice->m_SRVStagingHeap.GetCPUHandle( m_nMipSRVIndex[i] ) );
 	}
 
 	m_bInitialized = true;
 	m_bBloomFailed = false;
 
-	TRACE( "Bloom initialized: screen=%dx%d, bloom=%dx%d, levels=%d, scale=%.2f, threshold=%.2f",
-		width, height, m_BloomSize.width, m_BloomSize.height,
-		m_nBloomLevels, m_fBloomScale, m_fBrightThreshold );
+	TRACE( "Bloom (Karis mip chain) initialized: screen=%dx%d, mips=%d (mip0=%dx%d ... mip%d=%dx%d), scale=%.2f, threshold=%.2f",
+		width, height, m_nMipCount,
+		m_MipSizes[0].width, m_MipSizes[0].height,
+		m_nMipCount - 1, m_MipSizes[m_nMipCount - 1].width, m_MipSizes[m_nMipCount - 1].height,
+		m_fBloomScale, m_fBrightThreshold );
 
 	return true;
 }
@@ -357,112 +363,113 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	ID3D12DescriptorHeap * heaps[] = { pDev->m_SRVHeap.Get(), pDev->m_SamplerHeap.Get() };
 	cl->SetDescriptorHeaps( _countof(heaps), heaps );
 
-	// Bind sampler table (slot 2 in root sig).  Use the post-process sampler
-	// at sampler heap index 2 (linear + CLAMP) — slot 0 is the material aniso/WRAP
-	// sampler, which makes the 13-tap blur wrap across edges and produces
-	// streaky banding when bright content sits at the screen border.
+	// Sampler slot 2 = linear CLAMP.  The material aniso/WRAP sampler at slot 0
+	// would wrap bright edge pixels across the screen, producing streaks at
+	// the screen border under the 13-tap downsample reach.
 	cl->SetGraphicsRootDescriptorTable( 2, pDev->m_SamplerHeap.GetGPUHandle( 2 ) );
 
-	// --- Step 1: Bright pass (m_pSceneRT → bloom[0]) ---
+	// Small helper lambda (captured locals) to bind SRV staging slot into the
+	// shader-visible heap at an allocated shader slot.  Avoids five copies of
+	// the same three-liner below.
+	auto bindSourceSRV = [&]( UINT stagingIdx )
+	{
+		UINT srvSlot = pDev->allocSRVSlots( 1 );
+		dev->CopyDescriptorsSimple( 1,
+			pDev->m_SRVHeap.GetCPUHandle( srvSlot ),
+			pDev->m_SRVStagingHeap.GetCPUHandle( stagingIdx ),
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+		cl->SetGraphicsRootDescriptorTable( 1, pDev->m_SRVHeap.GetGPUHandle( srvSlot ) );
+	};
+
+	auto setMipRT = [&]( int mipIdx, D3D12_VIEWPORT & vpOut, D3D12_RECT & scOut )
+	{
+		D3D12_CPU_DESCRIPTOR_HANDLE rtv = pDev->m_RTVHeap.GetCPUHandle( m_nMipRTVIndex[mipIdx] );
+		cl->OMSetRenderTargets( 1, &rtv, FALSE, nullptr );
+		vpOut = { 0, 0, (float)m_MipSizes[mipIdx].width, (float)m_MipSizes[mipIdx].height, 0, 1 };
+		scOut = { 0, 0, (LONG)m_MipSizes[mipIdx].width, (LONG)m_MipSizes[mipIdx].height };
+		cl->RSSetViewports( 1, &vpOut );
+		cl->RSSetScissorRects( 1, &scOut );
+	};
+
+	auto uploadCB = [&]( const CBPostProcess & cb )
+	{
+		UploadRingBuffer::Allocation cbAlloc = pDev->allocateCB( sizeof(CBPostProcess) );
+		memcpy( cbAlloc.cpuAddress, &cb, sizeof(cb) );
+		cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
+	};
+
+	D3D12_VIEWPORT vp; D3D12_RECT sc;
+
+	// --- Step 1: Bright pass (scene RT → mip[0]) ---
 	if ( pDev->m_bSceneRTisRT )
 	{
 		TransitionResource( cl, pDev->m_pSceneRT.Get(),
 			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 		pDev->m_bSceneRTisRT = false;
 	}
-	TransitionResource( cl, m_pBloomTextures[0].Get(),
+	TransitionResource( cl, m_pMipRTs[0].Get(),
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
-	// Upload bright pass constants
 	CBPostProcess cbBright = {};
-	cbBright.texelSizeX = 1.0f / (float)m_BloomSize.width;
-	cbBright.texelSizeY = 1.0f / (float)m_BloomSize.height;
+	cbBright.texelSizeX = 1.0f / (float)m_MipSizes[0].width;
+	cbBright.texelSizeY = 1.0f / (float)m_MipSizes[0].height;
 	cbBright.fScale = 1.0f;
 	cbBright.fBrightThreshold = m_fBrightThreshold;
+	uploadCB( cbBright );
 
-	UploadRingBuffer::Allocation cbAlloc = pDev->allocateCB( sizeof(CBPostProcess) );
-	memcpy( cbAlloc.cpuAddress, &cbBright, sizeof(cbBright) );
-	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
-
-	// Bind scene SRV (copy from staging to shader-visible heap)
-	UINT sceneSRVSlot = pDev->allocSRVSlots( 1 );
-	dev->CopyDescriptorsSimple( 1,
-		pDev->m_SRVHeap.GetCPUHandle( sceneSRVSlot ),
-		pDev->m_SRVStagingHeap.GetCPUHandle( pDev->m_nSceneSRVIndex ),
-		D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
-	cl->SetGraphicsRootDescriptorTable( 1, pDev->m_SRVHeap.GetGPUHandle( sceneSRVSlot ) );
-
-	// Set bloom[0] as render target
-	D3D12_CPU_DESCRIPTOR_HANDLE bloomRTV0 = pDev->m_RTVHeap.GetCPUHandle( m_nBloomRTVIndex[0] );
-	cl->OMSetRenderTargets( 1, &bloomRTV0, FALSE, nullptr );
+	bindSourceSRV( pDev->m_nSceneSRVIndex );
+	setMipRT( 0, vp, sc );
 	float clearColor[4] = { 0, 0, 0, 0 };
-	cl->ClearRenderTargetView( bloomRTV0, clearColor, 0, nullptr );
-
-	D3D12_VIEWPORT bloomVP = { 0, 0, (float)m_BloomSize.width, (float)m_BloomSize.height, 0, 1 };
-	D3D12_RECT bloomScissor = { 0, 0, (LONG)m_BloomSize.width, (LONG)m_BloomSize.height };
-	cl->RSSetViewports( 1, &bloomVP );
-	cl->RSSetScissorRects( 1, &bloomScissor );
-
+	cl->ClearRenderTargetView( pDev->m_RTVHeap.GetCPUHandle( m_nMipRTVIndex[0] ), clearColor, 0, nullptr );
 	cl->SetPipelineState( m_pBrightPassPSO.Get() );
 	drawFullscreenTriangle( pDev );
 
-	// --- Step 2: Gaussian blur (ping-pong between bloom[0] and bloom[1]) ---
-	CBPostProcess cbBlur = {};
-	cbBlur.texelSizeX = 1.0f / (float)m_BloomSize.width;
-	cbBlur.texelSizeY = 1.0f / (float)m_BloomSize.height;
-	cbBlur.fScale = 1.0f;
-	cbBlur.fBrightThreshold = 0.0f;
-
-	for ( int level = 0; level < m_nBloomLevels; ++level )
+	// --- Step 2: Downsample chain, mip[i-1] → mip[i] for i = 1..N-1 ---
+	CBPostProcess cbPass = {};
+	cbPass.fScale = 1.0f;
+	cbPass.fBrightThreshold = 0.0f;
+	for ( int i = 1; i < m_nMipCount; ++i )
 	{
-		// Horizontal blur: bloom[0] → bloom[1]
-		TransitionResource( cl, m_pBloomTextures[0].Get(),
+		TransitionResource( cl, m_pMipRTs[i - 1].Get(),
 			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
-		TransitionResource( cl, m_pBloomTextures[1].Get(),
+		TransitionResource( cl, m_pMipRTs[i].Get(),
 			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
-		UINT bloomSRV0 = pDev->allocSRVSlots( 1 );
-		dev->CopyDescriptorsSimple( 1,
-			pDev->m_SRVHeap.GetCPUHandle( bloomSRV0 ),
-			pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[0] ),
-			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
-		cl->SetGraphicsRootDescriptorTable( 1, pDev->m_SRVHeap.GetGPUHandle( bloomSRV0 ) );
+		cbPass.texelSizeX = 1.0f / (float)m_MipSizes[i].width;
+		cbPass.texelSizeY = 1.0f / (float)m_MipSizes[i].height;
+		uploadCB( cbPass );
 
-		D3D12_CPU_DESCRIPTOR_HANDLE bloomRTV1 = pDev->m_RTVHeap.GetCPUHandle( m_nBloomRTVIndex[1] );
-		cl->OMSetRenderTargets( 1, &bloomRTV1, FALSE, nullptr );
-
-		cbAlloc = pDev->allocateCB( sizeof(CBPostProcess) );
-		memcpy( cbAlloc.cpuAddress, &cbBlur, sizeof(cbBlur) );
-		cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
-
-		cl->SetPipelineState( m_pHorzBlurPSO.Get() );
-		drawFullscreenTriangle( pDev );
-
-		// Vertical blur: bloom[1] → bloom[0]
-		TransitionResource( cl, m_pBloomTextures[1].Get(),
-			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
-		TransitionResource( cl, m_pBloomTextures[0].Get(),
-			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
-
-		UINT bloomSRV1 = pDev->allocSRVSlots( 1 );
-		dev->CopyDescriptorsSimple( 1,
-			pDev->m_SRVHeap.GetCPUHandle( bloomSRV1 ),
-			pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[1] ),
-			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
-		cl->SetGraphicsRootDescriptorTable( 1, pDev->m_SRVHeap.GetGPUHandle( bloomSRV1 ) );
-
-		cl->OMSetRenderTargets( 1, &bloomRTV0, FALSE, nullptr );
-
-		cbAlloc = pDev->allocateCB( sizeof(CBPostProcess) );
-		memcpy( cbAlloc.cpuAddress, &cbBlur, sizeof(cbBlur) );
-		cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
-
-		cl->SetPipelineState( m_pVertBlurPSO.Get() );
+		bindSourceSRV( m_nMipSRVIndex[i - 1] );
+		setMipRT( i, vp, sc );
+		cl->ClearRenderTargetView( pDev->m_RTVHeap.GetCPUHandle( m_nMipRTVIndex[i] ), clearColor, 0, nullptr );
+		cl->SetPipelineState( m_pDownsamplePSO.Get() );
 		drawFullscreenTriangle( pDev );
 	}
 
-	// --- Step 3: Additive composite (bloom[0] → m_pSceneRT with additive blending) ---
-	TransitionResource( cl, m_pBloomTextures[0].Get(),
+	// --- Step 3: Upsample chain, mip[j+1] → mip[j] for j = N-2..0 (additive) ---
+	// After downsample loop: mip[N-1] is RT, all others are PSR.
+	// Flip mip[N-1] to PSR now so it can be sampled in the first upsample.
+	for ( int j = m_nMipCount - 2; j >= 0; --j )
+	{
+		TransitionResource( cl, m_pMipRTs[j + 1].Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+		TransitionResource( cl, m_pMipRTs[j].Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+
+		cbPass.texelSizeX = 1.0f / (float)m_MipSizes[j].width;
+		cbPass.texelSizeY = 1.0f / (float)m_MipSizes[j].height;
+		uploadCB( cbPass );
+
+		bindSourceSRV( m_nMipSRVIndex[j + 1] );
+		setMipRT( j, vp, sc );
+		// NO clear — additive blend layers this upsample onto the existing
+		// downsample result already in mip[j].
+		cl->SetPipelineState( m_pUpsamplePSO.Get() );
+		drawFullscreenTriangle( pDev );
+	}
+
+	// --- Step 4: Additive composite mip[0] → scene RT (scaled by slider) ---
+	TransitionResource( cl, m_pMipRTs[0].Get(),
 		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 	if ( !pDev->m_bSceneRTisRT )
 	{
@@ -471,13 +478,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 		pDev->m_bSceneRTisRT = true;
 	}
 
-	// Bind bloom[0] as input
-	UINT bloomSRVFinal = pDev->allocSRVSlots( 1 );
-	dev->CopyDescriptorsSimple( 1,
-		pDev->m_SRVHeap.GetCPUHandle( bloomSRVFinal ),
-		pDev->m_SRVStagingHeap.GetCPUHandle( m_nBloomSRVIndex[0] ),
-		D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
-	cl->SetGraphicsRootDescriptorTable( 1, pDev->m_SRVHeap.GetGPUHandle( bloomSRVFinal ) );
+	bindSourceSRV( m_nMipSRVIndex[0] );
 
 	// Set scene RT as render target (full screen viewport)
 	D3D12_CPU_DESCRIPTOR_HANDLE sceneRTV = pDev->m_RTVHeap.GetCPUHandle( pDev->m_nSceneRTVIndex );
@@ -489,13 +490,9 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	cl->RSSetViewports( 1, &sceneVP );
 	cl->RSSetScissorRects( 1, &sceneScissor );
 
-	// Upload composite constants (fScale controls bloom intensity).  Re-read
-	// the bloomScale setting every frame — same pattern as D3D9
-	// (DisplayD3D/DisplayEffectHDR.cpp:133).  This lets the in-game slider
-	// update bloom live without recreating the HDR effect, which previously
-	// released D3D12 command allocators the GPU still had in flight.  The
-	// Settings lookup is an in-memory hash access; the cost is trivial once
-	// per composite vs. the cost of device removal.
+	// Re-read the bloomScale setting every frame — same pattern as D3D9
+	// (DisplayD3D/DisplayEffectHDR.cpp:133).  Slider updates bloom live
+	// without recreating the effect.
 #ifdef _DEBUG
 	Settings liveSettings( "ClientD" );
 #else
@@ -509,10 +506,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	cbComposite.texelSizeY = 1.0f / (float)rw.height();
 	cbComposite.fScale = m_fBloomScale;
 	cbComposite.fBrightThreshold = 0.0f;
-
-	cbAlloc = pDev->allocateCB( sizeof(CBPostProcess) );
-	memcpy( cbAlloc.cpuAddress, &cbComposite, sizeof(cbComposite) );
-	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
+	uploadCB( cbComposite );
 
 	cl->SetPipelineState( m_pAdditivePSO.Get() );
 	drawFullscreenTriangle( pDev );
@@ -538,17 +532,24 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 
 void DisplayEffectHDRD3D12::release()
 {
-	m_pBloomTextures[0].Reset();
-	m_pBloomTextures[1].Reset();
+	for ( int i = 0; i < MAX_MIPS; ++i )
+	{
+		m_pMipRTs[i].Reset();
+		m_MipSizes[i] = SizeInt( 0, 0 );
+		// RTV / SRV staging indices are intentionally NOT freed — the staging
+		// heap has no free-list and reusing the same slot across resize is
+		// part of how createFXAA / DisplayEffectHDR resize recovers cleanly.
+	}
+
 	m_pBrightPassPSO.Reset();
-	m_pHorzBlurPSO.Reset();
-	m_pVertBlurPSO.Reset();
+	m_pDownsamplePSO.Reset();
+	m_pUpsamplePSO.Reset();
 	m_pAdditivePSO.Reset();
 	m_pBloomRootSig.Reset();
 	m_pVSBlob.Reset();
 	m_pPSBrightPass.Reset();
-	m_pPSHorzBlur.Reset();
-	m_pPSVertBlur.Reset();
+	m_pPSDownsample.Reset();
+	m_pPSUpsample.Reset();
 	m_pPSScale.Reset();
 
 	m_bInitialized = false;

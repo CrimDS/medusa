@@ -53,8 +53,8 @@ static bool compileShaderEntry( const wchar_t * pPath, const char * pEntry, cons
 
 DisplayEffectSSAOD3D12::DisplayEffectSSAOD3D12() :
 	m_fRadius( 25.0f ),
-	m_fBias( 0.05f ),
-	m_fIntensity( 1.2f ),
+	m_fBias( 0.10f ),		// GTAO thickness threshold — minimum height above tangent plane (as fraction of sample distance) for a sample to count as a real occluder. 0.10 ≈ ~5.7° above-plane. Rejects same-surface samples that were causing view-dependent darkening of tilted flat faces and smooth spheres.
+	m_fIntensity( 1.0f ),	// pow() exponent on final AO. 1.0 = no bias.
 	m_LastSize( 0, 0 ),
 	m_AOSize( 0, 0 ),
 	m_bInitialized( false ),
@@ -90,7 +90,12 @@ bool DisplayEffectSSAOD3D12::initSSAO( DisplayDeviceD3D12 * pDevice )
 	m_bFailed = true;
 
 	m_LastSize = currentSize;
-	m_AOSize = SizeInt( width / 2, height / 2 );
+	// Full-res GTAO: half-res looked visibly pixelated against screen-space
+	// detail (straight edges on ship hulls, planet silhouettes).  16 taps at
+	// full res is still cheap on any GPU that can run the game — ~32M texture
+	// reads at 1080p.  If this becomes a perf issue on low-end hardware the
+	// divisor can be moved to a config var.
+	m_AOSize = SizeInt( width, height );
 	if ( m_AOSize.width < 1 ) m_AOSize.width = 1;
 	if ( m_AOSize.height < 1 ) m_AOSize.height = 1;
 
@@ -200,8 +205,9 @@ bool DisplayEffectSSAOD3D12::initSSAO( DisplayDeviceD3D12 * pDevice )
 	if ( FAILED(hr) ) { TRACE( "SSAO: Failed to create Blur PSO" ); return false; }
 
 	// Apply PSO (multiplicative: DST * SRC).  Writes back into the scene RT
-	// (10-bit format), unlike the SSAO/Blur PSOs above which target the 8-bit
-	// AO ping-pong textures.  PSO RTV format must match the bound RTV exactly.
+	// (HDR float, DisplayDeviceD3D12::SCENE_RT_FORMAT), unlike the SSAO/Blur
+	// PSOs above which target the 8-bit AO ping-pong textures.  PSO RTV format
+	// must match the bound RTV exactly.
 	psoDesc.PS = { m_pPSApply->GetBufferPointer(), m_pPSApply->GetBufferSize() };
 	psoDesc.RTVFormats[0] = DisplayDeviceD3D12::SCENE_RT_FORMAT;
 	psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;

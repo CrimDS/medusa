@@ -477,6 +477,9 @@ bool RenderContext::beginScene()
 
 	// clear all lights from the device
 	m_Display->clearLights();
+	// clear the sun-candidate slot — DisplayEffectGodRays reads this at postRender
+	// time; NounStar::render re-submits the star's world position during scene.
+	m_Display->resetSunCandidate();
 	// set our shadow pass parameters
 	m_Display->setShadowPass(m_State.m_nMaxShadowLights,
 		m_State.m_vShadowFocus,

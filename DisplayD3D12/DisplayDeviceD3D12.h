@@ -43,13 +43,17 @@ public:
 		MAX_DSV_DESCRIPTORS		= 8,
 	};
 
-	// Format used by the FXAA intermediate scene RT.  10-bit-per-channel UNORM
-	// (1024 levels per RGB) instead of 8-bit (256 levels) — same 32 bpp footprint,
-	// 4× finer gradient precision.  Eliminates visible banding in soft sprite
-	// gradients (planet atmospheres, halos) where additive accumulation
-	// compounded 1/255 quantization steps into perceptible rings.  FXAA then
-	// resolves to the R8G8B8A8 swap chain at the end of frame.
-	static const DXGI_FORMAT SCENE_RT_FORMAT = DXGI_FORMAT_R10G10B10A2_UNORM;
+	// Format used by the FXAA intermediate scene RT.  R11G11B10_FLOAT — 32 bpp
+	// (same footprint as the previous R10G10B10A2_UNORM choice, critical under
+	// 32-bit+LAA) but an actual HDR floating-point target instead of LDR.
+	// Values above 1.0 survive through material writes, bloom accumulation, and
+	// SSAO composite; the FXAA pass then tonemaps + resolves to the R8G8B8A8
+	// swap chain at end of frame.  No alpha channel — audited against blend
+	// states in use (DEST_ALPHA / INV_DEST_ALPHA not used anywhere) so nothing
+	// reads RT alpha back as a blend factor.  Also retains the fine-gradient
+	// precision that the 10/10/10/2 choice originally bought (float mantissa
+	// easily exceeds 1024 levels over the low-range working zone).
+	static const DXGI_FORMAT SCENE_RT_FORMAT = DXGI_FORMAT_R11G11B10_FLOAT;
 
 	// Types
 	typedef Reference<DisplayDeviceD3D12>		Ref;
@@ -583,6 +587,20 @@ public:
 	bool							m_bFXAAEnabled;
 	bool							m_bSceneRTisRT;			// true when m_pSceneRT is in RENDER_TARGET state
 	bool							m_bRenderingPostFXAA;	// true after applyFXAA() bound the swap chain — UI/OVERLAY draws use R8G8B8A8 PSOs
+
+	// Auto-exposure plumbing.  DisplayEffectExposure (when active) writes a 1x1
+	// R32F texture each frame with the EMA-smoothed exposure multiplier, and
+	// sets m_nCurrentExposureSRVIndex to its write target's staging SRV slot.
+	// applyFXAA binds it at t1 for pre-tonemap scaling.  When the exposure
+	// effect isn't running, m_nCurrentExposureSRVIndex stays at
+	// m_nDefaultExposureSRVIndex, which is a 1x1 R32F=1.0 fallback initialized
+	// on the first applyFXAA call (via a RT clear, which is why the resource
+	// is allocated with RENDER_TARGET usage).
+	ComPtr<ID3D12Resource>			m_pDefaultExposureTex;
+	UINT							m_nDefaultExposureSRVIndex;
+	UINT							m_nDefaultExposureRTVIndex;
+	bool							m_bDefaultExposureInitialized;
+	UINT							m_nCurrentExposureSRVIndex;
 
 	// Static
 	static ModeList					sm_ModeList;
