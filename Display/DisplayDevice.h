@@ -326,6 +326,21 @@ public:
 	// → true, WM_EXITSIZEMOVE → false) so an interactive drag does a single
 	// coalesced ResizeBuffers on release instead of stalling on every WM_SIZE.
 	static bool						sm_bResizeSuspended;
+
+	// Generic shader-quality knob — read from the "shaderDetail" config
+	// setting (LOW/MEDIUM/HIGH/EXTREME) at startup.  Individual effects
+	// pick their own scale: e.g. DisplayEffectGodRays maps it to march
+	// sample count (24/48/64/96).  Default HIGH so existing configs that
+	// don't have shaderDetail keep current behaviour.
+	enum ShaderDetail
+	{
+		SHADER_DETAIL_LOW     = 0,
+		SHADER_DETAIL_MEDIUM  = 1,
+		SHADER_DETAIL_HIGH    = 2,
+		SHADER_DETAIL_EXTREME = 3,
+	};
+	static int						sm_nShaderDetail;
+
 	static DisplayDevice *			sm_pCacheDevice;					// device for used to precache graphics assets...
 
 	static const char *				describeFSAA( FSAA eFSAA );

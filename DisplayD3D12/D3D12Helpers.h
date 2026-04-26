@@ -162,7 +162,7 @@ struct CBPerFrame
 	// composite, against the sun's actual world position.
 	ShaderFloat4	vOccluders[32];
 	int				nNumOccluders;
-	int				pad_occ0;
+	int				nShadowPCFTaps;	// per-frame from DisplayDevice::sm_nShaderDetail (LOW=4, MED=8, HIGH/EXTREME=16)
 	int				pad_occ1;
 	int				pad_occ2;
 };

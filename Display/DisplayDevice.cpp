@@ -16,6 +16,7 @@ bool					DisplayDevice::sm_bUseFixedFunction = false;					// if true, then the f
 bool					DisplayDevice::sm_bWaitVB = true;								// wait for verticle blank
 bool					DisplayDevice::sm_bLightSecondaryPass = false;					// see header — default off, skip per-light render for SECONDARY pass
 bool					DisplayDevice::sm_bResizeSuspended = false;						// platform sets this during interactive window drags
+int						DisplayDevice::sm_nShaderDetail = DisplayDevice::SHADER_DETAIL_HIGH;	// shaderDetail config (LOW/MEDIUM/HIGH/EXTREME) — set in DarkSpaceClient init
 dword					DisplayDevice::sm_nTrianglesRendered = 0;						// total number of triangles rendered via lists
 dword					DisplayDevice::sm_nLinesRendered = 0;
 DisplayDevice *			DisplayDevice::sm_pCacheDevice = NULL;							// device for used to precache graphics assets...

@@ -25,6 +25,9 @@ struct CBSSAO
 	float			fIntensity;
 	float			fScale;
 	float			pad[2];
+	int				nGTAOSlices;	// per-frame from DisplayDevice::sm_nShaderDetail
+	int				nGTAOSteps;
+	int				pad2[2];
 };
 
 //---------------------------------------------------------------------------------------------------
@@ -357,6 +360,17 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	cb.fBias = m_fBias;
 	cb.fIntensity = m_fIntensity;
 	cb.fScale = 1.0f;
+
+	// Map shaderDetail → GTAO tap budget.  Total taps per pixel is
+	// (slices × steps × 2 directions).  HIGH = 2×4×2 = 16 = original.
+	switch ( DisplayDevice::sm_nShaderDetail )
+	{
+	case DisplayDevice::SHADER_DETAIL_LOW:		cb.nGTAOSlices = 1; cb.nGTAOSteps = 2; break;	// 4 taps
+	case DisplayDevice::SHADER_DETAIL_MEDIUM:	cb.nGTAOSlices = 2; cb.nGTAOSteps = 2; break;	// 8 taps
+	case DisplayDevice::SHADER_DETAIL_HIGH:		cb.nGTAOSlices = 2; cb.nGTAOSteps = 4; break;	// 16 taps (original)
+	case DisplayDevice::SHADER_DETAIL_EXTREME:	cb.nGTAOSlices = 3; cb.nGTAOSteps = 4; break;	// 24 taps
+	default:									cb.nGTAOSlices = 2; cb.nGTAOSteps = 4; break;
+	}
 
 	// --- Step 1: Compute SSAO (depth buffer → AO[0]) ---
 	// Transition depth to SRV

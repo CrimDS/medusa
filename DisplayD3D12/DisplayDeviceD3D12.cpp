@@ -2087,6 +2087,19 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 	for ( int i = occCount; i < 32; ++i )
 		m_CBPerFrame.vOccluders[i] = ShaderFloat4( 0, 0, 0, 0 );
 
+	// PCF tap count for the shadow cascade sampler in Default.hlsl.  Mapped
+	// from the global shaderDetail knob — biggest perf lever in the per-pixel
+	// lighting path because the loop runs for every shaded pixel near the
+	// shadow distance, doubled near cascade-blend boundaries.
+	switch ( DisplayDevice::sm_nShaderDetail )
+	{
+	case DisplayDevice::SHADER_DETAIL_LOW:		m_CBPerFrame.nShadowPCFTaps =  4; break;
+	case DisplayDevice::SHADER_DETAIL_MEDIUM:	m_CBPerFrame.nShadowPCFTaps =  8; break;
+	case DisplayDevice::SHADER_DETAIL_HIGH:		m_CBPerFrame.nShadowPCFTaps = 16; break;
+	case DisplayDevice::SHADER_DETAIL_EXTREME:	m_CBPerFrame.nShadowPCFTaps = 16; break;
+	default:									m_CBPerFrame.nShadowPCFTaps = 16; break;
+	}
+
 	UploadRingBuffer::Allocation alloc = allocateCB( sizeof(CBPerFrame) );
 	memcpy( alloc.cpuAddress, &m_CBPerFrame, sizeof(CBPerFrame) );
 
@@ -3857,6 +3870,36 @@ bool DisplayDeviceD3D12::updateClientArea( bool a_bAllowReset )
 	// the next frame sees the mismatch and does one coalesced resize.
 	if ( a_bAllowReset && sm_bResizeSuspended )
 		return true;
+
+	// Reconcile m_bWindowed with the actual window style.  setMode toggles
+	// WS_POPUP (fullscreen) vs WS_OVERLAPPEDWINDOW (windowed) and flips
+	// m_bWindowed in lockstep — but if a setMode call partially fails, or
+	// any other path ever restyles the window without going through
+	// setMode, the two can diverge.  In the divergent state the branches
+	// below pick the wrong path: e.g. m_bWindowed=false (fullscreen)
+	// against an actually-windowed HWND falls through the `else` branch
+	// which never calls ResizeBuffers, leaving the swap chain at its old
+	// fullscreen size while the window is small — content gets squished
+	// and UI elements (laid out from renderWindow()/m_ClientRectangle)
+	// extend past the visible window edges.
+	//
+	// Detect the mismatch via WS_POPUP and flip m_bWindowed to match
+	// reality, then invalidate m_ClientRectangle so the windowed-branch
+	// resize fires on this same call.  Cheaper and safer than re-entering
+	// setMode (which would also restyle the window we just observed and
+	// could re-trigger the inconsistency).
+	if ( a_bAllowReset && IsWindow( m_HWND ) )
+	{
+		const LONG style          = GetWindowLong( m_HWND, GWL_STYLE );
+		const bool bActualWindowed = ( style & WS_POPUP ) == 0;
+		if ( bActualWindowed != m_bWindowed )
+		{
+			TRACE( "updateClientArea: m_bWindowed=%d but window style is %s — reconciling",
+				m_bWindowed ? 1 : 0, bActualWindowed ? "WINDOWED" : "POPUP" );
+			m_bWindowed = bActualWindowed;
+			m_ClientRectangle = RectInt( 0, 0, -1, -1 );	// force resize on this pass
+		}
+	}
 
 	if ( m_bWindowed )
 	{

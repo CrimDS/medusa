@@ -72,7 +72,7 @@ struct CBGodRays
 	// planet's silhouette gets its rays killed.
 	float	vOccluders[32 * 4];
 	int		nNumOccluders;
-	int		fPadD;
+	int		nGodRaysSamples;	// PS_GodRays march sample count — set per-frame from DisplayDevice::sm_nShaderDetail
 	int		fPadE;
 	int		fPadF;
 };
@@ -492,6 +492,20 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 	XMMATRIX viewMat = pDev->getViewMatrix();
 	const int occCount = pDev->getOccluderCount();
 	cb.nNumOccluders = (occCount > 32) ? 32 : occCount;
+
+	// Map the global shaderDetail knob to PS_GodRays' march sample count.
+	// 96 (EXTREME) is the original/Mitchell-conservative value; 64 (HIGH)
+	// halves the depth-sample bandwidth with minimal visible change thanks
+	// to the jitter dither; 24 (LOW) is for low-end iGPUs where rays were
+	// the dominant frame cost.
+	switch ( DisplayDevice::sm_nShaderDetail )
+	{
+	case DisplayDevice::SHADER_DETAIL_LOW:		cb.nGodRaysSamples = 24; break;
+	case DisplayDevice::SHADER_DETAIL_MEDIUM:	cb.nGodRaysSamples = 48; break;
+	case DisplayDevice::SHADER_DETAIL_HIGH:		cb.nGodRaysSamples = 64; break;
+	case DisplayDevice::SHADER_DETAIL_EXTREME:	cb.nGodRaysSamples = 96; break;
+	default:									cb.nGodRaysSamples = 64; break;
+	}
 	for ( int i = 0; i < cb.nNumOccluders; ++i )
 	{
 		const DisplayDevice::OccluderInfo & o = pDev->getOccluder( i );
