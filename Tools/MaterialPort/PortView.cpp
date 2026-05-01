@@ -558,14 +558,29 @@ bool CPortView::CPreview::Initialize()
 	m_Cube->buildCube( Vector3(-1,-1,-1), Vector3(1,1,1) );
 	//m_Cube->buildSphere( Vector3( 0.0f ), 1.0f, 3 ); 
 
-	// make sure the shaders path is set correctly..
-	DisplayDevice::sm_sShadersPath = FileDisk::home() + "\\";
+	// The DX12 device resolves shaders as `<sm_sShadersPath>/Shaders/*.hlsl`.
+	// Pick a base that works in either layout:
+	//   - Deployed: Resourcer.exe sits next to the engine DLLs and a Shaders\
+	//     sibling (same as the client install).  Use <home>\.
+	//   - Dev tree: Resourcer.exe is at medusa\Tools\Bin\; HLSL sources live at
+	//     darkspace\Shaders\.  Walk up three levels and over.
+	{
+		CharString sHome = FileDisk::home();
+		if ( FileDisk::fileDate( sHome + "\\Shaders\\Default.hlsl" ) != 0 )
+			DisplayDevice::sm_sShadersPath = sHome + "\\";
+		else if ( FileDisk::fileDate( sHome + "\\..\\..\\..\\darkspace\\Shaders\\Default.hlsl" ) != 0 )
+			DisplayDevice::sm_sShadersPath = sHome + "\\..\\..\\..\\darkspace\\";
+		else
+			DisplayDevice::sm_sShadersPath = sHome + "\\";
+	}
 	// turn on shader debugging as well..
 	DisplayDevice::sm_bEnableShaderDebug = true;
 
 	// create the display device
-	DisplayDevice::Ref pDisplay = DisplayDevice::create( "DisplayDeviceD3D" );
-	if (! pDisplay->initialize( m_hWnd, NULL, true, true ) )
+	DisplayDevice::Ref pDisplay = DisplayDevice::create( "DisplayDeviceD3D12" );
+	if (! pDisplay )
+		pDisplay = DisplayDevice::create( "DisplayDeviceD3D" );
+	if (! pDisplay || !pDisplay->initialize( m_hWnd, NULL, true, true ) )
 	{
 		MessageBox( _T("Failed to initialize display device!") );
 		m_Context.setDisplay( NULL );

@@ -213,11 +213,11 @@ void CChildFrame::OnMDIActivate(BOOL bActivate, CWnd* pActivateWnd, CWnd* pDeact
 	if (bActivate)
 	{
 		CMenu* pTopMenu = AfxGetMainWnd()->GetMenu();
-		for(unsigned int i = 0; i < pTopMenu->GetMenuItemCount(); i++)
+		for(int i = 0; i < pTopMenu->GetMenuItemCount(); i++)
 		{
 			CMenu *pSubMenu = pTopMenu->GetSubMenu(i);
 			if (pSubMenu)
-				for(unsigned int j=0; j < pSubMenu->GetMenuItemCount(); j++)
+				for(int j=0; j < pSubMenu->GetMenuItemCount(); j++)
 				{
 					if (pSubMenu->GetMenuItemID(j) == ID_NODE_CREATE)
 					{

@@ -7,8 +7,10 @@
 
 #include "Port.h"
 
+#include "Display/DisplayDevice.h"
 #include "Draw/Font.h"
 #include "Draw/Draw.h"
+#include "File/FileDisk.h"
 
 
 
@@ -132,9 +134,28 @@ void CPortView::OnInitialUpdate()
 	FontPort * pDoc = dynamic_cast<FontPort *>(GetDocument());
 	ASSERT( pDoc );
 
+	// The DX12 device resolves shaders as `<sm_sShadersPath>/Shaders/*.hlsl`.
+	// Pick a base that works in either layout:
+	//   - Deployed: Resourcer.exe sits next to the engine DLLs and a Shaders\
+	//     sibling (same as the client install).  Use <home>\.
+	//   - Dev tree: Resourcer.exe is at medusa\Tools\Bin\; HLSL sources live at
+	//     darkspace\Shaders\.  Walk up three levels and over.
+	{
+		CharString sHome = FileDisk::home();
+		if ( FileDisk::fileDate( sHome + "\\Shaders\\Default.hlsl" ) != 0 )
+			DisplayDevice::sm_sShadersPath = sHome + "\\";
+		else if ( FileDisk::fileDate( sHome + "\\..\\..\\..\\darkspace\\Shaders\\Default.hlsl" ) != 0 )
+			DisplayDevice::sm_sShadersPath = sHome + "\\..\\..\\..\\darkspace\\";
+		else
+			DisplayDevice::sm_sShadersPath = sHome + "\\";
+	}
+
 	// initialize preview
-	m_Device = DisplayDevice::create( "DisplayDeviceD3D" );
-	m_Device->initialize( m_Preview.m_hWnd, NULL, true, true );
+	m_Device = DisplayDevice::create( "DisplayDeviceD3D12" );
+	if (! m_Device )
+		m_Device = DisplayDevice::create( "DisplayDeviceD3D" );
+	if ( m_Device )
+		m_Device->initialize( m_Preview.m_hWnd, NULL, true, true );
 
 	m_LogicalFont = pDoc->m_LogicalFont;
 	updateFontInformation();

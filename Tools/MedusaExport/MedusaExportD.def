@@ -1,6 +1,6 @@
 ; HydraExport.def : Declares the module parameters for the DLL.
 
-LIBRARY      "MedusaExportD"
+LIBRARY      "MedusaExportD.dle"
 
 EXPORTS
 ;	LibDescription			@1

@@ -2,7 +2,6 @@
 // DirDialog.cpp: implementation of the CDirDialog class.
 //////////////////////////////////////////////////////////////////////
 
-#define RESOURCERDOC_DLL
 #include "stdafx.h"
 #include "DirDialog.h"
 #include "shlobj.h"
