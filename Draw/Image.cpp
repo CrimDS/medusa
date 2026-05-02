@@ -50,6 +50,7 @@ BEGIN_PROPERTY_LIST( Image, Resource );
 		ADD_ENUM_OPTION( m_eFormat, ColorFormat::DXT1 );
 		ADD_ENUM_OPTION( m_eFormat, ColorFormat::DXT3 );
 		ADD_ENUM_OPTION( m_eFormat, ColorFormat::DXT5 );
+		ADD_ENUM_OPTION( m_eFormat, ColorFormat::BC7 );
 	ADD_PROPERTY( m_Size );
 	ADD_PROPERTY( m_HotSpot );
 	ADD_PROPERTY( m_ColorKeyEnable );
@@ -657,6 +658,10 @@ ImageCodec::Ref Image::allocateCodec( Format eFormat )
 		pUncasted = Factory::createNamedWidget( "ImageCodecDXT5D3D12" );
 		if (! pUncasted.valid() )
 			pUncasted = Factory::createNamedWidget( "ImageCodecDXT5" );
+		break;
+	case ColorFormat::BC7:
+		// DX12-only.  No D3D9 fallback name — BC7 is unsupported on D3D9.
+		pUncasted = Factory::createNamedWidget( "ImageCodecBC7D3D12" );
 		break;
 	default:
 		return NULL;

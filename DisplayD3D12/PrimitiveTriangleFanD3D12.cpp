@@ -67,8 +67,7 @@ bool PrimitiveTriangleFanD3D12::execute()
 
 void PrimitiveTriangleFanD3D12::clear() {}
 void PrimitiveTriangleFanD3D12::release() {
-	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else m_VB.Reset();
+	if ( m_VB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_TriangleCount = 0;
 }
 
@@ -160,8 +159,7 @@ bool PrimitiveTriangleFanLD3D12::execute()
 
 void PrimitiveTriangleFanLD3D12::clear() {}
 void PrimitiveTriangleFanLD3D12::release() {
-	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else m_VB.Reset();
+	if ( m_VB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_TriangleCount = 0;
 }
 

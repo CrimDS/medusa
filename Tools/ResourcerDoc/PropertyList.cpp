@@ -624,10 +624,14 @@ BOOL CPropertyList::PreCreateWindow(CREATESTRUCT& cs)
 	return TRUE;
 }
 
-void CPropertyList::MeasureItem(LPMEASUREITEMSTRUCT lpMeasureItemStruct) 
+void CPropertyList::MeasureItem(LPMEASUREITEMSTRUCT lpMeasureItemStruct)
 {
-	int nIndex = lpMeasureItemStruct->itemID;
-	if ( nIndex < GetCount() )
+	// itemID is UINT and may be (UINT)-1 during the one-shot WM_MEASUREITEM
+	// LBS_OWNERDRAWFIXED sends at list-box creation (no items yet, value
+	// undefined per Win32 docs).  Compare unsigned so 0xFFFFFFFF < 0 is
+	// correctly false and we fall through to the default height.
+	UINT nIndex = lpMeasureItemStruct->itemID;
+	if ( nIndex < (UINT)GetCount() )
 	{
 		PropertyListItem * pItem = (PropertyListItem *)GetItemDataPtr( nIndex );
 		lpMeasureItemStruct->itemHeight = pItem->nHeight; //pixels

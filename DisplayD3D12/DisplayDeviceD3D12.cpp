@@ -18,6 +18,7 @@
 #include "Standard/AutoLock.h"
 #include "Standard/ThreadPool.h"
 #include "Render3D/RenderContext.h"
+#include "Render3D/Material.h"
 #include "Draw/ImageCodec.h"
 
 #include "Display/Types.h"
@@ -509,6 +510,15 @@ void DisplayDeviceD3D12::setFilterMode( FilterMode eMode )
 void DisplayDeviceD3D12::release()
 {
 	lock();
+
+	// Drop cached PrimitiveSurfaces (textures) BEFORE we remove ourselves
+	// from sm_DeviceList — that way the surfaces' release paths can still
+	// see this device alive and defer-release their D3D12 resources through
+	// the proper queue.  Without this flush, the global Material::sm_SurfaceHash
+	// retains surfaces whose m_Texture was Detach()'d to NULL during the
+	// previous device's teardown, and the next scene reuses those zombie
+	// surfaces — manifesting as all-red rendering on scene re-open.
+	Material::flushSurfaceCache();
 
 	sm_DeviceList.removeSearch( this );
 	abortScene();
@@ -2055,6 +2065,47 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 	// Chunk 4 — diffuse SH coefficients for IBL ambient.
 	computeDiffuseSH( m_CBPerFrame.vSHCoefs );
 
+	// Chunk 5 — primary directional sun, exposed for shaders that need
+	// the raw sun (Planet.hlsl atmosphere/day-night, anything else that
+	// wants a vector and not the SH-baked irradiance).  Convention matches
+	// addDirectionalLight: vLightDirection points AWAY from the source,
+	// so direction TOWARD the sun is -vSunDir.xyz.  .w gates "sun present"
+	// for shaders that fall back when no directional light is bound.
+	{
+		bool bSunFound = false;
+		for ( auto it = m_Lights.begin(); it != m_Lights.end(); ++it )
+		{
+			const LightInfo & l = it->second;
+			if ( l.type == 3 /* directional */ )
+			{
+				m_CBPerFrame.vSunDir   = ShaderFloat4( l.dirX, l.dirY, l.dirZ, 1.0f );
+				m_CBPerFrame.vSunColor = ShaderFloat4(
+					srgbToLinear( l.r ), srgbToLinear( l.g ), srgbToLinear( l.b ), 0.0f );
+				bSunFound = true;
+				break;
+			}
+		}
+		if ( !bSunFound )
+		{
+			// Sane default: sun straight down, neutral white, gate closed.
+			m_CBPerFrame.vSunDir   = ShaderFloat4( 0.0f, -1.0f, 0.0f, 0.0f );
+			m_CBPerFrame.vSunColor = ShaderFloat4( 1.0f,  1.0f, 1.0f, 0.0f );
+		}
+	}
+
+	// Chunk 5.5 — visible sun world position.  NounStar::render submits
+	// each star it draws via submitSunCandidate, the closest wins, and
+	// we expose that here for shaders that want geometry-correct sun
+	// direction (Planet.hlsl) instead of the art-directable vSunDir
+	// vector that just inherits the NodeLight node's frame.k axis.
+	{
+		Vector3 vSunWorld;
+		if ( getSunCandidate( vSunWorld ) )
+			m_CBPerFrame.vSunWorldPos = ShaderFloat4( vSunWorld.x, vSunWorld.y, vSunWorld.z, 1.0f );
+		else
+			m_CBPerFrame.vSunWorldPos = ShaderFloat4( 0.0f, 0.0f, 0.0f, 0.0f );
+	}
+
 	// Chunk 4.5 — pack celestial occluders submitted this frame by
 	// NounPlanet::render et al.  Drive the directional sun shadow test
 	// in Default.hlsl (per-pixel) and the screen-space silhouette test
@@ -3420,6 +3471,24 @@ void DisplayDeviceD3D12::deferReleaseResource( ID3D12Resource * pResource )
 	m_DeferredResources[idx].push( pResource );
 }
 
+void DisplayDeviceD3D12::safeDeferReleaseResource( DisplayDevice * pDev, ID3D12Resource * pRes )
+{
+	if ( !pRes )
+		return;
+	// Look up pDev in the live-device list — pointer comparison only,
+	// never dereferences pDev.  Safe to call with a dangling pointer.
+	for ( int i = 0; i < sm_DeviceList.size(); ++i )
+	{
+		if ( sm_DeviceList[i] == pDev )
+		{
+			((DisplayDeviceD3D12 *)pDev)->deferReleaseResource( pRes );
+			return;
+		}
+	}
+	// Device gone (or never was on the list) — just drop the COM ref.
+	pRes->Release();
+}
+
 void DisplayDeviceD3D12::flushCommandList()
 {
 	if ( !m_pCommandList || !m_bCommandListOpen )
@@ -3859,6 +3928,7 @@ void DisplayDeviceD3D12::enumerateTextures()
 	m_TextureFormats.push( ColorFormat::DXT1 );
 	m_TextureFormats.push( ColorFormat::DXT3 );
 	m_TextureFormats.push( ColorFormat::DXT5 );
+	m_TextureFormats.push( ColorFormat::BC7 );
 }
 
 bool DisplayDeviceD3D12::updateClientArea( bool a_bAllowReset )
@@ -4108,6 +4178,7 @@ ColorFormat::Format DisplayDeviceD3D12::findFormat( DXGI_FORMAT format )
 	case DXGI_FORMAT_BC1_UNORM:			return ColorFormat::DXT1;
 	case DXGI_FORMAT_BC2_UNORM:			return ColorFormat::DXT3;
 	case DXGI_FORMAT_BC3_UNORM:			return ColorFormat::DXT5;
+	case DXGI_FORMAT_BC7_UNORM:			return ColorFormat::BC7;
 	default:							return ColorFormat::RGB8888;
 	}
 }
@@ -4126,6 +4197,7 @@ DXGI_FORMAT DisplayDeviceD3D12::findFormat( ColorFormat::Format format )
 	case ColorFormat::DXT1:		return DXGI_FORMAT_BC1_UNORM;
 	case ColorFormat::DXT3:		return DXGI_FORMAT_BC2_UNORM;
 	case ColorFormat::DXT5:		return DXGI_FORMAT_BC3_UNORM;
+	case ColorFormat::BC7:		return DXGI_FORMAT_BC7_UNORM;
 	default:					return DXGI_FORMAT_R8G8B8A8_UNORM;
 	}
 }

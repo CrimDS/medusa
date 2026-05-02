@@ -54,7 +54,7 @@
     <ClCompile>
       <AdditionalOptions>/MP %(AdditionalOptions)</AdditionalOptions>
       <Optimization>Disabled</Optimization>
-      <AdditionalIncludeDirectories>../;..\ThirdParty\squish-1.10;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>../;..\ThirdParty\squish-1.10;..\ThirdParty\bc7enc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_DEBUG;_WINDOWS;WIN32;DISPLAY_D3D12_DLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
@@ -88,7 +88,7 @@
     <ClCompile>
       <AdditionalOptions>/MP %(AdditionalOptions)</AdditionalOptions>
       <Optimization>MaxSpeed</Optimization>
-      <AdditionalIncludeDirectories>../;..\ThirdParty\squish-1.10;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>../;..\ThirdParty\squish-1.10;..\ThirdParty\bc7enc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>NDEBUG;_WINDOWS;WIN32;DISPLAY_D3D12_DLL;MEDUSA_TRACE_ON;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <BufferSecurityCheck>false</BufferSecurityCheck>
@@ -118,6 +118,8 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="..\ThirdParty\bc7enc\bc7enc.cpp" />
+    <ClCompile Include="..\ThirdParty\bc7enc\bc7decomp.cpp" />
     <ClCompile Include="..\ThirdParty\squish-1.10\alpha.cpp" />
     <ClCompile Include="..\ThirdParty\squish-1.10\clusterfit.cpp" />
     <ClCompile Include="..\ThirdParty\squish-1.10\colourblock.cpp" />
@@ -133,6 +135,7 @@
     <ClCompile Include="DisplayEffectGodRays.cpp" />
     <ClCompile Include="DisplayEffectHDR.cpp" />
     <ClCompile Include="DisplayEffectSSAO.cpp" />
+    <ClCompile Include="ImageCodecBC7.cpp" />
     <ClCompile Include="ImageCodecDXT.cpp" />
     <ClCompile Include="PrimitiveFactory.cpp" />
     <ClCompile Include="PrimitiveLineListD3D12.cpp" />
@@ -154,6 +157,7 @@
     <ClInclude Include="DisplayEffectGodRays.h" />
     <ClInclude Include="DisplayEffectHDR.h" />
     <ClInclude Include="DisplayEffectSSAO.h" />
+    <ClInclude Include="ImageCodecBC7.h" />
     <ClInclude Include="ImageCodecDXT.h" />
     <ClInclude Include="PrimitiveFactory.h" />
     <ClInclude Include="PrimitiveLineListD3D12.h" />

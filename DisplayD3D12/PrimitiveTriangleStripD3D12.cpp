@@ -53,8 +53,7 @@ bool PrimitiveTriangleStripD3D12::execute()
 
 void PrimitiveTriangleStripD3D12::clear() {}
 void PrimitiveTriangleStripD3D12::release() {
-	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else m_VB.Reset();
+	if ( m_VB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_TriangleCount = 0;
 }
 
@@ -96,8 +95,7 @@ bool PrimitiveTriangleStripLD3D12::execute()
 
 void PrimitiveTriangleStripLD3D12::clear() {}
 void PrimitiveTriangleStripLD3D12::release() {
-	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else m_VB.Reset();
+	if ( m_VB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_TriangleCount = 0;
 }
 

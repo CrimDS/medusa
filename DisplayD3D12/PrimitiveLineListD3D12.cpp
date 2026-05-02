@@ -50,8 +50,7 @@ bool PrimitiveLineListD3D12::execute()
 
 void PrimitiveLineListD3D12::clear() {}
 void PrimitiveLineListD3D12::release() {
-	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else m_VB.Reset();
+	if ( m_VB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_LineCount = 0;
 }
 
@@ -106,8 +105,7 @@ bool PrimitiveLineListLD3D12::execute()
 
 void PrimitiveLineListLD3D12::clear() {}
 void PrimitiveLineListLD3D12::release() {
-	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else m_VB.Reset();
+	if ( m_VB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	delete[] m_pLines; m_pLines = NULL; m_LineCount = 0;
 }
 

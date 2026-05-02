@@ -259,9 +259,13 @@ public:
 	// Sun candidate tracking — game code (e.g. NounStar::render) submits each
 	// star's world-space position; the closest submission wins per-frame.
 	// DisplayEffectGodRays reads the result at postRender time and projects
-	// to screen space as the ray origin.  RenderContext::beginScene resets
-	// the candidate so each frame starts clean.  Non-virtual base-class
-	// storage so both D3D9 and D3D12 paths get it for free.
+	// to screen space as the ray origin.  RenderContext::beginScene calls
+	// resetSunCandidate which only clears the per-frame distance comparator —
+	// m_vSunWorldPos and the validity flag are STICKY across frames so
+	// CBPerFrame fill (which happens BEFORE NounStar::render) sees last
+	// frame's sun position.  One-frame staleness is invisible for
+	// celestial-scale geometry.  Non-virtual base-class storage so both
+	// D3D9 and D3D12 paths get it for free.
 	void							submitSunCandidate(
 										const Vector3 & worldPos,
 										float distanceSq );		// closer distance wins

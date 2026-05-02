@@ -125,7 +125,8 @@ const char * ColorFormat::formatText( Format eFormat )
 		"JPEG",
 		"DXT1",
 		"DXT3",
-		"DXT5"
+		"DXT5",
+		"BC7"
 	};
 	if ( eFormat >= sizeof(FORMAT_TEXT)/sizeof(FORMAT_TEXT[0]) )
 		return "INVALID";

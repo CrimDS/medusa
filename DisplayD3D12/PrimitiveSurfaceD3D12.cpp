@@ -182,17 +182,8 @@ void PrimitiveSurfaceD3D12::release()
 	// descriptor still points at the texture, but D3D12 staging
 	// descriptors aren't lifetime-tracked — only the underlying resource
 	// is, and that's what we defer.
-	if ( m_pDevice )
-	{
-		DisplayDeviceD3D12 * pDev = (DisplayDeviceD3D12 *)m_pDevice;
-		if ( m_Texture )      pDev->deferReleaseResource( m_Texture.Detach() );
-		if ( m_UploadBuffer ) pDev->deferReleaseResource( m_UploadBuffer.Detach() );
-	}
-	else
-	{
-		m_Texture.Reset();
-		m_UploadBuffer.Reset();
-	}
+	if ( m_Texture )      DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_Texture.Detach() );
+	if ( m_UploadBuffer ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_UploadBuffer.Detach() );
 
 	// Free staging working buffer
 	delete[] m_pStagingData;
@@ -272,6 +263,7 @@ static DXGI_FORMAT GetDXGIFormat( ColorFormat::Format eFormat )
 	case ColorFormat::DXT1:		return DXGI_FORMAT_BC1_UNORM;
 	case ColorFormat::DXT3:		return DXGI_FORMAT_BC2_UNORM;
 	case ColorFormat::DXT5:		return DXGI_FORMAT_BC3_UNORM;
+	case ColorFormat::BC7:		return DXGI_FORMAT_BC7_UNORM;
 	default:					return DXGI_FORMAT_R8G8B8A8_UNORM;
 	}
 }
@@ -296,6 +288,7 @@ DXGI_FORMAT GetTypelessFormat( DXGI_FORMAT fmt )
 	case DXGI_FORMAT_BC1_UNORM:			return DXGI_FORMAT_BC1_TYPELESS;
 	case DXGI_FORMAT_BC2_UNORM:			return DXGI_FORMAT_BC2_TYPELESS;
 	case DXGI_FORMAT_BC3_UNORM:			return DXGI_FORMAT_BC3_TYPELESS;
+	case DXGI_FORMAT_BC7_UNORM:			return DXGI_FORMAT_BC7_TYPELESS;
 	default:							return fmt;	// no typeless variant
 	}
 }
@@ -316,6 +309,7 @@ DXGI_FORMAT GetSRVFormat( DXGI_FORMAT fmt, bool bSRGB )
 	case DXGI_FORMAT_BC1_UNORM:			return DXGI_FORMAT_BC1_UNORM_SRGB;
 	case DXGI_FORMAT_BC2_UNORM:			return DXGI_FORMAT_BC2_UNORM_SRGB;
 	case DXGI_FORMAT_BC3_UNORM:			return DXGI_FORMAT_BC3_UNORM_SRGB;
+	case DXGI_FORMAT_BC7_UNORM:			return DXGI_FORMAT_BC7_UNORM_SRGB;
 	default:							return fmt;	// no _SRGB variant
 	}
 }
@@ -359,6 +353,7 @@ int GetBytesPerPixel( DXGI_FORMAT format )
 		return 0;	// block compressed - handled separately
 	case DXGI_FORMAT_BC2_UNORM:
 	case DXGI_FORMAT_BC3_UNORM:
+	case DXGI_FORMAT_BC7_UNORM:
 		return 0;	// block compressed
 	default:
 		return 4;
@@ -379,7 +374,8 @@ bool IsBlockCompressed( DXGI_FORMAT format )
 {
 	return format == DXGI_FORMAT_BC1_UNORM ||
 		   format == DXGI_FORMAT_BC2_UNORM ||
-		   format == DXGI_FORMAT_BC3_UNORM;
+		   format == DXGI_FORMAT_BC3_UNORM ||
+		   format == DXGI_FORMAT_BC7_UNORM;
 }
 
 static UINT GetRowPitch( int width, DXGI_FORMAT format )

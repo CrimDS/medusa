@@ -39,16 +39,17 @@ public:
 		RGB4444,
 		RGB332,
 
-		// compressed formats - allocateFormat() not supported for these formats, ImageCodec can be used 
+		// compressed formats - allocateFormat() not supported for these formats, ImageCodec can be used
 		// to convert from these formats into RGB8888, then into other pixel formats.
-		JPEG,				
+		JPEG,
 		DXT1,
 		DXT3,
 		DXT5,
+		BC7,				// DX12-only.  16 bytes per 4x4 block; high-quality RGB+A.
 
 		INVALID,
 		FIRST = RGB888,
-		LAST = DXT5
+		LAST = BC7
 	};
 
 	// Accessors

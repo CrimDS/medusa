@@ -87,10 +87,8 @@ void PrimitiveTriangleListD3D12::release()
 	// the main render thread may still have a VBV referencing m_VB in a
 	// not-yet-executed command list.  Detach() transfers the AddRef
 	// directly to the device's deferred list.
-	if ( m_VB && m_pDevice )
-		((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else
-		m_VB.Reset();
+	if ( m_VB )
+		DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_VBSize = 0;
 }
 
@@ -211,17 +209,10 @@ void PrimitiveTriangleListID3D12::release()
 	// command list when NodeComplexMesh2::invalidate runs on SimThread.
 	// This is THE primitive used for procedurally-subdivided planet meshes
 	// (NodeComplexMesh2 holds an Array<PrimitiveTriangleListI::Ref>).
-	if ( m_pDevice )
-	{
-		DisplayDeviceD3D12 * pDev = (DisplayDeviceD3D12 *)m_pDevice;
-		if ( m_VB ) pDev->deferReleaseResource( m_VB.Detach() );
-		if ( m_IB ) pDev->deferReleaseResource( m_IB.Detach() );
-	}
-	else
-	{
-		m_VB.Reset();
-		m_IB.Reset();
-	}
+	// safeDeferReleaseResource handles the case where m_pDevice is dangling
+	// (device already destroyed) — see DisplayDeviceD3D12.h for context.
+	if ( m_VB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
+	if ( m_IB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_IB.Detach() );
 	m_Triangles = 0;
 	m_Verts = 0;
 }
@@ -337,10 +328,8 @@ void PrimitiveTriangleListLD3D12::clear()
 
 void PrimitiveTriangleListLD3D12::release()
 {
-	if ( m_VB && m_pDevice )
-		((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else
-		m_VB.Reset();
+	if ( m_VB )
+		DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_VBSize = 0;
 }
 
@@ -451,10 +440,8 @@ void PrimitiveTriangleListTLD3D12::clear()
 
 void PrimitiveTriangleListTLD3D12::release()
 {
-	if ( m_VB && m_pDevice )
-		((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else
-		m_VB.Reset();
+	if ( m_VB )
+		DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_VBSize = 0;
 }
 

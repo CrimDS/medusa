@@ -317,7 +317,7 @@ ColorFormat::Format Material::findBestFormat( DisplayDevice::Ref pDisplay, Image
 	for(int i=0;i<pDisplay->surfaceFormatCount();++i)
 	{
 		ColorFormat::Format eFormat = pDisplay->surfaceFormat(i);
-		if ( !bAllowCompressed && (eFormat == ColorFormat::DXT1 || eFormat == ColorFormat::DXT3 || eFormat == ColorFormat::DXT5) )
+		if ( !bAllowCompressed && (eFormat == ColorFormat::DXT1 || eFormat == ColorFormat::DXT3 || eFormat == ColorFormat::DXT5 || eFormat == ColorFormat::BC7) )
 			continue;				// no compressed format, skip..
 		if ( eFormat == pImage->format() )
 			return eFormat;			// found an exact match, always use those..

@@ -321,6 +321,7 @@
     <ClInclude Include="..\Standard\NBStack.h" />
     <ClInclude Include="..\Standard\Point.h" />
     <ClInclude Include="..\Standard\Process.h" />
+    <ClInclude Include="..\Standard\Progress.h" />
     <ClInclude Include="..\Standard\Queue.h" />
     <ClInclude Include="..\Standard\RandomNumber.h" />
     <ClInclude Include="..\Standard\Rect.h" />
@@ -517,6 +518,7 @@
     <ClCompile Include="..\Standard\MD5.cpp" />
     <ClCompile Include="..\Standard\Mutex.cpp" />
     <ClCompile Include="..\Standard\Process.cpp" />
+    <ClCompile Include="..\Standard\Progress.cpp" />
     <ClCompile Include="..\Standard\RandomNumber.cpp" />
     <ClCompile Include="..\Standard\Referenced.cpp" />
     <ClCompile Include="..\Standard\RegExpM.cpp" />

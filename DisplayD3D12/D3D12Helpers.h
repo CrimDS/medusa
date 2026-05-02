@@ -165,6 +165,29 @@ struct CBPerFrame
 	int				nShadowPCFTaps;	// per-frame from DisplayDevice::sm_nShaderDetail (LOW=4, MED=8, HIGH/EXTREME=16)
 	int				pad_occ1;
 	int				pad_occ2;
+
+	// Chunk 5 — primary directional sun.  vSunDir.xyz is the direction the
+	// LIGHT POINTS (i.e. away from the sun, matching addDirectionalLight
+	// convention); direction TOWARD the sun is -vSunDir.xyz.  vSunDir.w is
+	// 1.0 when a directional light is bound for this frame, 0.0 otherwise
+	// (use as a "sun present" gate in shaders that have a non-sun fallback).
+	// vSunColor.xyz is the sun's linear RGB; .w unused.  Filled by
+	// DisplayDeviceD3D12::updateCBPerFrame from the same m_Lights scan that
+	// drives computeDiffuseSH.  Consumed by Planet.hlsl for day/night and
+	// atmosphere rim, available to any future shader that wants the sun.
+	ShaderFloat4	vSunDir;
+	ShaderFloat4	vSunColor;
+
+	// Chunk 5.5 — the visible sun's world position (NOT the directional
+	// light's hint vector; vSunDir is an art-directable axis that won't
+	// agree with where the sun is drawn).  Populated from
+	// DisplayDevice::m_vSunWorldPos which is itself set by
+	// NounStar::render via submitSunCandidate (the closest submitted
+	// candidate wins).  vSunWorldPos.w = 1 when a sun was submitted this
+	// frame, 0 otherwise; shaders that want geometry-correct sun direction
+	// (Planet.hlsl) compute toSun = normalize(vSunWorldPos.xyz - worldPos)
+	// when w==1, fall back to vSunDir-based direction otherwise.
+	ShaderFloat4	vSunWorldPos;
 };
 
 struct CBPerObject

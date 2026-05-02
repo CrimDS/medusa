@@ -37,6 +37,7 @@ BEGIN_PROPERTY_LIST( ImagePort, Port );
 		ADD_ENUM_OPTION( m_eFormat, ColorFormat::DXT1 );
 		ADD_ENUM_OPTION( m_eFormat, ColorFormat::DXT3 );
 		ADD_ENUM_OPTION( m_eFormat, ColorFormat::DXT5 );
+		ADD_ENUM_OPTION( m_eFormat, ColorFormat::BC7 );
 	ADD_PROPERTY( m_HotSpot );
 	ADD_PROPERTY( m_DoCrop );
 	ADD_PROPERTY( m_Crop );
@@ -107,8 +108,8 @@ Resource::Ref ImagePort::createResource()
 				pImage->removeFrame( i );
 	}
 
-	// DXT formats require the image to be divisible by 4 ...
-	if ( m_eFormat == ColorFormat::DXT1 || m_eFormat == ColorFormat::DXT3 || m_eFormat == ColorFormat::DXT5 )
+	// Block-compressed formats require the image to be divisible by 4 ...
+	if ( m_eFormat == ColorFormat::DXT1 || m_eFormat == ColorFormat::DXT3 || m_eFormat == ColorFormat::DXT5 || m_eFormat == ColorFormat::BC7 )
 	{
 		SizeInt validSize( pImage->size() );
 		validSize.height &= ~0x3;			// remove the lower 2 bits

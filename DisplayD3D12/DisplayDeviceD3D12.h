@@ -67,6 +67,20 @@ public:
 	DisplayDeviceD3D12();
 	virtual ~DisplayDeviceD3D12();
 
+	// The class is __declspec(align(16)) for its XMMATRIX members
+	// (m_mView/m_mProj/m_mCurrentWorld).  On Win32, default operator new
+	// returns 8-byte-aligned memory.  Without an explicit aligned new/delete
+	// pair, the compiler-synthesized deleting destructor can compute a
+	// "block start" address that the heap doesn't recognize, tripping
+	// _CrtIsValidHeapPointer at delete time (manifests as RtlValidateHeap
+	// failure on a `this - 32` address when closing a 3D scene MDI child).
+	// Routing through _aligned_malloc / _aligned_free keeps the alloc/free
+	// pair consistent and lets the heap validate the block correctly.
+	void * operator new( size_t nSize )    { return _aligned_malloc( nSize, 16 ); }
+	void * operator new[]( size_t nSize )  { return _aligned_malloc( nSize, 16 ); }
+	void   operator delete( void * pBlock )    { _aligned_free( pBlock ); }
+	void   operator delete[]( void * pBlock )  { _aligned_free( pBlock ); }
+
 	// DisplayDevice interface - Accessors
 	virtual bool					isLocked() const;
 	virtual int						modeCount() const;
@@ -144,6 +158,21 @@ public:
 	// still bound in an in-flight command list — the device retains it
 	// until the corresponding frame's fence signals.
 	void							deferReleaseResource( ID3D12Resource * pResource );
+
+	// Safe wrapper around deferReleaseResource: handles the case where the
+	// device has already been destroyed but a primitive still holds a raw
+	// pointer to it.  Happens during MDI teardown when the property panel
+	// (CPropertyView) closes AFTER the 3D scene MDI child — by that time
+	// CSceneRender → RenderContext → Reference<DisplayDevice> has already
+	// released the device, but the scene-graph-owned primitives (held by
+	// NodeComplexMesh2, etc.) only release later from the document tear-
+	// down, and their m_pDevice raw pointer is dangling.  We consult
+	// sm_DeviceList — pointer-only lookup, never dereferences pDev — to
+	// know whether the device is still live.  If it is, we route through
+	// the normal deferred-release path; if it isn't, we just COM-Release
+	// the resource directly (the GPU is well past any frame that bound it
+	// since the device is destroyed, so deferral is unnecessary).
+	static void						safeDeferReleaseResource( class DisplayDevice * pDev, ID3D12Resource * pRes );
 
 	// Effect factory registration
 	void							registerEffect( const char * pName, Factory * pFactory );

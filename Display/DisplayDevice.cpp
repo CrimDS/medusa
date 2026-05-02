@@ -50,20 +50,26 @@ IMPLEMENT_ABSTRACT_FACTORY( DisplayDevice, Widget );
 
 DisplayDevice::DisplayDevice()
 	: m_vSunWorldPos( Vector3::ZERO )
-	, m_fSunDistSq( 0.0f )
+	, m_fSunDistSq( 3.4028235e+38f )	// FLT_MAX
 	, m_bSunCandidateValid( false )
 	, m_nOccluderCount( 0 )
 {}
 
 //----------------------------------------------------------------------------
 // Sun candidate tracking — see DisplayDevice.h comments.  Closest submission
-// wins; resetSunCandidate runs at beginScene so stale state from a previous
-// scene (e.g. ship-select lobby → gameplay) doesn't leak in.
+// wins.  Note that m_bSunCandidateValid is STICKY across frames: once any
+// sun has been submitted, it remains valid forever (until cross-scene
+// transitions wipe state).  This is required because bindPerFrameCB runs
+// BEFORE the scene's NounStar::render submits the current frame's sun, so
+// shaders that consume m_vSunWorldPos at CB-fill time would otherwise see
+// "no sun" every frame.  resetSunCandidate clears only the per-frame
+// distance comparator so the closest-wins logic still works each frame.
+// One frame of staleness is invisible for celestial-scale geometry.
 //----------------------------------------------------------------------------
 
 void DisplayDevice::submitSunCandidate( const Vector3 & worldPos, float distanceSq )
 {
-	if ( !m_bSunCandidateValid || distanceSq < m_fSunDistSq )
+	if ( distanceSq < m_fSunDistSq )
 	{
 		m_vSunWorldPos       = worldPos;
 		m_fSunDistSq         = distanceSq;
@@ -73,7 +79,11 @@ void DisplayDevice::submitSunCandidate( const Vector3 & worldPos, float distance
 
 void DisplayDevice::resetSunCandidate()
 {
-	m_bSunCandidateValid = false;
+	// Reset only the per-frame distance comparator.  m_vSunWorldPos and
+	// m_bSunCandidateValid persist so consumers polling at bindPerFrameCB
+	// time (before any NounStar::render runs) get last frame's sun rather
+	// than zero / a stale flag.
+	m_fSunDistSq = 3.4028235e+38f;	// FLT_MAX
 }
 
 bool DisplayDevice::getSunCandidate( Vector3 & outWorldPos ) const

@@ -7,10 +7,12 @@
 #include "Resource.h"
 
 #include "Debug/Error.h"
+#include "Standard/Progress.h"
 #include "Standard/Registry.h"
 #include "Standard/Process.h"
 #include "Tools/ResourcerDoc/ResourcerDoc.h"
 #include "Tools/ResourcerDoc/Port.h"
+#include "Tools/ResourcerDoc/ProgressDlg.h"
 #include ".\resourcer.h"
 
 #pragma warning(disable:4800)	// D:\Projects\Hydra\Tools\Resourcer\Resourcer.cpp(96) : warning C4800: 'unsigned int' : forcing value to bool 'true' or 'false' (performance warning)
@@ -91,9 +93,37 @@ BOOL CResourcerApp::InitInstance()
 	// Change the registry key under which our settings are stored.
 	// TODO: You should modify this string to be something appropriate
 	// such as the name of your company or organization.
+#ifdef _DEBUG
+	// Use a separate registry section in Debug so the LibPath0..N port-DLL
+	// list (which holds *D.dll paths in Debug, *.dll paths in Release) does
+	// not stomp the other config's list, and Debug doesn't accidentally try
+	// to load Release-built DLLs (causing both Medusa.dll and MedusaD.dll
+	// to coexist in-process with split factory singletons).
+	SetRegistryKey(_T("Palestar (Debug)"));
+#else
 	SetRegistryKey(_T("Palestar"));
+#endif
 
 	LoadStdProfileSettings(8);  // Load standard INI file options (including MRU)
+
+	// Wire the global Progress hook so long-running operations (BC7
+	// encode, image import, etc.) drive the modeless CProgressDlg
+	// instead of leaving the UI looking frozen.
+	Progress::setReporter( &ProgressBridge::report );
+
+	// Force-load DisplayD3D12 at startup so its codecs (including
+	// ImageCodecBC7D3D12) are registered with the Factory before the
+	// user does anything that needs them.  Without this, BC7 encode
+	// fails with "Failed to set pixel format" if you open an ImagePort
+	// before opening a 3D scene (the 3D scene path is what otherwise
+	// drags DisplayD3D12.dll in via the render context).  DisplayD3D9
+	// loads earlier as a transitive dependency of Render3D, hence DXT
+	// codecs already work without this.
+#ifdef _DEBUG
+	::LoadLibrary( _T("DisplayD3D12D.dll") );
+#else
+	::LoadLibrary( _T("DisplayD3D12.dll") );
+#endif
 
 	// add the document templates to this application
 	CResourcerDoc::addDocTemplate();

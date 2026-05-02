@@ -337,7 +337,21 @@ void Port::loadPortLibs()
 		}
 	}
 	else
+	{
 		CChoosePorts().DoModal();
+
+		// Persist the freshly-picked paths to registry RIGHT NOW rather than
+		// waiting for unloadPortLibs() at clean shutdown.  An abnormal exit
+		// (heap corruption, AV, force-quit) skips ExitInstance and would
+		// otherwise lose the paths the user just typed in.
+		CString keyString;
+		pApp->WriteProfileInt( SECTION, TEXT("LibPathCount"), s_PortLibPaths.size() );
+		for(int i=0;i<s_PortLibPaths.size();i++)
+		{
+			keyString.Format( TEXT("LibPath%d"), i );
+			pApp->WriteProfileString( SECTION, keyString, s_PortLibPaths[i] );
+		}
+	}
 
 	// load the dll's
 	for(int i=0;i<s_PortLibPaths.size();i++)

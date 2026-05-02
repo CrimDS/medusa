@@ -8,6 +8,7 @@
 #include "File/Stream.h"
 #include "Debug/Assert.h"
 #include "Debug/Trace.h"
+#include "Standard/Progress.h"
 
 #include <stdarg.h>
 
@@ -177,13 +178,64 @@ static inline u8 HexNibble( u8 c )
 
 void InStream::readHexLine( void * pDst, int bytes ) const
 {
-	const char * pLine = readLine();
-	for(int i=0;i<bytes;++i)
+	if (! m_pFile.valid() )
+		throw File::FileError();
+	if ( bytes <= 0 )
 	{
-		u8 d = HexNibble( *pLine++ ) << 4;
-		d |= HexNibble( *pLine++ );
-		((u8 *)pDst)[i] = d;
+		// Empty payload — still consume the trailing newline.
+		char nl;
+		if ( m_pFile->read( &nl, 1 ) != 1 )
+			throw File::FileError();
+		return;
 	}
+
+	// Bypass readLine().  readLine reads ONE BYTE per syscall via
+	// m_pFile->read; for a 128 MB Buffer (256 MB of hex on disk) that's
+	// ~256 million syscalls — minutes of wall-clock for a single image
+	// blob.  Reading in 64 KB chunks drops syscall count by ~65000x and
+	// also avoids growing an intermediate 256 MB m_pLineBuffer in 2x
+	// reallocations (which on 32-bit can fragment / fail entirely).
+	//
+	// Format guaranteed by writeHexLine: exactly bytes*2 hex chars
+	// followed by a single '\n'.  No escape sequences (writeLine called
+	// with bEscape=false) so we can decode straight from the chunk.
+	const int CHUNK = 65536;
+	char chunk[ CHUNK ];
+	const int nHex = bytes * 2;
+	int nRead = 0;			// hex chars consumed
+	int nDecoded = 0;		// output bytes produced
+
+	while ( nRead < nHex )
+	{
+		int nWant = nHex - nRead;
+		if ( nWant > CHUNK ) nWant = CHUNK;
+		// Hex pairs must not split across reads.
+		if ( nWant & 1 ) nWant -= 1;
+		if ( nWant <= 0 ) nWant = 2;
+
+		if ( m_pFile->read( chunk, nWant ) != nWant )
+			throw File::FileError();
+		nRead += nWant;
+
+		for ( int i = 0; i < nWant; i += 2 )
+		{
+			u8 d = HexNibble( (u8)chunk[i] ) << 4;
+			d |= HexNibble( (u8)chunk[i+1] );
+			((u8 *)pDst)[ nDecoded++ ] = d;
+		}
+
+		// Progress feedback for big blobs (e.g. 128 MB image deserialise).
+		// For small ones the dialog never gets created — staticReport's
+		// singleton is built lazily and torn down at completion.
+		Progress::report( nDecoded, bytes, "Reading data" );
+	}
+
+	// Consume the line terminator.
+	char nl;
+	if ( m_pFile->read( &nl, 1 ) != 1 )
+		throw File::FileError();
+	if ( nl != '\n' )
+		throw File::FileError();
 }
 
 //------------------------------------------------------------------------------------

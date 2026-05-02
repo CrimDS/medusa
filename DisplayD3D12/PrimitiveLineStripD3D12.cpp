@@ -45,8 +45,7 @@ bool PrimitiveLineStripD3D12::execute()
 
 void PrimitiveLineStripD3D12::clear() {}
 void PrimitiveLineStripD3D12::release() {
-	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else m_VB.Reset();
+	if ( m_VB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_VertexCount = 0;
 }
 
@@ -84,8 +83,7 @@ bool PrimitiveLineStripLD3D12::execute()
 
 void PrimitiveLineStripLD3D12::clear() {}
 void PrimitiveLineStripLD3D12::release() {
-	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else m_VB.Reset();
+	if ( m_VB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_VertexCount = 0;
 }
 
@@ -154,8 +152,7 @@ bool PrimitiveLineStripTLD3D12::execute()
 
 void PrimitiveLineStripTLD3D12::clear() {}
 void PrimitiveLineStripTLD3D12::release() {
-	if ( m_VB && m_pDevice ) ((DisplayDeviceD3D12 *)m_pDevice)->deferReleaseResource( m_VB.Detach() );
-	else m_VB.Reset();
+	if ( m_VB ) DisplayDeviceD3D12::safeDeferReleaseResource( m_pDevice, m_VB.Detach() );
 	m_VertexCount = 0;
 }
 
