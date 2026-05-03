@@ -56,6 +56,13 @@ public:
 	void							upgradePorts( const char * pMask, bool bRecurse );
 	void							touchPorts( const char * pMask, bool bRecurse );
 
+	// Batch progress hooks: callers wrap a sequence of port operations
+	// (build/touch/upgrade) in beginPortBatch/endPortBatch so the doc can
+	// drive a progress UI.  Stubs for now — no UI driver wired up yet.
+	int								countPorts( const char * pMask, bool bRecurse );
+	void							beginPortBatch( const char * pLabel, int nTotal );
+	void							endPortBatch();
+
 	void							lockMessageQueue( bool bLock );
 	void							pushMessage( const char * pMessage );
 	void							flushMessages();

@@ -382,7 +382,9 @@ void CPropertyList::SetSelected( int nSelected )
 	// set the current selection in the ListBox control object to match...
 	SetCurSel( m_nCurSel );
 
-	PropertyListItem * pItem = m_nCurSel >= 0 ? (PropertyListItem *)GetItemDataPtr( m_nCurSel ) : NULL;
+	PropertyListItem * pItem = ( m_nCurSel >= 0 && m_nCurSel < GetCount() )
+		? (PropertyListItem *)GetItemDataPtr( m_nCurSel )
+		: NULL;
 	if ( pItem == NULL )
 		return;
 	if ( pItem->bCanOpen )
@@ -756,7 +758,7 @@ int CPropertyList::OnCreate(LPCREATESTRUCT lpCreateStruct)
 
 void CPropertyList::OnSelchangeCmbBox()
 {
-	if ( m_pComboBox != NULL && m_nCurSel >= 0 )
+	if ( m_pComboBox != NULL && m_nCurSel >= 0 && m_nCurSel < GetCount() )
 	{
 		int nSelected = m_pComboBox->GetCurSel();
 		if ( nSelected >= 0 )
@@ -772,7 +774,7 @@ void CPropertyList::OnSelchangeCmbBox()
 
 void CPropertyList::OnChangeEditBox()
 {
-	if ( m_pEditBox != NULL && m_nCurSel >= 0 )
+	if ( m_pEditBox != NULL && m_nCurSel >= 0 && m_nCurSel < GetCount() )
 	{
 		CString sText;
 		m_pEditBox->GetWindowText( sText );
@@ -785,7 +787,7 @@ void CPropertyList::OnChangeEditBox()
 
 void CPropertyList::OnEditButton()
 {
-	if ( m_pEditButton != NULL && m_nCurSel >= 0 )
+	if ( m_pEditButton != NULL && m_nCurSel >= 0 && m_nCurSel < GetCount() )
 	{
 		PropertyListItem * pItem = (PropertyListItem *)GetItemDataPtr( m_nCurSel );
 		if ( pItem->pProperty->flags() & PF_FILENAME )
@@ -891,7 +893,7 @@ void CPropertyList::OnEditButton()
 
 VOID CPropertyList::OnOpenButton()
 {
-	if ( m_pEditButton != NULL && m_nCurSel >= 0 )
+	if ( m_pEditButton != NULL && m_nCurSel >= 0 && m_nCurSel < GetCount() )
 	{
 		PropertyListItem * pItem = (PropertyListItem *)GetItemDataPtr( m_nCurSel );
 		if ( pItem->pProperty->flags() & (PF_FILENAME|PF_PORT) )

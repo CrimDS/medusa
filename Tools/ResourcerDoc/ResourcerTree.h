@@ -41,6 +41,7 @@ public:
 	//{{AFX_VIRTUAL(ResourcerTree)
 	public:
 	virtual void OnInitialUpdate();
+	virtual BOOL PreTranslateMessage(MSG* pMsg);
 	protected:
 	virtual void OnDraw(CDC* pDC);      // overridden to draw this view
 	virtual BOOL PreCreateWindow(CREATESTRUCT& cs);

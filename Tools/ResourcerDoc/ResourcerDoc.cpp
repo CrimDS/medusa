@@ -589,6 +589,23 @@ void CResourcerDoc::touchPorts( const char * pMask, bool bRecurse )
 	}
 }
 
+// Batch progress hooks — currently no-op stubs.  Callers wrap port
+// operations (build/touch/upgrade) in begin/end so the doc can later
+// drive a progress UI; for now we just satisfy the call graph and
+// return a count of 0 from countPorts so callers don't pre-divide.
+int CResourcerDoc::countPorts( const char * /*pMask*/, bool /*bRecurse*/ )
+{
+	return 0;
+}
+
+void CResourcerDoc::beginPortBatch( const char * /*pLabel*/, int /*nTotal*/ )
+{
+}
+
+void CResourcerDoc::endPortBatch()
+{
+}
+
 void CResourcerDoc::pushMessage( const char * pMessage )
 {
 	LOG_STATUS( "Resourcer", pMessage );

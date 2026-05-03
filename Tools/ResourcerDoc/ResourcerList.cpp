@@ -407,19 +407,25 @@ void ResourcerList::OnUpdateEditCut(CCmdUI* pCmdUI)
 	pCmdUI->Enable( GetListCtrl().GetSelectedCount() > 0 ? TRUE : FALSE );
 }
 
-void ResourcerList::OnEditPaste() 
+void ResourcerList::OnEditPaste()
 {
 	CResourcerDoc *pDoc = dynamic_cast<CResourcerDoc *>(GetDocument());
 	ASSERT( pDoc );
 
 	if (!OpenClipboard())
+	{
+		MessageBox( _T("Failed to open clipboard.  Another application may be holding it open."),
+			_T("Paste"), MB_OK | MB_ICONWARNING );
 		return;
+	}
 
 	HGLOBAL hPaste = GetClipboardData( CF_PRIVATEFIRST );
 	if ( hPaste == NULL )
 	{
 		// no data, close the clipboard and exit..
 		CloseClipboard();
+		MessageBox( _T("Clipboard does not contain any port data.  Copy or cut a port first."),
+			_T("Paste"), MB_OK | MB_ICONINFORMATION );
 		return;
 	}
 
@@ -433,7 +439,11 @@ void ResourcerList::OnEditPaste()
 		input >> validateId;
 
 		if ( validateId != RESOURCER_CLIP_ID )
-			return;			// invalid clipboard data, return...
+		{
+			MessageBox( _T("Clipboard data is not in Resourcer format."),
+				_T("Paste"), MB_OK | MB_ICONWARNING );
+			return;
+		}
 
 		int count;
 		input >> count;
@@ -499,26 +509,32 @@ void ResourcerList::OnPortsShellopen()
 		}
 }
 
-void ResourcerList::OnPortsTouch() 
+void ResourcerList::OnPortsTouch()
 {
 	CResourcerDoc *pDoc = dynamic_cast<CResourcerDoc *>(GetDocument());
 	ASSERT( pDoc );
 
+	const int nSelected = GetListCtrl().GetSelectedCount();
+	pDoc->beginPortBatch( "Touching", nSelected );
 	for(int i=0;i<GetListCtrl().GetItemCount(); i++ )
 		if (GetListCtrl().GetItemState(i,LVIS_SELECTED))
 			pDoc->touchPorts( pDoc->currentDirectory() + GetListCtrl().GetItemText(i,0), false );
+	pDoc->endPortBatch();
 }
 
-void ResourcerList::OnPortsUpgrade() 
+void ResourcerList::OnPortsUpgrade()
 {
 	CResourcerDoc *pDoc = dynamic_cast<CResourcerDoc *>(GetDocument());
 	ASSERT( pDoc );
 
+	const int nSelected = GetListCtrl().GetSelectedCount();
+	pDoc->beginPortBatch( "Upgrading", nSelected );
 	for(int i=0;i<GetListCtrl().GetItemCount(); i++ )
 	{
 		if (GetListCtrl().GetItemState(i,LVIS_SELECTED))
 			pDoc->upgradePorts( pDoc->currentDirectory() + GetListCtrl().GetItemText(i,0), false );
 	}
+	pDoc->endPortBatch();
 }
 
 void ResourcerList::OnUpdatePortsUpgrade(CCmdUI* pCmdUI) 
@@ -643,19 +659,23 @@ bool ResourcerList::ImportFile( const char * a_pFile )
 	return true;
 }
 
-void ResourcerList::OnDocumentBuildselected() 
+void ResourcerList::OnDocumentBuildselected()
 {
 	CResourcerDoc *pDoc = dynamic_cast<CResourcerDoc *>(GetDocument());
 	ASSERT( pDoc );
 
 	pDoc->beginBuild();
 
-	CWaitCursor	wait;	
+	const int nSelected = GetListCtrl().GetSelectedCount();
+	pDoc->beginPortBatch( "Building", nSelected );
+
+	CWaitCursor	wait;
 
 	for(int i=0;i<GetListCtrl().GetItemCount(); i++ )
 		if (GetListCtrl().GetItemState(i,LVIS_SELECTED))
 			pDoc->updateBroker( pDoc->currentDirectory() + GetListCtrl().GetItemText(i,0) );
-	
+
+	pDoc->endPortBatch();
 	pDoc->endBuild();
 }
 

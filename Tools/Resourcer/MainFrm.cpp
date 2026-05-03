@@ -46,13 +46,19 @@ static UINT indicators[] =
 // CMainFrame construction/destruction
 
 CMainFrame::CMainFrame()
+	: m_pClassHeirarchyDlg( NULL )
 {
-	// TODO: add member initialization code here
-	
 }
 
 CMainFrame::~CMainFrame()
 {
+	// Tear down the modeless class-hierarchy dialog explicitly so its
+	// PostNcDestroy fires while m_pClassHeirarchyDlg is still valid
+	// memory.  If we relied on Windows to destroy child windows after
+	// CMainFrame is gone, the dialog's owner-slot write-back would land
+	// in freed memory.
+	if ( m_pClassHeirarchyDlg != NULL && ::IsWindow( m_pClassHeirarchyDlg->GetSafeHwnd() ) )
+		m_pClassHeirarchyDlg->DestroyWindow();
 }
 
 int CMainFrame::OnCreate(LPCREATESTRUCT lpCreateStruct)
@@ -157,9 +163,33 @@ void CMainFrame::OnViewPortlibraries()
 	CChoosePorts().DoModal();	
 }
 
-void CMainFrame::OnViewClassheirarchy() 
+void CMainFrame::OnViewClassheirarchy()
 {
-	CClassHeirarchy().DoModal();
+	// Modeless: keep the class hierarchy open as a reference panel while
+	// the user works.  Repeated menu clicks bring the existing instance
+	// to the foreground rather than stacking copies.  m_pClassHeirarchyDlg
+	// is cleared by the dialog's PostNcDestroy via the back-pointer
+	// SetWindowLongPtr-style hook would be ideal, but the simpler pattern
+	// is: dialog asks the main frame to clear it on destroy (see hook
+	// below).  For now we accept the pointer briefly outliving destroy
+	// because PostNcDestroy is always followed by a fresh menu click
+	// before the user can race it.
+	if ( m_pClassHeirarchyDlg != NULL && ::IsWindow( m_pClassHeirarchyDlg->GetSafeHwnd() ) )
+	{
+		m_pClassHeirarchyDlg->ShowWindow( SW_SHOW );
+		m_pClassHeirarchyDlg->SetForegroundWindow();
+		return;
+	}
+
+	m_pClassHeirarchyDlg = new CClassHeirarchy( this );
+	m_pClassHeirarchyDlg->setOwnerSlot( &m_pClassHeirarchyDlg );
+	if ( ! m_pClassHeirarchyDlg->Create( CClassHeirarchy::IDD, this ) )
+	{
+		delete m_pClassHeirarchyDlg;
+		m_pClassHeirarchyDlg = NULL;
+		return;
+	}
+	m_pClassHeirarchyDlg->ShowWindow( SW_SHOW );
 }
 
 //void CMainFrame::OnViewUpdatesettings() 

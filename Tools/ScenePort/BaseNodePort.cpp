@@ -6,10 +6,11 @@
 #pragma warning( disable: 4786 )	// identifier was truncated to '255' characters in the browser information
 
 #include "StdAfx.h"
-#include "Port.h" 
+#include "Port.h"
 #include "ChildFrame.h"
 #include "BaseNodePort.h"
 
+#include "Debug/Log.h"
 #include "Tools/ResourcerDoc/ResourcerDoc.h"
 
 //----------------------------------------------------------------------------
@@ -348,7 +349,12 @@ BaseNode * BaseNodePort::createNode()
 	if ( !m_pTemplate.valid() || m_pTemplate->factory()->classKey() != m_Class )
 	{
 		Factory * pFactory = Factory::findFactory( m_Class );
-		if ( pFactory != NULL )
+		if ( pFactory == NULL )
+		{
+			LOG_WARNING( "BaseNodePort", "createNode(%s): findFactory(m_Class=%s) returned NULL",
+				m_Name.cstr(), m_Class.string().cstr() );
+		}
+		else
 		{
 			// make sure the class key contained in the port isn't a deprecated class key
 			// go ahead and update it anytime we update the template object, otherwise
@@ -356,11 +362,23 @@ BaseNode * BaseNodePort::createNode()
 			m_Class = pFactory->classKey();
 
 			Widget * pUncasted = pFactory->createWidget();
-			if ( pUncasted != NULL )
+			if ( pUncasted == NULL )
+			{
+				LOG_WARNING( "BaseNodePort", "createNode(%s): pFactory(%s)->createWidget() returned NULL",
+					m_Name.cstr(), pFactory->className() );
+			}
+			else
 			{
 				BaseNode * pNode = WidgetCast<BaseNode>( pUncasted );
 				if ( pNode != NULL )
+				{
 					m_pTemplate = pNode;
+				}
+				else
+				{
+					LOG_WARNING( "BaseNodePort", "createNode(%s): WidgetCast<BaseNode>(%s) returned NULL (factory hierarchy lost?)",
+						m_Name.cstr(), pUncasted->factory()->className() );
+				}
 
 				if (! m_pTemplate.valid() )
 					delete pUncasted;
@@ -371,10 +389,17 @@ BaseNode * BaseNodePort::createNode()
 	if ( m_pTemplate.valid() )
 	{
 		BaseNode * pCopy = (BaseNode *)m_pTemplate->copy();
+		if ( pCopy == NULL )
+		{
+			LOG_WARNING( "BaseNodePort", "createNode(%s): m_pTemplate(%s)->copy() returned NULL",
+				m_Name.cstr(), m_pTemplate->factory()->className() );
+		}
 		initializeNode( pCopy );
 		return pCopy;
 	}
 
+	LOG_WARNING( "BaseNodePort", "createNode(%s): m_pTemplate invalid after recreate path; m_Class=%s m_Type=%s",
+		m_Name.cstr(), m_Class.string().cstr(), m_Type.string().cstr() );
 	return NULL;
 }
 

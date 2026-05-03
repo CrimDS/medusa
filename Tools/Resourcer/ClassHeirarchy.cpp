@@ -15,7 +15,7 @@
 
 
 CClassHeirarchy::CClassHeirarchy(CWnd* pParent /*=NULL*/)
-	: CDialog(CClassHeirarchy::IDD, pParent)
+	: CDialog(CClassHeirarchy::IDD, pParent), m_ppOwnerSlot( NULL )
 {
 	//{{AFX_DATA_INIT(CClassHeirarchy)
 		// NOTE: the ClassWizard will add member initialization here
@@ -64,5 +64,33 @@ void CClassHeirarchy::buildTree( HTREEITEM parent, const ClassKey &parentKey )
 
 		buildTree( item, key );
 	}
+}
+
+//---------------------------------------------------------------------------
+// Modeless lifetime: dialog is heap-allocated by CMainFrame and deletes
+// itself once Windows finishes destroying its HWND.  OnOK / OnCancel
+// (default Enter / Esc handlers) need to call DestroyWindow rather than
+// EndDialog because we never DoModal'd; PostNcDestroy then cleans up the
+// C++ object.
+//---------------------------------------------------------------------------
+
+void CClassHeirarchy::OnOK()
+{
+	DestroyWindow();
+}
+
+void CClassHeirarchy::OnCancel()
+{
+	DestroyWindow();
+}
+
+void CClassHeirarchy::PostNcDestroy()
+{
+	CDialog::PostNcDestroy();
+	// Clear the owning frame's back-pointer first so a subsequent menu
+	// click creates a fresh dialog instead of touching freed memory.
+	if ( m_ppOwnerSlot != NULL )
+		*m_ppOwnerSlot = NULL;
+	delete this;
 }
 

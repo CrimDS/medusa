@@ -14,6 +14,14 @@
     <ProjectGuid>{75497DF2-0C78-4129-900D-09ABA10FA45E}</ProjectGuid>
     <Keyword>MFCProj</Keyword>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <!--
+      VS's Fast Up-To-Date Check would otherwise skip invoking MSBuild
+      when nothing in Resourcer's own ClCompile inputs has changed,
+      which also skips the DeployDarkSpaceRuntime target at the bottom
+      of this file.  Force MSBuild to run every build so the deploy
+      target always gets a chance to stage darkspace runtime DLLs.
+    -->
+    <DisableFastUpToDateCheck>true</DisableFastUpToDateCheck>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -348,4 +356,33 @@
       <UserProperties RESOURCE_FILE="Resourcer.rc" />
     </VisualStudio>
   </ProjectExtensions>
+  <!--
+    Stage darkspace runtime DLLs next to Resourcer.exe so DarkSpace.dll's
+    static-init LoadLibrary("Gadgets.dll" / "Interface.dll") in
+    darkspace\DarkSpace\GameDll.cpp resolves regardless of how the exe
+    is launched (VS / Explorer / shortcut).  Without this, only a launch
+    that puts darkspace\Bin on PATH would find them, and the legacy
+    factory-key aliases registered in Gadgets.dll's static init never
+    register — so loading any old .prt that references those legacy keys
+    (e.g. ShipCruiser=4134492549914846131 in Gadgets/Ships.cpp) silently
+    falls through createNode and the scene appears empty.
+  -->
+  <Target Name="DeployDarkSpaceRuntime" AfterTargets="Build">
+    <ItemGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\DarkSpace.dll" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\Gadgets.dll" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\Interface.dll" />
+    </ItemGroup>
+    <ItemGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\DarkSpaceD.dll" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\GadgetsD.dll" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\InterfaceD.dll" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\DarkSpaceD.pdb" Condition="Exists('$(ProjectDir)..\..\..\darkspace\Bin\DarkSpaceD.pdb')" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\GadgetsD.pdb" Condition="Exists('$(ProjectDir)..\..\..\darkspace\Bin\GadgetsD.pdb')" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\InterfaceD.pdb" Condition="Exists('$(ProjectDir)..\..\..\darkspace\Bin\InterfaceD.pdb')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_DSRuntime)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>

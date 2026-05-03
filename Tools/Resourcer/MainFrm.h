@@ -40,6 +40,13 @@ public:  // control bar embedded members
 	CToolBar    m_wndToolBar;
 	CToolBar	m_ResourceBar;
 	CImageList	m_IconList;
+
+	// Modeless reference dialog — class hierarchy browser.  Heap-allocated
+	// when the user picks View > Class Hierarchy; null otherwise.  Re-using
+	// the existing instance (bringing it to front) avoids stacking multiple
+	// copies across repeated menu clicks.  Cleared from the dialog's
+	// PostNcDestroy via this back-pointer.
+	class CClassHeirarchy *	m_pClassHeirarchyDlg;
 	
 // Generated message map functions
 protected:

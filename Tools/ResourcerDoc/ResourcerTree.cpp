@@ -304,13 +304,34 @@ void ResourcerTree::OnViewRefresh()
 	pDoc->UpdateAllViews( this );
 }
 
-void ResourcerTree::OnDocumentBuildselected() 
+BOOL ResourcerTree::PreTranslateMessage(MSG* pMsg)
 {
-	CResourcerDoc *pDoc = dynamic_cast<CResourcerDoc *>(GetDocument()); 
+	// Intercept VK_DELETE before the IDR_RSRTYPE accelerator routes it
+	// to ID_PORTS_DELETE (which deletes a port from the list pane).
+	// When the tree pane has focus and the user has a directory selected,
+	// they expect Delete to remove the directory — not whichever port
+	// happens to be selected over in the right-hand list.
+	if ( pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_DELETE )
+	{
+		if ( GetTreeCtrl().GetSelectedItem() != NULL )
+		{
+			OnTreeDelete();
+			return TRUE;
+		}
+	}
+	return CTreeView::PreTranslateMessage( pMsg );
+}
+
+void ResourcerTree::OnDocumentBuildselected()
+{
+	CResourcerDoc *pDoc = dynamic_cast<CResourcerDoc *>(GetDocument());
 	ASSERT( pDoc );
 
 	pDoc->beginBuild();
+	const int nTotal = pDoc->countPorts( pDoc->currentDirectory(), true );
+	pDoc->beginPortBatch( "Building", nTotal );
 	pDoc->updateBroker( pDoc->currentDirectory(),true );
+	pDoc->endPortBatch();
 	pDoc->endBuild();
 }
 
@@ -376,7 +397,11 @@ void ResourcerTree::OnPortsTouch()
 	CResourcerDoc *pDoc = dynamic_cast<CResourcerDoc *>(GetDocument());
 	ASSERT( pDoc );
 
-	pDoc->touchPorts( (CharString)pDoc->currentDirectory() + "*.PRT", true );
+	const CharString sMask = (CharString)pDoc->currentDirectory() + "*.PRT";
+	const int nTotal = pDoc->countPorts( sMask, true );
+	pDoc->beginPortBatch( "Touching", nTotal );
+	pDoc->touchPorts( sMask, true );
+	pDoc->endPortBatch();
 }
 
 void ResourcerTree::OnPortsUpgrade()
@@ -384,7 +409,11 @@ void ResourcerTree::OnPortsUpgrade()
 	CResourcerDoc *pDoc = dynamic_cast<CResourcerDoc *>(GetDocument());
 	ASSERT( pDoc );
 
-	pDoc->upgradePorts( (CharString)pDoc->currentDirectory() + "*.PRT", true );
+	const CharString sMask = (CharString)pDoc->currentDirectory() + "*.PRT";
+	const int nTotal = pDoc->countPorts( sMask, true );
+	pDoc->beginPortBatch( "Upgrading", nTotal );
+	pDoc->upgradePorts( sMask, true );
+	pDoc->endPortBatch();
 }
 
 void ResourcerTree::OnUpdatePortsUpgrade(CCmdUI *pCmdUI)

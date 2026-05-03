@@ -191,6 +191,23 @@ static void SwapRedBlue( const Buffer & input, Buffer & output )
 		pOut[p] = pIn[p].BGRA();
 }
 
+// Map our generic codec quality knob onto squish's color-fit selector.
+// Range-fit is ~5–10x faster than cluster-fit at the cost of visible
+// gradient banding — fine for FAST/NONE callers, not for archival bake.
+static int squishLevelFlags( ImageCodec::EncodeLevel nLevel )
+{
+	switch ( nLevel )
+	{
+	case ImageCodec::CL_FAST:
+	case ImageCodec::CL_NONE:
+		return squish::kColourRangeFit;
+	case ImageCodec::CL_BEST:
+	case ImageCodec::CL_NORMAL:
+	default:
+		return squish::kColourClusterFit;
+	}
+}
+
 //----------------------------------------------------------------------------
 
 IMPLEMENT_FACTORY( ImageCodecDXT1, ImageCodec );
@@ -206,7 +223,8 @@ int	ImageCodecDXT1::encode( const Buffer & input, Buffer & output, const SizeInt
 	SwapRedBlue( input, compress );
 
 	output.allocate( GetStorageRequirements( size.width, size.height, squish::kDxt1 ) );
-	squish::CompressImage( (squish::u8 *)compress.buffer(), size.width, size.height, output.buffer(), squish::kDxt1 );
+	squish::CompressImage( (squish::u8 *)compress.buffer(), size.width, size.height, output.buffer(),
+		squish::kDxt1 | squishLevelFlags( nLevel ) );
 	return output.bufferSize();
 }
 
@@ -240,7 +258,8 @@ int	ImageCodecDXT3::encode( const Buffer & input, Buffer & output, const SizeInt
 	SwapRedBlue( input, compress );
 
 	output.allocate( GetStorageRequirements( size.width, size.height, squish::kDxt3 ) );
-	squish::CompressImage( (squish::u8 *)compress.buffer(), size.width, size.height, output.buffer(), squish::kDxt3 );
+	squish::CompressImage( (squish::u8 *)compress.buffer(), size.width, size.height, output.buffer(),
+		squish::kDxt3 | squishLevelFlags( nLevel ) );
 	return output.bufferSize();
 }
 
@@ -274,7 +293,8 @@ int	ImageCodecDXT5::encode( const Buffer & input, Buffer & output, const SizeInt
 	SwapRedBlue( input, compress );
 
 	output.allocate( GetStorageRequirements( size.width, size.height, squish::kDxt5 ) );
-	squish::CompressImage( (squish::u8 *)compress.buffer(), size.width, size.height, output.buffer(), squish::kDxt5 );
+	squish::CompressImage( (squish::u8 *)compress.buffer(), size.width, size.height, output.buffer(),
+		squish::kDxt5 | squishLevelFlags( nLevel ) );
 	return output.bufferSize();
 }
 

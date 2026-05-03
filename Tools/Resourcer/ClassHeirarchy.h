@@ -21,11 +21,19 @@ public:
 
 	void			buildTree( HTREEITEM parent, const ClassKey &parentKey );
 
+	// Modeless lifetime — set by the owning frame so PostNcDestroy can
+	// null out its back-pointer before delete-this.  Optional; safe to
+	// leave NULL if the dialog is being used some other way.
+	void			setOwnerSlot( CClassHeirarchy ** ppSlot ) { m_ppOwnerSlot = ppSlot; }
+
 // Dialog Data
 	//{{AFX_DATA(CClassHeirarchy)
 	enum { IDD = IDD_CLASS_HEIRARCHY };
 	CTreeCtrl	m_Tree;
 	//}}AFX_DATA
+
+private:
+	CClassHeirarchy **	m_ppOwnerSlot;
 
 
 // Overrides
@@ -37,6 +45,9 @@ public:
 
 // Implementation
 protected:
+	virtual void PostNcDestroy();
+	virtual void OnOK();
+	virtual void OnCancel();
 
 	// Generated message map functions
 	//{{AFX_MSG(CClassHeirarchy)

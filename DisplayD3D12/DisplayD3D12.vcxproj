@@ -120,6 +120,7 @@
   <ItemGroup>
     <ClCompile Include="..\ThirdParty\bc7enc\bc7enc.cpp" />
     <ClCompile Include="..\ThirdParty\bc7enc\bc7decomp.cpp" />
+    <ClCompile Include="..\ThirdParty\bc7enc\rgbcx.cpp" />
     <ClCompile Include="..\ThirdParty\squish-1.10\alpha.cpp" />
     <ClCompile Include="..\ThirdParty\squish-1.10\clusterfit.cpp" />
     <ClCompile Include="..\ThirdParty\squish-1.10\colourblock.cpp" />
