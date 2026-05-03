@@ -24,3 +24,4 @@ Release/
 ReleaseLinux/
 *.recipe
 *.ilk
+*.FileListAbsolute.txt
