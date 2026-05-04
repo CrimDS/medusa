@@ -8,6 +8,7 @@
 #include "Debug/Assert.h"
 #include "Debug/Trace.h"
 #include "Debug/Log.h"
+#include "Standard/Time.h"
 #include "AudioXA2/AudioBufferXA2.h"
 
 //----------------------------------------------------------------------------
@@ -22,7 +23,8 @@ AudioBufferXA2::AudioBufferXA2()
 	  m_CRC( 0 ), m_Size( 0 ), m_Bits( 0 ), m_Channels( 0 ), m_Rate( 0 ),
 	  m_Volume( 0.5f ), m_Pan( 0.0f ),
 	  m_Playing( false ), m_Looping( false ), m_StreamEnded( false ),
-	  m_Locked( false ), m_bSelfPinned( false )
+	  m_Locked( false ), m_bSelfPinned( false ),
+	  m_bPositional( false ), m_LastPositionalApplyTicks( 0 ), m_FalloffReach( 50.0f )
 {
 	memset( &m_Format, 0, sizeof(m_Format) );
 }
@@ -33,7 +35,8 @@ AudioBufferXA2::AudioBufferXA2( AudioDeviceXA2 * pDevice )
 	  m_CRC( 0 ), m_Size( 0 ), m_Bits( 0 ), m_Channels( 0 ), m_Rate( 0 ),
 	  m_Volume( 0.5f ), m_Pan( 0.0f ),
 	  m_Playing( false ), m_Looping( false ), m_StreamEnded( false ),
-	  m_Locked( false ), m_bSelfPinned( false )
+	  m_Locked( false ), m_bSelfPinned( false ),
+	  m_bPositional( false ), m_LastPositionalApplyTicks( 0 ), m_FalloffReach( 50.0f )
 {
 	memset( &m_Format, 0, sizeof(m_Format) );
 }
@@ -51,7 +54,8 @@ AudioBufferXA2::AudioBufferXA2( const AudioBufferXA2 * pDuplicate )
 	  m_Volume( pDuplicate->m_Volume ),
 	  m_Pan( pDuplicate->m_Pan ),
 	  m_Playing( false ), m_Looping( false ), m_StreamEnded( false ),
-	  m_Locked( false ), m_bSelfPinned( false )
+	  m_Locked( false ), m_bSelfPinned( false ),
+	  m_bPositional( false ), m_LastPositionalApplyTicks( 0 ), m_FalloffReach( 50.0f )
 {}
 
 AudioBufferXA2::~AudioBufferXA2()
@@ -176,9 +180,12 @@ bool AudioBufferXA2::ensureSourceVoice()
 		return false;
 	}
 
-	// Apply any deferred state.
+	// Apply any deferred state. Positional spatialization (X3DAudio matrix + doppler)
+	// supersedes 2D pan when both are set; only one is meaningful per buffer.
 	m_pVoice->SetVolume( m_Volume );
-	if ( m_Pan != 0.0f )
+	if ( m_bPositional )
+		applyPositionalLocked();
+	else if ( m_Pan != 0.0f )
 		applyPanLocked();
 	return true;
 }
@@ -448,10 +455,115 @@ void AudioBufferXA2::applyPanLocked()
 bool AudioBufferXA2::setPan( float pan )
 {
 	ASSERT( pan >= -1 && pan <= 1 );
-	m_Pan = pan;
 	AutoLock lock( &m_Lock );
-	applyPanLocked();
+	m_Pan = pan;
+	// For positional buffers, the X3DAudio output matrix supersedes 2D pan.
+	if ( !m_bPositional )
+		applyPanLocked();
 	return true;
+}
+
+bool AudioBufferXA2::setFalloff( float reachDistance )
+{
+	AutoLock lock( &m_Lock );
+	m_FalloffReach = ( reachDistance > 0.001f ) ? reachDistance : 0.001f;
+	if ( m_bPositional && m_pVoice != NULL )
+		applyPositionalLocked();
+	return true;
+}
+
+bool AudioBufferXA2::setPosition( const Vector3 & pos )
+{
+	AutoLock lock( &m_Lock );
+	m_EmitterPos = pos;
+	m_bPositional = true;
+	if ( m_pVoice != NULL )
+		applyPositionalLocked();
+	return true;
+}
+
+void AudioBufferXA2::applyPositionalLocked()
+{
+	// Caller holds m_Lock. Runs X3DAudio's MATRIX calculation only — doppler/pitch shift was
+	// removed because it never produced perceptually-useful results in DarkSpace's coordinate
+	// scale and exposed too many edge cases (camera-zoom shift, chase-cam co-motion, smoothing
+	// vs responsiveness trade-offs). Distance attenuation, surround placement and 3D pan all
+	// still come from this matrix, just no frequency-ratio modulation.
+	if ( !m_bPositional || m_pVoice == NULL || m_pDevice == NULL || !m_pDevice->is3DReady() )
+		return;
+
+	// Throttle to ~60 Hz per buffer. NodeSound::render calls setPosition at full frame rate
+	// (often 100-200 Hz), but Microsoft's docs explicitly recommend SetOutputMatrix be called
+	// "less than 60 Hz" — over-frequent updates outpace XA2's internal matrix-ramp smoothing
+	// and can starve the audio worker, producing audible stutter. ~16 ms is plenty since
+	// the audio thread quantum is ~21 ms anyway.
+	const qword now = Time::ticks();
+	const qword tickRate = Time::ticksPerSecond();
+	if ( m_LastPositionalApplyTicks > 0 && tickRate > 0 )
+	{
+		const qword elapsed = now - m_LastPositionalApplyTicks;
+		const qword sixteenMs = tickRate / 60;
+		if ( elapsed < sixteenMs )
+			return;
+	}
+	m_LastPositionalApplyTicks = now;
+
+	const UINT32 srcChans  = m_Format.nChannels;
+	const UINT32 destChans = m_pDevice->masterChannels();
+	if ( srcChans == 0 || destChans == 0 )
+		return;
+	if ( srcChans > 2 || destChans > 8 )
+		return;	// fall back to default routing for unusual layouts
+
+	// Linear distance falloff from 1.0 at distance 0 to 0.0 at CurveDistanceScaler.
+	// Matches DarkSpace's pre-existing model `volume = clamp(1 - dist*m_Falloff)` when
+	// CurveDistanceScaler is set to 1/m_Falloff (== reach distance).
+	static const X3DAUDIO_DISTANCE_CURVE_POINT s_LinearPoints[ 2 ] = {
+		{ 0.0f, 1.0f },
+		{ 1.0f, 0.0f },
+	};
+	static const X3DAUDIO_DISTANCE_CURVE s_LinearCurve = {
+		const_cast< X3DAUDIO_DISTANCE_CURVE_POINT * >( s_LinearPoints ), 2
+	};
+	// Stereo channel azimuths: L = 270° (3π/2), R = 90° (π/2). 0 = front, clockwise positive.
+	static const float kPi = 3.14159265358979323846f;
+	static const float s_StereoAzimuths[ 2 ] = { 3.0f * kPi / 2.0f, kPi / 2.0f };
+
+	X3DAUDIO_EMITTER emitter;
+	memset( &emitter, 0, sizeof(emitter) );
+	emitter.OrientFront.x = 0.0f; emitter.OrientFront.y = 0.0f; emitter.OrientFront.z = 1.0f;
+	emitter.OrientTop.x   = 0.0f; emitter.OrientTop.y   = 1.0f; emitter.OrientTop.z   = 0.0f;
+	emitter.Position.x    = m_EmitterPos.x;       emitter.Position.y    = m_EmitterPos.y;       emitter.Position.z    = m_EmitterPos.z;
+	// Velocity left zero — doppler is intentionally disabled (see applyPositionalLocked comment).
+	emitter.ChannelCount  = srcChans;
+	emitter.ChannelRadius = 1.0f;
+	emitter.pChannelAzimuths    = ( srcChans == 2 ) ? const_cast< float * >( s_StereoAzimuths ) : NULL;
+	emitter.pVolumeCurve        = const_cast< X3DAUDIO_DISTANCE_CURVE * >( &s_LinearCurve );
+	emitter.CurveDistanceScaler = m_FalloffReach;
+	// InnerRadius — within this radius the source is treated as omnidirectional (full volume,
+	// no spatial separation). Without it, the player's own ship engine sound (where camera ≈
+	// emitter position) gets unstable matrix coefficients as the camera barely rotates, audible
+	// as crackling and channel flutter. 15% of reach is a reasonable transition zone.
+	emitter.InnerRadius         = m_FalloffReach * 0.15f;
+	emitter.InnerRadiusAngle    = X3DAUDIO_PI / 4.0f;	// 45° transition cone
+	// DopplerScaler not set (zero default) — feature disabled at the API level too.
+
+	X3DAUDIO_LISTENER listener;
+	m_pDevice->snapshotListener( listener );
+
+	float matrix[ 16 ] = { 0 };	// max srcChans (2) * destChans (8) = 16
+	X3DAUDIO_DSP_SETTINGS dsp;
+	memset( &dsp, 0, sizeof(dsp) );
+	dsp.SrcChannelCount     = srcChans;
+	dsp.DstChannelCount     = destChans;
+	dsp.pMatrixCoefficients = matrix;
+
+	X3DAudioCalculate( m_pDevice->x3dHandle(), &listener, &emitter,
+		X3DAUDIO_CALCULATE_MATRIX,
+		&dsp );
+
+	m_pVoice->SetOutputMatrix( NULL, srcChans, destChans, matrix );
+	// Frequency ratio is owned by setRate() now (no doppler component to stack).
 }
 
 //----------------------------------------------------------------------------
@@ -483,7 +595,14 @@ void AudioBufferXA2::unlockBuffer()
 
 void STDMETHODCALLTYPE AudioBufferXA2::OnBufferEnd( void * pCtx )
 {
-	bool bReleasePin = false;
+	// CRITICAL: do NOT call DestroyVoice or releaseReference (which can trigger ~AudioBufferXA2
+	// → release → DestroyVoice) from inside this callback. DestroyVoice waits synchronously for
+	// callbacks to drain — calling it from a callback self-deadlocks and leaves the source voice
+	// in a half-destroyed state with a dangling callback ptr in the audio graph. Symptom: next
+	// process pass crashes at OnVoiceProcessingPassEnd with vtable=0x00000000.
+	// Instead we just mark idle and hand off to AudioDeviceXA2::scheduleReap; the device's main-
+	// thread drainReap (called from setListener) does DestroyVoice + final ref release safely.
+	bool bScheduleReap = false;
 	{
 		AutoLock lock( &m_Lock );
 
@@ -492,14 +611,9 @@ void STDMETHODCALLTYPE AudioBufferXA2::OnBufferEnd( void * pCtx )
 
 		if ( pCtx == NULL )
 		{
-			// One-shot or looping main buffer finished. Voice has nothing queued — mark idle
-			// and release the self-pin so we can be reaped if no caller holds us.
+			// One-shot or looping main buffer finished.
 			m_Playing = false;
-			if ( m_bSelfPinned )
-			{
-				m_bSelfPinned = false;
-				bReleasePin = true;
-			}
+			bScheduleReap = m_bSelfPinned;
 		}
 		else
 		{
@@ -516,11 +630,7 @@ void STDMETHODCALLTYPE AudioBufferXA2::OnBufferEnd( void * pCtx )
 				if ( state.BuffersQueued == 0 )
 				{
 					m_Playing = false;
-					if ( m_bSelfPinned )
-					{
-						m_bSelfPinned = false;
-						bReleasePin = true;
-					}
+					bScheduleReap = m_bSelfPinned;
 				}
 			}
 			else
@@ -531,9 +641,8 @@ void STDMETHODCALLTYPE AudioBufferXA2::OnBufferEnd( void * pCtx )
 		}
 	}
 
-	// May delete `this` if no other Refs remain. Last line, no member access after.
-	if ( bReleasePin )
-		releaseReference( 0 );
+	if ( bScheduleReap && m_pDevice != NULL )
+		m_pDevice->scheduleReap( this );
 }
 
 //----------------------------------------------------------------------------

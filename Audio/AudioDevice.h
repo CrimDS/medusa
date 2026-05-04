@@ -13,6 +13,7 @@
 #include "Standard/Reference.h"
 #include "Factory/FactoryTypes.h"
 #include "Audio/AudioBuffer.h"
+#include "Math/Vector3.h"
 #include "MedusaDll.h"
 
 
@@ -63,9 +64,26 @@ public:
 
 	virtual void			setVolume( float volume ) = 0;		// set the master volume level
 
-	virtual bool			beginRecord( 
+	virtual bool			beginRecord(
 								AudioListener * pListener ) = 0;// begin capturing audio, false if failed
 	virtual void			stopRecord() = 0;					// stop recording audio
+
+	// 3D listener state. Camera setup code calls this each render frame so the audio
+	// backend can run X3DAudio for any positional buffers. Default no-op for DS — only
+	// XAudio2 implements 3D. forward = look-direction, up = head-up vector.
+	// NOTE: the velocity arg here is the camera-position-delta velocity which is NOT
+	// what you want for Doppler — when the user zooms, the camera moves but no body
+	// is actually traveling. Use setListenerVelocity below to feed the listener-body's
+	// physical velocity (typically the player ship's worldVelocity).
+	virtual void			setListener( const Vector3 & /*pos*/,
+										 const Vector3 & /*velocity*/,
+										 const Vector3 & /*forward*/,
+										 const Vector3 & /*up*/ )			{}
+
+	// Listener body's physical velocity, separate from camera motion. Drives Doppler.
+	// Game code calls this each frame with the player ship's worldVelocity (or any
+	// world body the listener is conceptually attached to). Default no-op for DS.
+	virtual void			setListenerVelocity( const Vector3 & /*velocity*/ )	{}
 
 	// Static
 	static AudioDevice *	create();

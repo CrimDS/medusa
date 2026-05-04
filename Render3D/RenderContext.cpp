@@ -291,12 +291,24 @@ void RenderContext::setFrame(const Matrix33 & frame)
 {
 	m_State.m_Frame = frame;
 	++m_nRenderPassGen;
+
+	// Re-feed the audio listener so orientation stays current. Many call sites do setPosition
+	// then setFrame (e.g. ViewTactical.cpp), so without this hook the setPosition-time listener
+	// feed would have read last frame's stale frame.k/frame.j, putting positional audio off-center.
+	// Velocity is always zero — doppler is intentionally disabled in AudioBufferXA2.
+	if ( m_Audio.valid() )
+		m_Audio->setListener( m_State.m_Position, Vector3::ZERO, frame.k, frame.j );
 }
 
 void RenderContext::setPosition(const Vector3 & position)
 {
 	m_State.m_Position = position;
 	++m_nRenderPassGen;
+
+	// Sync the audio listener for X3DAudio. Frame's k = forward, j = up (DarkSpace Matrix33
+	// convention). Default AudioDevice impl is no-op (DS), so zero overhead when XA2 is off.
+	if ( m_Audio.valid() )
+		m_Audio->setListener( position, Vector3::ZERO, m_State.m_Frame.k, m_State.m_Frame.j );
 }
 
 void RenderContext::setProjection(const RectInt & window,

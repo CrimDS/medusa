@@ -59,6 +59,9 @@ public:
 	void *			lockBuffer();
 	void			unlockBuffer();
 
+	bool			setPosition( const Vector3 & pos );
+	bool			setFalloff( float reachDistance );
+
 	// IXAudio2VoiceCallback — runs on XAudio2's worker thread; refills stream slots and
 	// marks one-shots as completed. All other callbacks are no-ops.
 	STDMETHOD_( void, OnVoiceProcessingPassStart )( UINT32 /*BytesRequired*/ ) override {}
@@ -78,6 +81,7 @@ private:
 	bool			ensureSourceVoice();
 	void			submitStreamSlot( int slot, bool primingFromMainThread );
 	void			applyPanLocked();
+	void			applyPositionalLocked();		// runs X3DAudioCalculate + applies matrix/doppler
 
 	// Data
 	AudioDeviceXA2 *	m_pDevice;					// our device (raw — device outlives us)
@@ -107,6 +111,14 @@ private:
 													// mirrors AudioDS's device-side voice→buffer pin so a buffer
 													// returned from Sound::play outlives the transient Reference<>
 													// during the caller's assignment.
+
+	// 3D positional state. m_bPositional flips on once setPosition() has been called;
+	// thereafter applyPositionalLocked() takes over from applyPanLocked() for spatialization.
+	// Doppler is intentionally disabled — see applyPositionalLocked comment in cpp.
+	bool			m_bPositional;
+	qword			m_LastPositionalApplyTicks;		// QPC tick at last applyPositionalLocked — throttles SetOutputMatrix to ~60 Hz
+	Vector3			m_EmitterPos;					// latest world position from setPosition
+	float			m_FalloffReach;					// curve scaler — distance at which source becomes inaudible (1/Falloff)
 
 	CriticalSection	m_Lock;							// guards m_pVoice / m_Playing / m_pStream against OnBufferEnd
 };

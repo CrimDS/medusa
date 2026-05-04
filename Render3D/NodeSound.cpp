@@ -20,7 +20,8 @@ bool NodeSound::sm_bDisable = false;		// disable sound nodes
 
 IMPLEMENT_NAMED_FACTORY( FACTORY_SoundInstance, NodeSound::SoundInstance, RenderContext::InstanceData, true );
 
-NodeSound::SoundInstance::SoundInstance() : m_bInitialized( false )
+NodeSound::SoundInstance::SoundInstance()
+	: m_bInitialized( false )
 {}
 
 NodeSound::SoundInstance::~SoundInstance()
@@ -70,20 +71,24 @@ void NodeSound::render( RenderContext &context, const Matrix33 & frame, const Ve
 	{
 		pInstance->m_bInitialized = true;
 
-		Vector3 positionVS( context.worldToView( position ) );
-		float soundDistance = positionVS.magnitude();
-		float soundVolume = Clamp(1.0f - (soundDistance * m_Falloff),0.0f,1.0f);
-		float soundPan = Clamp(positionVS.x / Max(positionVS.z, 1.0f ),-1.0f,1.0f);
-
+		// First-render: create the buffer at full source volume and configure falloff/position.
+		// X3DAudio's distance curve handles attenuation — m_Falloff (units: fade per unit distance)
+		// converts to "reach distance" = 1/m_Falloff, the radius beyond which the source is silent.
+		// Velocity is always zero — doppler is intentionally disabled in AudioBufferXA2.
 		if (! pInstance->m_pBuffer.valid() )
 		{
-			if ( soundVolume > 0 )
-				pInstance->m_pBuffer = m_Sound->play( context.audioDevice(), soundVolume, soundPan, m_Loop );
+			pInstance->m_pBuffer = m_Sound->play( context.audioDevice(), 1.0f, 0.0f, m_Loop );
+			if ( pInstance->m_pBuffer.valid() )
+			{
+				const float reach = ( m_Falloff > 0.0f ) ? ( 1.0f / m_Falloff ) : 50.0f;
+				pInstance->m_pBuffer->setFalloff( reach );
+				pInstance->m_pBuffer->setPosition( position );
+			}
 		}
-		else if ( pInstance->m_pBuffer.valid() )
+		else
 		{
-			pInstance->m_pBuffer->setVolume( soundVolume );
-			pInstance->m_pBuffer->setPan( soundPan );
+			// Subsequent renders (looping sounds): just update spatial state — base volume stays at 1.0.
+			pInstance->m_pBuffer->setPosition( position );
 		}
 	}
 }

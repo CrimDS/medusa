@@ -7,6 +7,7 @@
 #define AUDIO_BUFFER_H
 
 #include "Factory/FactoryTypes.h"
+#include "Math/Vector3.h"
 #include "MedusaDll.h"
 
 //----------------------------------------------------------------------------
@@ -69,6 +70,14 @@ public:
 
 	virtual void *		lockBuffer() = 0;
 	virtual void		unlockBuffer() = 0;
+
+	// 3D positional audio (XAudio2 backend; DS default no-ops). Caller sets the buffer's
+	// world position each update; audio backend runs X3DAudio to derive surround placement
+	// and distance attenuation. setFalloff sets the radius at which the source becomes
+	// inaudible (matches NodeSound's m_Falloff convention: reach = 1 / m_Falloff). Callers
+	// that don't use these get the existing volume/pan path unchanged.
+	virtual bool		setPosition( const Vector3 & /*pos*/ )			{ return true; }
+	virtual bool		setFalloff( float /*reachDistance*/ )			{ return true; }
 
 	// Helpers
 	int					bytes() const;			// number of bytes per sample
