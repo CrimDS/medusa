@@ -19,6 +19,7 @@
 #include "Atomic.h"
 #include "Thread.h"
 
+#include <intrin.h>		// _InterlockedCompareExchangePointer (pointer-width CAS)
 #include <list>
 
 //---------------------------------------------------------------------------------------------------
@@ -89,9 +90,14 @@ private:
 
 		// now that we have the correct pointer, try to compare & swap it out to 0. Once that succeeds no other threads
 		// will be able to lock our pointer.
-		while(! Atomic::compareSwap( reinterpret_cast<volatile int *>( &m_pList ), reinterpret_cast<int>( pList ), 0 ) )
+		// Pointer-width CAS — legacy Atomic::compareSwap took int (32-bit) which
+		// truncates the pointer on x64 (same bug as Referenced::grabWeakReferenced).
+		while ( _InterlockedCompareExchangePointer(
+					reinterpret_cast< void * volatile * >( &m_pList ),
+					nullptr,
+					pList ) != pList )
 		{
-			Thread::sleep( 0 );	
+			Thread::sleep( 0 );
 			if ( m_bDestroyed )
 				return 0;
 		}

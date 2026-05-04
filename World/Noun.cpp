@@ -537,7 +537,7 @@ int Noun::attachTrait( Trait * pTrait )
 		pTrait->initialize();
 
 	const ClassKey & nKey = pTrait->factory()->classKey();
-	for(size_t i=0;i<m_Traits.size();i++)
+	for(int i=0;i<(int)m_Traits.size();i++)
 	{
 		Trait * pOldTrait = m_Traits[i];
 		if ( pOldTrait->factory()->classKey() == nKey )
@@ -552,7 +552,7 @@ int Noun::attachTrait( Trait * pTrait )
 	std::sort( m_Traits.begin(), m_Traits.end(), SortTraits );
 	updateVersion();
 
-	return m_Traits.size() - 1;
+	return (int)(m_Traits.size() - 1);
 }
 
 void Noun::detachTrait( int n )
@@ -830,7 +830,7 @@ void Noun::simulate( dword nTick )
 		m_bPostInit = postInitialize();
 
 	// simulate our traits, do this before we update our current tick...
-	for(size_t i=0;i<m_Traits.size();)
+	for(int i=0;i<(int)m_Traits.size();)
 	{
 		Trait * pTrait = m_Traits[i];
 		if ( pTrait == NULL || pTrait->detach() )

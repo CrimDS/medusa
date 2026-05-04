@@ -310,7 +310,7 @@ public:
 		bool				watch;			// also show watch-type entrys
 		bool				kick;			// also show kick-type entrys
 		bool				ban;			// also show ban-type entrys
-		bool				linkMissing;	// only entrys which don´t have a link set
+		bool				linkMissing;	// only entrys which donï¿½t have a link set
 		bool				onlyActive;		// only entrys with active flag set
 		dword				limit;			// only last n entries
 		
@@ -618,7 +618,7 @@ inline const MetaClient::Chat & MetaClient::chat( int n ) const
 
 inline int MetaClient::roomCount() const
 {
-	return m_ChatRoomMap.size();
+	return (int)m_ChatRoomMap.size();
 }
 
 inline dword MetaClient::room( int n ) const

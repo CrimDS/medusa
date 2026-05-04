@@ -215,7 +215,7 @@ const wchar * Locale::language( dword LCID )
 	char s[ 64 ];
 	if (! GetLocaleInfoA( LCID, LOCALE_SLANGUAGE, s, sizeof(s) ) )
 		return NULL;
-	MultiByteToWideChar( CP_ACP, 0, s, strlen(s), sLanguage, 64 );
+	MultiByteToWideChar( CP_ACP, 0, s, (int)strlen(s), sLanguage, 64 );
 	return sLanguage;
 #else
 	return L"English";

@@ -851,7 +851,7 @@ void MirrorClient::buildCatalog( const char * pRoot, const char * pMask, Catalog
 	FindFile ff( pMask );
 	CharString sDir( Path( pMask ).directory() );
 
-	int nRootLength = strlen( pRoot );
+	int nRootLength = (int)strlen( pRoot );
 
 	// add all files to the catalog 
 	int i = 0;

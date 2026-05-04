@@ -90,7 +90,7 @@ void Path::setPath( const char * pPath )
 
 	if ( nExt >= 0 )
 	{
-		int nNameLen = (sPath.cstr() + nExt) - (sPath.cstr() + nSlash + 1);
+		int nNameLen = (int)((sPath.cstr() + nExt) - (sPath.cstr() + nSlash + 1));
 		m_Name = sPath.cstr() + nSlash + 1;
 		m_Name.left( nNameLen );
 		m_Extension = sPath.cstr() + nExt;

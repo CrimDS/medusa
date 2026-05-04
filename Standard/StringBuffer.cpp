@@ -47,8 +47,8 @@ StringBuffer & StringBuffer::copy( const wchar * pString, int length )
 
 StringBuffer & StringBuffer::append(const wchar * append)
 {
-	int thisStringLength = strlen( m_String );
-	int appendStringLength = strlen( append );
+	int thisStringLength = (int)strlen( m_String );
+	int appendStringLength = (int)strlen( append );
 
 	ensureCapacity( thisStringLength + appendStringLength + 1 );
 	strcat( m_String, append );
@@ -127,7 +127,7 @@ void StringBuffer::appendFormatVA( const wchar * pFormat, va_list va)
 	StringBase::format( sBuffer, sizeof(sBuffer), pFormat, va );
 
 	// validated then assign the string
-	int stringLength = strlen( sBuffer );
+	int stringLength = (int)strlen( sBuffer );
 	if (stringLength >= CHAR_BUFFER_SIZE)
 		throw CharBufferOverflow();
 

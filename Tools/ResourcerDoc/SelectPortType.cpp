@@ -43,7 +43,7 @@ void CSelectPortType::OnOK()
 {
 	int selectedItem = m_PortList.GetNextItem( -1, LVNI_SELECTED );
 	if ( selectedItem >= 0 )
-		m_SelectedPort = m_PortList.GetItemData( selectedItem );
+		m_SelectedPort = (int)m_PortList.GetItemData( selectedItem );
 
 	CDialog::OnOK();
 }

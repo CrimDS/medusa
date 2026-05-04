@@ -83,7 +83,7 @@ void NodeInterfaceClient::onUpdate( float deltaTime )
 
 //---------------------------------------------------------------------------------------------------
 
-bool NodeInterfaceClient::postMessage( dword message, dword wparam, dword lparam )
+bool NodeInterfaceClient::postMessage( dword message, uintptr_t wparam, uintptr_t lparam )
 {
 	if ( m_pContext != NULL )
 	{

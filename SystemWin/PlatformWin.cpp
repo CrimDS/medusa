@@ -171,31 +171,31 @@ long PlatformWin::winProc( HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam
 		PostMessage( NULL, HM_QUIT, 0, 0 );
 		return 0;
 	case HM_MOUSEWHEEL:
-		CommandTarget::postWindowMessage( m_hWnd, HM_MOUSEWHEEL, wParam, (dword)&m_CursorPosition );
+		CommandTarget::postWindowMessage( m_hWnd, HM_MOUSEWHEEL, wParam, (uintptr_t)&m_CursorPosition );
 		return 0;
 	case WM_LBUTTONDOWN:
 		m_CursorButtons |= LEFT;
-		CommandTarget::postWindowMessage( m_hWnd, HM_LBUTTONDOWN, 0, (dword)&m_CursorPosition );
+		CommandTarget::postWindowMessage( m_hWnd, HM_LBUTTONDOWN, 0, (uintptr_t)&m_CursorPosition );
 		return 0;
 	case WM_LBUTTONUP:
 		m_CursorButtons &= ~LEFT;
-		CommandTarget::postWindowMessage( m_hWnd, HM_LBUTTONUP, 0, (dword)&m_CursorPosition );
+		CommandTarget::postWindowMessage( m_hWnd, HM_LBUTTONUP, 0, (uintptr_t)&m_CursorPosition );
 		return 0;
 	case WM_RBUTTONDOWN:
 		m_CursorButtons |= RIGHT;
-		CommandTarget::postWindowMessage( m_hWnd, HM_RBUTTONDOWN, 0, (dword)&m_CursorPosition );
+		CommandTarget::postWindowMessage( m_hWnd, HM_RBUTTONDOWN, 0, (uintptr_t)&m_CursorPosition );
 		return 0;
 	case WM_RBUTTONUP:
 		m_CursorButtons &= ~RIGHT;
-		CommandTarget::postWindowMessage( m_hWnd, HM_RBUTTONUP, 0, (dword)&m_CursorPosition );
+		CommandTarget::postWindowMessage( m_hWnd, HM_RBUTTONUP, 0, (uintptr_t)&m_CursorPosition );
 		return 0;
 	case WM_MBUTTONDOWN:
 		m_CursorButtons |= MIDDLE;
-		CommandTarget::postWindowMessage( m_hWnd, HM_MBUTTONDOWN, 0, (dword)&m_CursorPosition );
+		CommandTarget::postWindowMessage( m_hWnd, HM_MBUTTONDOWN, 0, (uintptr_t)&m_CursorPosition );
 		return 0;
 	case WM_MBUTTONUP:
 		m_CursorButtons &= ~MIDDLE;
-		CommandTarget::postWindowMessage( m_hWnd, HM_MBUTTONUP, 0, (dword)&m_CursorPosition );
+		CommandTarget::postWindowMessage( m_hWnd, HM_MBUTTONUP, 0, (uintptr_t)&m_CursorPosition );
 		return 0;
 	}
 
@@ -471,7 +471,7 @@ bool PlatformWin::update()
 			::SetCursorPos( ptRestore.x, ptRestore.y );
 		}
 
-		CommandTarget::postWindowMessage( m_hWnd, HM_MOUSEMOVE, (dword)&ptDelta, (dword)&m_CursorPosition );
+		CommandTarget::postWindowMessage( m_hWnd, HM_MOUSEMOVE, (uintptr_t)&ptDelta, (uintptr_t)&m_CursorPosition );
 	}
 
 	return true;

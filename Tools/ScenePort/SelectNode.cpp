@@ -71,7 +71,7 @@ void CSelectNode::OnNULL()
 void CSelectNode::buildTree( HTREEITEM hParent, BaseNodePort * pNode )
 {
 	HTREEITEM item = m_Nodes.InsertItem( pNode->name(), hParent );
-	m_Nodes.SetItemData( item, (DWORD)pNode );
+	m_Nodes.SetItemData( item, (DWORD_PTR)pNode );
 
 	// recurse into the children
 	for(int i=0;i<pNode->childCount();i++)

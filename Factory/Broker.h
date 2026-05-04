@@ -15,6 +15,7 @@
 #include "WidgetKey.h"
 #include "ClassKey.h"
 
+#include <cstdint>
 #include <set>
 #include <list>
 
@@ -38,7 +39,7 @@ public:
 		virtual bool	onLoaded( Widget * a_pWidget ) { return false; };
 		// Accessors
 		bool			isAttached() const;						// is this request already attached
-		dword			requestID() const;
+		uintptr_t		requestID() const;
 		// Mutators
 		void			attach();								// register this request with the hash
 		void			detach();								// detach this request from the hash
@@ -115,8 +116,8 @@ private:
 
 	typedef Hash< WidgetKey, WidgetBroker >		BrokerHash;
 	typedef BrokerHash::Iterator				BrokerHashIt;
-	typedef Hash< dword, Request * >			RequestHash;
-	typedef List< dword >						RequestList;
+	typedef Hash< uintptr_t, Request * >		RequestHash;
+	typedef List< uintptr_t >					RequestList;
 	typedef Hash< WidgetKey, RequestList >		LoadRequestHash;
 	typedef List< WidgetKey >					LoadList;
 	typedef std::set< WidgetKey >				BlockingLoadSet;
@@ -152,16 +153,17 @@ private:
 
 //---------------------------------------------------------------------------------------------------
 
-#pragma warning(disable:4311 )		// pointer truncation from 'const Broker::Request *const ' to 'dword'
+// (Was: #pragma warning(disable:4311) — needed when requestID returned dword.
+// Now uintptr_t-wide, no truncation, warning no longer applicable.)
 
 inline bool Broker::Request::isAttached() const
 {
 	return m_bAttached;
 }
 
-inline dword Broker::Request::requestID() const
+inline uintptr_t Broker::Request::requestID() const
 {
-	return reinterpret_cast<dword>( this );
+	return reinterpret_cast<uintptr_t>( this );
 }
 
 inline void Broker::Request::signal()

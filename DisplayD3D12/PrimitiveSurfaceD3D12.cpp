@@ -52,16 +52,6 @@ bool PrimitiveSurfaceD3D12::execute()
 	if ( !pDevice )
 		return false;
 
-	// DIAGNOSTIC: trace surface state on first few executes
-	static int s_nSurfaceLog = 0;
-	if ( s_nSurfaceLog < 10 )
-	{
-		TRACE( "Surface::execute type=%d, SRVCreated=%d, SRVIndex=%u, texture=%p, state=%d, pendingMips=%d, beginScene=%d",
-			(int)m_eType, m_bSRVCreated ? 1 : 0, m_SRVIndex, (void*)m_Texture.Get(),
-			(int)m_CurrentState, m_PendingMips.size(), pDevice->m_bBeginScene ? 1 : 0 );
-		++s_nSurfaceLog;
-	}
-
 	// Flush any pending mip uploads into the main command list.
 	// Only the open-command-list state matters; m_bBeginScene is false during
 	// the OVERLAY pass in present(), but the command list is still open and

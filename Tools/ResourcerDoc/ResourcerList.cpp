@@ -430,7 +430,7 @@ void ResourcerList::OnEditPaste()
 	}
 
 	try {
-		FileMemory::Ref pFile = new FileMemory( GlobalLock( hPaste ), GlobalSize( hPaste ), true );
+		FileMemory::Ref pFile = new FileMemory( GlobalLock( hPaste ), (File::Size)GlobalSize( hPaste ), true );
 		GlobalUnlock( hPaste );
 		CloseClipboard();
 

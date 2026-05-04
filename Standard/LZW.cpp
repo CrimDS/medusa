@@ -166,7 +166,7 @@ int LZW::encode( const void * pInput, int nInputBytes, void * pOutput, int nOutp
 		return -1;		// error
 
 	// return the encoded size
-	return( (output.m_pOutput - ((byte *)pOutput) ) + 1 );
+	return (int)(output.m_pOutput - ((byte *)pOutput)) + 1;
 }
 
 int	LZW::decode( const void * pInput, int nInputBytes, void * pOutput, int nOutputBytes )
@@ -194,7 +194,7 @@ int	LZW::decode( const void * pInput, int nInputBytes, void * pOutput, int nOutp
 			return -1;
 		oldCode = input.decode( m_CurrentCodeBits );
 		if ( oldCode == END_OF_STREAM )
-			return( pOut - pStart );
+			return (int)(pOut - pStart);
 
 		if ( pOut >= pOutputEnd )
 			return -1;	
@@ -208,7 +208,7 @@ int	LZW::decode( const void * pInput, int nInputBytes, void * pOutput, int nOutp
 				return -1;
 			newCode = input.decode( m_CurrentCodeBits );
 			if ( newCode == END_OF_STREAM )
-				return( pOut - pStart );		// return the total number decoded
+				return (int)(pOut - pStart);		// return the total number decoded
 			if ( newCode == FLUSH_CODE )
 				break;
 			if ( newCode == BUMP_CODE )

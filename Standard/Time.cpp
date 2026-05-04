@@ -58,7 +58,7 @@ public:
 
 		// force this thread to run on the first core assigned to our process..
 		DWORD nProcessor = GetFirstBit((nProcessAffin & nSystemAffin));
-		if (!SetThreadAffinityMask(GetCurrentThread(), 1 << nProcessor))
+		if (!SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR(1) << nProcessor))
 			THROW_EXCEPTION("Call failed to SetThreadAffinityMask()");
 
 		while (m_bActive)

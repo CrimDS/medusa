@@ -19,21 +19,13 @@
 #include "Standard/Queue.h"
 
 #include "LuaHeaders.h"
-#ifdef USE_PLAIN_LUA
-	#ifdef _DEBUG
-		#pragma comment( lib, "../../Medusa/ThirdParty/Lua51/bin/Lua51D.lib")
-	#else
-		#pragma comment( lib, "../../Medusa/ThirdParty/Lua51/bin/Lua51.lib")
-	#endif
-#else
+// Lua linkage is handled by World.vcxproj's ProjectReference to LuaLib.vcxproj
+// (which produces lua51.lib / lua51D.lib).  The JIT optimizer headers are only
+// needed for the LuaJIT (Win32) build — on x64 the JIT is compiled out via
+// USE_PLAIN_LUA, see project_x64_cpp17_migration memory note.
+#ifndef USE_PLAIN_LUA
 	#include "../../Medusa/ThirdParty/LuaJIT/jit/opt.h"
 	#include "../../Medusa/ThirdParty/LuaJIT/jit/opt_inline.h"
-
-	#ifdef _DEBUG
-		#pragma comment( lib, "../../Medusa/ThirdParty/LuaJIT/bin/Lua51D.lib")
-	#else
-		#pragma comment( lib, "../../Medusa/ThirdParty/LuaJIT/bin/Lua51.lib")
-	#endif
 #endif
 
 //---------------------------------------------------------------------------------------------------
@@ -340,9 +332,13 @@ int WorldContext::loadLuaLibs( lua_State * pScript )
 	return 0;
 }
 
-// Lua code optimizer. Only used if LuaJIT is used
+// Lua code optimizer. Only used if LuaJIT is used.  Body relies on LuaJITOptBin /
+// LuaJITOptBinInline byte arrays from LuaJIT/jit/opt.h + opt_inline.h, which aren't
+// included in USE_PLAIN_LUA mode (no JIT) — wrap the body so the function is empty
+// on plain-Lua builds.  Callers gate via #ifndef USE_PLAIN_LUA already (see line ~419).
 void WorldContext::ActivateJITOpt( lua_State * pScript )
 {
+#ifndef USE_PLAIN_LUA
 	// Load the JIT optimizer
 	lua_getglobal(pScript, "package");
 	lua_pushliteral(pScript, "preload");
@@ -367,6 +363,9 @@ void WorldContext::ActivateJITOpt( lua_State * pScript )
 	lua_getfield(pScript, -1, "start");
 	lua_remove(pScript, -2);
 	lua_pcall(pScript, 0, 0, 0);
+#else
+	(void)pScript;
+#endif
 }
 
 

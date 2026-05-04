@@ -43,8 +43,8 @@ public:
 	virtual bool				onMessage( const Message & msg );
 
 	// Helpers
-	static bool					postMessage( dword message, 
-									dword wparam, dword lparam );					// this posts a message to the GUI
+	static bool					postMessage( dword message,
+									uintptr_t wparam, uintptr_t lparam );			// this posts a message to the GUI
 	static bool					setScene( const char * pSceneName );				// sets the current scene
 };
 

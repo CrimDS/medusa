@@ -138,7 +138,7 @@ int StringBase::loadString( void * pInstance, dword nID, char * pBuffer, int nBu
 
 wchar * StringBase::slash( const wchar * pIn )
 {
-	int nLen = strlen( pIn );
+	int nLen = (int)strlen( pIn );
 
 	// allocate a buffer twice the size of the string we are slashing
 	wchar * pBuffer = (wchar *)StringBase::malloc( ((nLen * 2) + 1) * sizeof(wchar) );
@@ -190,12 +190,12 @@ wchar * StringBase::slash( const wchar * pIn )
 	// null terminate the output
 	*pOutput = 0;
 	// copy the slashed version into this string
-	return (wchar *)StringBase::realloc( pBuffer, (strlen( pBuffer ) + 1) * sizeof(wchar) );
+	return (wchar *)StringBase::realloc( pBuffer, (unsigned int)(strlen( pBuffer ) + 1) * sizeof(wchar) );
 }
 
 char * StringBase::slash( const char * pIn )
 {
-	int nLen = strlen( pIn );
+	int nLen = (int)strlen( pIn );
 
 	// allocate a buffer twice the size of the string we are slashing
 	char * pBuffer = (char *)StringBase::malloc( ((nLen * 2) + 1) * sizeof(char) );
@@ -247,12 +247,12 @@ char * StringBase::slash( const char * pIn )
 	// null terminate the output
 	*pOutput = 0;
 	// copy the slashed version into this string
-	return (char *)StringBase::realloc( pBuffer, (strlen( pBuffer ) + 1) * sizeof(char) );
+	return (char *)StringBase::realloc( pBuffer, (unsigned int)(strlen( pBuffer ) + 1) * sizeof(char) );
 }
 
 wchar * StringBase::unslash( const wchar * pIn )
 {
-	int nLen = strlen( pIn );
+	int nLen = (int)strlen( pIn );
 
 	// allocate a buffer twice the size of the string we are slashing
 	wchar * pBuffer = (wchar *)StringBase::malloc( (nLen + 1) * sizeof(wchar) );
@@ -306,12 +306,12 @@ wchar * StringBase::unslash( const wchar * pIn )
 
 	// null terminate the output
 	*pOutput = 0;
-	return (wchar *)StringBase::realloc( pBuffer, (strlen( pBuffer ) + 1) * sizeof(wchar) );
+	return (wchar *)StringBase::realloc( pBuffer, (unsigned int)(strlen( pBuffer ) + 1) * sizeof(wchar) );
 }
 
 char * StringBase::unslash( const char * pIn )
 {
-	int nLen = strlen( pIn );
+	int nLen = (int)strlen( pIn );
 
 	// allocate a buffer twice the size of the string we are slashing
 	char * pBuffer = (char *)StringBase::malloc( (nLen + 1) * sizeof(char) );
@@ -365,7 +365,7 @@ char * StringBase::unslash( const char * pIn )
 
 	// null terminate the output
 	*pOutput = 0;
-	return (char *)StringBase::realloc( pBuffer, (strlen( pBuffer ) + 1) * sizeof(char) );
+	return (char *)StringBase::realloc( pBuffer, (unsigned int)(strlen( pBuffer ) + 1) * sizeof(char) );
 }
 
 //----------------------------------------------------------------------------
@@ -390,7 +390,7 @@ void StringBase::free( void * p )
 void StringBase::makeUNICODE( const char * pSource, wchar * pDest, int nMax /*= -1*/ )
 {
 #if defined(_WIN32)
-	MultiByteToWideChar( CP_UTF8, 0, pSource, strlen(pSource), pDest, nMax );
+	MultiByteToWideChar( CP_UTF8, 0, pSource, (int)strlen(pSource), pDest, nMax );
 #else
 	if ( pSource != NULL )
 	{
@@ -404,7 +404,7 @@ void StringBase::makeUNICODE( const char * pSource, wchar * pDest, int nMax /*= 
 void StringBase::makeANSI( const wchar * pSource, char * pDest, int nMax /*= -1*/ )
 {
 #if defined(_WIN32)
-	WideCharToMultiByte( CP_UTF8, 0, pSource, strlen(pSource), pDest, nMax, 0, 0 );
+	WideCharToMultiByte( CP_UTF8, 0, pSource, (int)strlen(pSource), pDest, nMax, 0, 0 );
 #else
 	if ( pSource != NULL )
 	{

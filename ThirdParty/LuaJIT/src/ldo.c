@@ -275,12 +275,14 @@ int luaD_precall (lua_State *L, StkId func, int nresults) {
     CallInfo *ci;
     StkId st, base;
     Proto *p = cl->p;
+#ifndef USE_PLAIN_LUA
     if (p->jit_status <= JIT_S_NONE) { /* JIT compiler enabled? */
       if (p->jit_status == JIT_S_OK)
         return G(L)->jit_gateLJ(L, func, nresults);  /* Run compiled code. */
       else
         return luaJIT_run(L, func, nresults);  /* Compile and run code. */
     }
+#endif
     luaD_checkstack(L, p->maxstacksize);
     func = restorestack(L, funcr);
     if (!p->is_vararg) {  /* no varargs? */

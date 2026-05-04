@@ -68,23 +68,6 @@ bool PrimitiveMaterialD3D12::execute()
 			|| m_Blending == PrimitiveMaterial::ADDITIVE
 			|| (m_nPass == DisplayDevice::SECONDARY && !DisplayDevice::sm_bLightSecondaryPass));
 
-	// Diagnostic: log custom shader materials
-	if ( bHasCustomShader )
-	{
-		static int s_nCustomLog = 0;
-		if ( s_nCustomLog < 30 )
-		{
-			TRACE( "Material::execute CUSTOM: shader='%s', pass=%d, passthrough=%d, lightEn=%d, lights=%d, blend=%d, children=%d, doubleSided=%d",
-				(const char *)m_sShader, m_nPass, bUsePassthrough ? 1 : 0,
-				m_LightEnable ? 1 : 0,
-				(int)lights.size(),
-				(int)m_Blending,
-				m_Children.size(),
-				m_DoubleSided ? 1 : 0 );
-			++s_nCustomLog;
-		}
-	}
-
 	if ( bUsePassthrough )
 	{
 		pDevice->m_bUsingFixedFunction = true;

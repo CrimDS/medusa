@@ -50,7 +50,7 @@ bool Document::onMessage( const Message & msg )
 
 //----------------------------------------------------------------------------
 
-bool Document::postMessage( dword message, dword wparam, dword lparam )
+bool Document::postMessage( dword message, uintptr_t wparam, uintptr_t lparam )
 {
 	Message msg;
 	msg.message = message;

@@ -69,7 +69,7 @@ private:
 
 inline int StringBuffer::length() const
 {
-	return( strlen( m_String ) );
+	return( (int)strlen( m_String ) );
 }
 
 inline wchar * StringBuffer::buffer() const
@@ -119,7 +119,7 @@ inline StringBuffer & StringBuffer::operator+=( wchar ch )
 
 inline StringBuffer & StringBuffer::copy( const wchar * pString )
 {
-	return copy( pString, strlen( pString ) );
+	return copy( pString, (int)strlen( pString ) );
 }
 
 

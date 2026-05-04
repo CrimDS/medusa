@@ -3,6 +3,12 @@
 ** Copyright (C) 2005-2012 Mike Pall. See Copyright Notice in luajit.h
 */
 
+/* x64 build: JIT backend is x86-only (uses dasm_x86.h with x86 asm).  The whole
+** translation unit compiles to nothing on x64.  See project_x64_cpp17_migration
+** memory note — Phase 2 ships interpreter-only Lua on x64; LuaJIT 2.x port is
+** the long-term fix. */
+#if defined(__i386) || defined(__i386__) || defined(_M_IX86)
+
 #include <math.h>
 #include <string.h>
 
@@ -339,4 +345,6 @@ void luaJIT_freebackend(lua_State *L)
 }
 
 /* ------------------------------------------------------------------------ */
+
+#endif  /* _M_IX86 — JIT backend is x86-only */
 

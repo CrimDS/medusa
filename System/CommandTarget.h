@@ -17,6 +17,8 @@
 #include "System/Messages.h"
 #include "MedusaDll.h"
 
+#include <cstdint>
+
 //----------------------------------------------------------------------------
 
 #pragma warning( disable: 4251 )
@@ -29,8 +31,12 @@ public:
 	{
 		// Data
 		dword		message;
-		dword		wparam;
-		dword		lparam;
+		// wparam/lparam are pointer-width: HM_MOUSEMOVE etc. stash a
+		// PointInt* in here, and 32-bit dword truncated x64 pointers
+		// → wild deref in NodeWindow::cursorMove.  Small-integer
+		// payloads (key codes, hashes) implicit-promote.
+		uintptr_t	wparam;
+		uintptr_t	lparam;
 		dword		origin;
 	};
 
@@ -44,8 +50,8 @@ public:
 	static int				targetCount();
 	static CommandTarget *	target( int n );
 
-	static bool				postWindowMessage( void * hWnd, dword message, 
-								dword wparam, dword lparam );
+	static bool				postWindowMessage( void * hWnd, dword message,
+								uintptr_t wparam, uintptr_t lparam );
 	static bool				postMessage( const Message & msg );
 
 private:

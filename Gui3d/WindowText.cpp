@@ -358,7 +358,7 @@ void WindowText::updateCache( const RectInt & window )
 			// copy wrapped text over to the next line
 			strcpy<char>( line, wrapped );
 
-			lineChar = strlen( line );
+			lineChar = (int)strlen( line );
 			lineWidth = font->size( WideString( line ) ).width;
 			bFlushLine = bNextLine = false;
 		}

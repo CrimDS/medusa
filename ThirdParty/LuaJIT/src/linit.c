@@ -23,7 +23,9 @@ static const luaL_Reg lualibs[] = {
   {LUA_STRLIBNAME, luaopen_string},
   {LUA_MATHLIBNAME, luaopen_math},
   {LUA_DBLIBNAME, luaopen_debug},
+#ifndef USE_PLAIN_LUA
   {LUA_JITLIBNAME, luaopen_jit},
+#endif
   {NULL, NULL}
 };
 

@@ -49,7 +49,7 @@ CommandTarget *	CommandTarget::target( int n )
 
 //----------------------------------------------------------------------------
 
-bool CommandTarget::postWindowMessage( void * hWnd, dword message, dword wparam, dword lparam )
+bool CommandTarget::postWindowMessage( void * hWnd, dword message, uintptr_t wparam, uintptr_t lparam )
 {
 	// send other messages directly
 	Message msg;

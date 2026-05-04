@@ -212,7 +212,7 @@ void WindowMenu::onSelectChange( int item )
 	// make sound
 	hoverSound();
 	// post message
-	postMessage( WM_SELECT_CHANGE, (dword)this, item );
+	postMessage( WM_SELECT_CHANGE, (uintptr_t)this, item );
 }
 
 void WindowMenu::onSelect( int item )
@@ -220,7 +220,7 @@ void WindowMenu::onSelect( int item )
 	// make sound
 	selectSound();
 	// post message
-	postMessage( WM_SELECT, (dword)this, item );
+	postMessage( WM_SELECT, (uintptr_t)this, item );
 }
 
 //----------------------------------------------------------------------------

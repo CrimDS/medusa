@@ -476,20 +476,6 @@ bool PrimitiveTriangleListDTLD3D12::execute()
 		vbView.SizeInBytes = dataSize;
 		vbView.StrideInBytes = sizeof(VertexTL);
 
-		static int s_nTLLog = 0;
-		if ( s_nTLLog < 10 )
-		{
-			// Log first few vertex positions to verify where text is being drawn
-			VertexTL * pV = (VertexTL *)m_pTriangles;
-			TRACE( "TriangleListDTL: triangles=%d, v0=(%.1f,%.1f) v1=(%.1f,%.1f) v2=(%.1f,%.1f) color=0x%08X",
-				m_TriangleCount,
-				pV[0].position.x, pV[0].position.y,
-				pV[1].position.x, pV[1].position.y,
-				pV[2].position.x, pV[2].position.y,
-				pV[0].diffuse.BGRA() );
-			++s_nTLLog;
-		}
-
 		pDevice->bindPSO( PSOKey::IL_VERTEXTL, PSOKey::TOPO_TRIANGLE );
 		pCmdList->IASetVertexBuffers( 0, 1, &vbView );
 		pCmdList->IASetPrimitiveTopology( D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST );

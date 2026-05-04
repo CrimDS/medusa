@@ -1,5 +1,11 @@
 /*
 	ImageCodecJPEG.cpp
+
+	JPEG codec for medusa's ImageCodec interface.  Backed by stb_image /
+	stb_image_write (public domain) — replaces the legacy Intel JPEG Library
+	(ijl15) which was x86-only and blocked the x64 client migration.  See
+	project_x64_cpp17_migration memory note.
+
 	(c)2005 Palestar Inc, Richard Lyle
 */
 
@@ -7,12 +13,25 @@
 #include "Debug/Assert.h"
 #include "SystemWin/ImageCodecJPEG.h"
 
-#include "SystemWin/ijl/ijl.h"
+#include <string.h>
+#include <stdlib.h>
+
+// Inline single-translation-unit build of stb_image / stb_image_write — these
+// macros must precede the #includes and only ever appear in ONE .cpp.  See
+// medusa/ThirdParty/stb/stb_image.h header comment.
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_STDIO		// we feed bytes only — no fopen
+#define STBI_ONLY_JPEG		// JPEG-only decode keeps stb_image's compiled size minimal
+#include "../ThirdParty/stb/stb_image.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STBI_WRITE_NO_STDIO	// we capture bytes via callback — no fopen
+#include "../ThirdParty/stb/stb_image_write.h"
 
 //----------------------------------------------------------------------------
 
 bool EncodeToJPEGBuffer( byte* lpRgbBuffer, dword dwWidth, dword dwHeight, byte** lppJpgBuffer, dword* lpdwJpgBufferSize, int quality);
-bool DecodeFromJPEGBuffer( byte* lpJpgBuffer, dword dwJpgBufferSize, byte** lppRgbBuffer, 
+bool DecodeFromJPEGBuffer( byte* lpJpgBuffer, dword dwJpgBufferSize, byte** lppRgbBuffer,
 						  dword* lpdwWidth, dword* lpdwHeight, dword* lpdwNumberOfChannels);
 
 //----------------------------------------------------------------------------
@@ -29,7 +48,7 @@ int	ImageCodecJPEG::encode( const Buffer & input, Buffer & output, const SizeInt
 
 	// compress the frame data
 	byte *	jpgBuffer = NULL;
-	dword	jpgSize;
+	dword	jpgSize = 0;
 
 	if (! EncodeToJPEGBuffer( (byte *)input.buffer(), size.width, size.height, &jpgBuffer, &jpgSize, nQuality ) )
 		return -1;
@@ -40,13 +59,13 @@ int	ImageCodecJPEG::encode( const Buffer & input, Buffer & output, const SizeInt
 
 int ImageCodecJPEG::decode( const Buffer & input, Buffer & output, const SizeInt & size )
 {
-	dword rgbWidth, rgbHeight, rgbChannels;
+	dword rgbWidth = 0, rgbHeight = 0, rgbChannels = 0;
 	byte * rgbBuffer = NULL;
 
 	// decompress the jpeg data into the buffer
 	if (! DecodeFromJPEGBuffer( (byte *)input.buffer(), input.bufferSize(), &rgbBuffer, &rgbWidth, &rgbHeight, &rgbChannels ) )
 		return -1;		// an error has occured
-	if ( size.width != rgbWidth || size.height != rgbHeight )
+	if ( size.width != (int)rgbWidth || size.height != (int)rgbHeight )
 	{
 		delete [] rgbBuffer;
 		return -1;		// image is not the correct size
@@ -60,159 +79,113 @@ int ImageCodecJPEG::decode( const Buffer & input, Buffer & output, const SizeInt
 
 //----------------------------------------------------------------------------
 
-static bool EncodeToJPEGBuffer( byte* lpRgbBuffer, dword dwWidth, dword dwHeight, byte** lppJpgBuffer, dword* lpdwJpgBufferSize, int quality )
+// Decode JPEG bytes → RGBA8 pixel buffer.  Output buffer is allocated with new[]
+// so the caller's existing `delete[]` matches.  Replaces ijlInit/ijlRead/ijlFree.
+static bool DecodeFromJPEGBuffer( byte* lpJpgBuffer, dword dwJpgBufferSize, byte** lppRgbBuffer,
+                                   dword* lpdwWidth, dword* lpdwHeight, dword* lpdwNumberOfChannels )
 {
-	bool	bres = true;
-	IJLERR	jerr;
-	dword	dwRgbBufferSize;
-	byte *	lpTemp = NULL;
-
-	// Allocate the IJL JPEG_CORE_PROPERTIES structure.
-	JPEG_CORE_PROPERTIES jcprops;
-	__try {
-		// Initialize the Intel(R) JPEG Library.
-		jerr = ijlInit(&jcprops);
-		if(IJL_OK != jerr)
-		{
-			bres = false;
-			__leave;
-		}
-
-		dwRgbBufferSize = dwWidth * dwHeight * 4;
-		lpTemp = new byte [dwRgbBufferSize];
-		if(NULL == lpTemp)
-		{
-			bres = false;
-			__leave;
-		}
-
-		// Set up information to write from the pixel buffer.
-		jcprops.DIBWidth = dwWidth;
-		jcprops.DIBHeight = dwHeight; // Implies a bottom-up DIB.
-		jcprops.DIBBytes = lpRgbBuffer;
-		jcprops.DIBPadBytes = 0;
-		jcprops.DIBChannels = 4;
-		jcprops.DIBColor = IJL_RGBA_FPX;
-		jcprops.JPGWidth = dwWidth;
-		jcprops.JPGHeight = dwHeight;
-		jcprops.JPGFile = NULL;
-		jcprops.JPGBytes = lpTemp;
-		jcprops.JPGSizeBytes = dwRgbBufferSize;
-		jcprops.JPGChannels = 4;
-		jcprops.JPGColor = IJL_YCBCRA_FPX;
-		jcprops.JPGSubsampling = IJL_4114; // 4:1:1 subsampling.
-		jcprops.jquality = quality;
-
-		// Write the actual JPEG image from the pixel buffer.
-		jerr = ijlWrite(&jcprops,IJL_JBUFF_WRITEWHOLEIMAGE);
-		if(IJL_OK != jerr)
-		{
-			bres = false;
-			__leave;
-		}
-
-	} // __try
-	__finally
+	int w = 0, h = 0, srcComp = 0;
+	stbi_uc * stbiPixels = stbi_load_from_memory( (const stbi_uc *)lpJpgBuffer, (int)dwJpgBufferSize,
+	                                              &w, &h, &srcComp, 4 /* force RGBA out */ );
+	if ( stbiPixels == NULL )
 	{
-		if( bres == false )
-		{
-			if(NULL != lpTemp)
-			{
-				delete[] lpTemp;
-				lpTemp = NULL;
-			}
-		}
-
-		*lppJpgBuffer = lpTemp;
-		*lpdwJpgBufferSize = jcprops.JPGSizeBytes;
-		// Clean up the Intel(R) JPEG Library.
-		ijlFree(&jcprops);
+		*lppRgbBuffer = NULL;
+		*lpdwWidth = 0;
+		*lpdwHeight = 0;
+		*lpdwNumberOfChannels = 0;
+		return false;
 	}
-	
-	return bres;
-} // EncodeToJPEGBuffer()
 
-static bool DecodeFromJPEGBuffer( byte* lpJpgBuffer, dword dwJpgBufferSize, byte** lppRgbBuffer, 
-						  dword* lpdwWidth, dword* lpdwHeight, dword* lpdwNumberOfChannels)
-{
-	bool	bres = true;
-	IJLERR	jerr;
-	dword	dwWholeImageSize;
-	byte *	lpTemp = NULL;
+	// stbi allocates with malloc; the medusa caller frees with delete[].  Copy into
+	// a new[]'d buffer so the deallocator pairs correctly.
+	const dword nBytes = (dword)w * (dword)h * 4;
+	byte * outBuf = new byte[ nBytes ];
+	memcpy( outBuf, stbiPixels, nBytes );
+	stbi_image_free( stbiPixels );
 
-	// Allocate the IJL JPEG_CORE_PROPERTIES structure.
-	JPEG_CORE_PROPERTIES jcprops;
-	__try
+	*lppRgbBuffer = outBuf;
+	*lpdwWidth = (dword)w;
+	*lpdwHeight = (dword)h;
+	*lpdwNumberOfChannels = 4;	// always 4 (RGBA), we forced channels=4 above
+	return true;
+}
+
+//----------------------------------------------------------------------------
+
+// Output collector for stbi_write_jpg_to_func — accumulates JPEG bytes into a
+// dynamically grown buffer.  Geometric growth keeps amortised cost O(1) per byte.
+namespace {
+	struct JpgWriteCtx {
+		byte *	buf;
+		dword	size;
+		dword	cap;
+	};
+
+	void jpg_write_callback( void * context, void * data, int size )
 	{
-		// Initialize the Intel(R) JPEG Library.
-		jerr = ijlInit(&jcprops);
-		if(IJL_OK != jerr)
+		JpgWriteCtx * ctx = (JpgWriteCtx *)context;
+		const dword wantSize = ctx->size + (dword)size;
+		if ( wantSize > ctx->cap )
 		{
-			bres = false;
-			__leave;
-		}
-		// Get information on the JPEG image
-		// (i.e., width, height, and channels).
-
-		jcprops.JPGFile = NULL;
-		jcprops.JPGBytes = lpJpgBuffer;
-		jcprops.JPGSizeBytes = dwJpgBufferSize;
-		jerr = ijlRead(&jcprops, IJL_JBUFF_READPARAMS);
-		if(IJL_OK != jerr)
-		{
-			bres = false;
-			__leave;
-		}
-
-		ASSERT( jcprops.JPGChannels == 4 );
-		//jcprops.JPGColor = IJL_YCBCRA_FPX;
-		jcprops.DIBColor = IJL_RGBA_FPX;
-		jcprops.DIBChannels = 4;
-
-		// Compute size of desired pixel buffer.
-		dwWholeImageSize = jcprops.JPGWidth * jcprops.JPGHeight * jcprops.DIBChannels;
-		// Allocate memory to hold the decompressed image data.
-		lpTemp = new byte [dwWholeImageSize];
-		if(NULL == lpTemp)
-		{
-			bres = false;
-			__leave;
-		}
-		// Set up the info on the desired DIB properties.
-		jcprops.DIBWidth = jcprops.JPGWidth;
-		jcprops.DIBHeight = jcprops.JPGHeight;
-		jcprops.DIBPadBytes = 0;
-		jcprops.DIBBytes = lpTemp;
-		// Now get the actual JPEG image data into the pixel buffer.
-		jerr = ijlRead(&jcprops, IJL_JBUFF_READWHOLEIMAGE);
-		if(IJL_OK != jerr)
-		{
-			bres = false;
-			__leave;
-		}
-	} // __try
-	__finally
-	{
-		if(false == bres)
-		{
-			if(NULL != lpTemp)
+			dword newCap = ctx->cap == 0 ? 8192 : ctx->cap * 2;
+			while ( newCap < wantSize )
+				newCap *= 2;
+			byte * newBuf = new byte[ newCap ];
+			if ( ctx->buf != NULL )
 			{
-				delete [] lpTemp;
-				lpTemp = NULL;
+				memcpy( newBuf, ctx->buf, ctx->size );
+				delete [] ctx->buf;
 			}
+			ctx->buf = newBuf;
+			ctx->cap = newCap;
 		}
+		memcpy( ctx->buf + ctx->size, data, size );
+		ctx->size += (dword)size;
+	}
+}
 
-		// Clean up the Intel(R) JPEG Library.
-		ijlFree(&jcprops);
-		*lpdwWidth = jcprops.DIBWidth;
-		*lpdwHeight = jcprops.DIBHeight;
-		*lpdwNumberOfChannels = jcprops.DIBChannels;
-		*lppRgbBuffer = lpTemp;
-	} // __finally
-	
-	return bres;
+// Encode RGBA8 pixel buffer → JPEG bytes.  stbi_write_jpg only accepts 1 or 3
+// channel input, so we strip alpha to RGB before encoding.  Output buffer is
+// allocated with new[] for matching delete[] in the caller.  Replaces ijlWrite.
+static bool EncodeToJPEGBuffer( byte* lpRgbBuffer, dword dwWidth, dword dwHeight,
+                                 byte** lppJpgBuffer, dword* lpdwJpgBufferSize, int quality )
+{
+	*lppJpgBuffer = NULL;
+	*lpdwJpgBufferSize = 0;
 
-} // DecodeFromJPEGBuffer()
+	if ( dwWidth == 0 || dwHeight == 0 || lpRgbBuffer == NULL )
+		return false;
+
+	// Strip RGBA → RGB for stbi_write_jpg.  ImageCodec input is always 4-channel
+	// per the encode() signature; stb_image_write doesn't support 4-channel JPEG.
+	const dword nPixels = dwWidth * dwHeight;
+	byte * rgbOnly = new byte[ nPixels * 3 ];
+	for ( dword i = 0; i < nPixels; ++i )
+	{
+		rgbOnly[ i * 3 + 0 ] = lpRgbBuffer[ i * 4 + 0 ];
+		rgbOnly[ i * 3 + 1 ] = lpRgbBuffer[ i * 4 + 1 ];
+		rgbOnly[ i * 3 + 2 ] = lpRgbBuffer[ i * 4 + 2 ];
+	}
+
+	JpgWriteCtx ctx;
+	ctx.buf  = NULL;
+	ctx.size = 0;
+	ctx.cap  = 0;
+
+	const int ok = stbi_write_jpg_to_func( jpg_write_callback, &ctx,
+	                                       (int)dwWidth, (int)dwHeight, 3, rgbOnly, quality );
+	delete [] rgbOnly;
+
+	if ( !ok )
+	{
+		delete [] ctx.buf;
+		return false;
+	}
+
+	*lppJpgBuffer = ctx.buf;
+	*lpdwJpgBufferSize = ctx.size;
+	return true;
+}
 
 //----------------------------------------------------------------------------
 //EOF

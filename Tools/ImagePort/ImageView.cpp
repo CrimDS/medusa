@@ -415,7 +415,7 @@ BOOL CImageView::OnSetCursor(CWnd* pWnd, UINT nHitTest, UINT message)
 	return CScrollView::OnSetCursor(pWnd, nHitTest, message);
 }
 
-void CImageView::OnTimer(UINT nIDEvent) 
+void CImageView::OnTimer(UINT_PTR nIDEvent)
 {
 	if ( nIDEvent == 1 )
 	{

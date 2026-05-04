@@ -364,7 +364,7 @@ bool InterfaceContext::onMessage( const Message & msg )
 		return true;
 	case IC_SET_SCENE:
 		{
-			int sceneIndex = findScene( msg.wparam );
+			int sceneIndex = findScene( (dword)msg.wparam );
 			if ( sceneIndex >= 0 )
 			{
 				setActiveScene( sceneIndex );

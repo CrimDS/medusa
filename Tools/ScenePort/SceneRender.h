@@ -112,7 +112,7 @@ protected:
 	afx_msg void OnUpdateCameraPoint(CCmdUI* pCmdUI);
 	afx_msg void OnScenePlay();
 	afx_msg void OnUpdateScenePlay(CCmdUI* pCmdUI);
-	afx_msg void OnTimer(UINT nIDEvent);
+	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg void OnCameraZoom();
 	afx_msg void OnUpdateCameraZoom(CCmdUI* pCmdUI);
 	afx_msg void OnCameraDolly();

@@ -284,7 +284,7 @@ void Thread::threadLock( bool bLock )
 
 int Thread::threadCount()
 {
-	return sm_Threads.size();
+	return (int)sm_Threads.size();
 }
 
 Thread * Thread::thread( int n )

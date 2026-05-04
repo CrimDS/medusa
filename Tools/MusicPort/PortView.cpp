@@ -260,7 +260,7 @@ void CPortView::OnMusicPlay()
 	}
 }
 
-void CPortView::OnTimer(UINT nIDEvent) 
+void CPortView::OnTimer(UINT_PTR nIDEvent)
 {
 	if ( m_Music.valid() )
 	{

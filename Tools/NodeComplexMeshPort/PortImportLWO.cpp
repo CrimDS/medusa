@@ -827,7 +827,8 @@ inline CharString parseString( byte * &pointer )
 	pointer++;
 
 	// if the string length is odd, then skip one more byte
-	if ( dword( pointer ) & 0x1 )
+	// (alignment check — only low bit matters, but use uintptr_t to avoid x64 pointer truncation warning)
+	if ( (uintptr_t)pointer & 0x1 )
 		pointer++;
 
 	return string;

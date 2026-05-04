@@ -55,8 +55,8 @@ typedef int				SOCKET;
 
 //----------------------------------------------------------------------------
 
-Socket::Socket() : 
-	m_Socket( INVALID_SOCKET), 
+Socket::Socket() :
+	m_Socket( (int)INVALID_SOCKET ),
 	m_eState( SS_DISCONNECTED ),
 	m_pCodec( new ZLIB() ),
 	m_Port( 0 ), 
@@ -67,7 +67,7 @@ Socket::Socket() :
 {}
 
 Socket::Socket( const char * a_pCodecName ) :
-	m_Socket( INVALID_SOCKET), 
+	m_Socket( (int)INVALID_SOCKET ),
 	m_eState( SS_DISCONNECTED ),
 	m_pCodec( Codec::createNamed( a_pCodecName ) ),
 	m_Port( 0 ), 
@@ -78,7 +78,7 @@ Socket::Socket( const char * a_pCodecName ) :
 {}
 
 Socket::Socket( Codec * a_pCodec ) :
-	m_Socket( INVALID_SOCKET), 
+	m_Socket( (int)INVALID_SOCKET ),
 	m_eState( SS_DISCONNECTED ),
 	m_pCodec( a_pCodec ),
 	m_Port( 0 ), 
@@ -253,7 +253,7 @@ void Socket::close()
 #endif
 		// close may be called multiple times, if this isn't set to NULL, then a handle number 
 		// already in use by another socket may get closed
-		m_Socket = INVALID_SOCKET;
+		m_Socket = (int)INVALID_SOCKET;
 	}
 
 	m_EncodeBuffer.release();
@@ -413,7 +413,7 @@ Socket::State Socket::update(bool a_bSendData /*= true*/, bool a_bReceiveData /*
 			while( nNewSocket != INVALID_SOCKET )
 			{
 				LOG_DEBUG_MED( "Socket", "Accepted new socket %u.", nNewSocket );
-				m_Accepted.push_back( new Socket( nNewSocket, m_pCodec->clone() ) );
+				m_Accepted.push_back( new Socket( (int)nNewSocket, m_pCodec->clone() ) );
 
 				nNewSocket = ::accept( m_Socket, 0, 0 );
 			}
@@ -483,7 +483,7 @@ bool Socket::createSocket()
 	// create the sockets only if they have no been already
 	if ( m_Socket == INVALID_SOCKET )
 	{
-		m_Socket = socket( AF_INET, SOCK_STREAM, IPPROTO_TCP );
+		m_Socket = (int)socket( AF_INET, SOCK_STREAM, IPPROTO_TCP );
 		if ( m_Socket == INVALID_SOCKET  )
 			return false;	// failed to create socket
 	}

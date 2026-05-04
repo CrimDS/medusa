@@ -5,6 +5,8 @@
 	@author Richard Lyle @date 4/8/2012 3:03:21 PM
 */
 
+#define GUI3D_DLL
+
 #include "WindowText.h"
 #include "WindowButton.h"
 #include "NodeWindow.h"
@@ -13,21 +15,12 @@
 //---------------------------------------------------------------------------------------------------
 
 #include "World/LuaHeaders.h"
-#ifdef USE_PLAIN_LUA
-	#ifdef _DEBUG
-		#pragma comment( lib, "../../Medusa/ThirdParty/Lua51/bin/Lua51D.lib")
-	#else
-		#pragma comment( lib, "../../Medusa/ThirdParty/Lua51/bin/Lua51.lib")
-	#endif
-#else
+// Lua linkage is handled by GUI3D.vcxproj's ProjectReference to LuaLib.vcxproj.
+// JIT optimizer headers only needed in non-USE_PLAIN_LUA (Win32) builds —
+// see project_x64_cpp17_migration memory note.
+#ifndef USE_PLAIN_LUA
 	#include "../../Medusa/ThirdParty/LuaJIT/jit/opt.h"
 	#include "../../Medusa/ThirdParty/LuaJIT/jit/opt_inline.h"
-
-	#ifdef _DEBUG
-		#pragma comment( lib, "../../Medusa/ThirdParty/LuaJIT/bin/Lua51D.lib")
-	#else
-		#pragma comment( lib, "../../Medusa/ThirdParty/LuaJIT/bin/Lua51.lib")
-	#endif
 #endif
 
 //---------------------------------------------------------------------------------------------------

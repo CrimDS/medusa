@@ -10,7 +10,10 @@
 
 #include "Referenced.h"
 
-#pragma warning(disable:4311)		// pointer truncation from 'const Reference<T> *const ' to 'dword'
+#include <cstdint>
+
+// (Was: #pragma warning(disable:4311) — needed when tracking IDs were dword.
+// Now uintptr_t-wide, no truncation, warning no longer applicable.)
 
 //---------------------------------------------------------------------------------------------------
 
@@ -108,10 +111,10 @@ inline void	Reference<T>::setPointer( T * pPointer )
 {
 	if ( pPointer != m_pPointer )
 	{
-		if ( pPointer == NULL || pPointer->grabReference( reinterpret_cast<dword>( this ) ) )
+		if ( pPointer == NULL || pPointer->grabReference( reinterpret_cast<uintptr_t>( this ) ) )
 		{
 			if( m_pPointer != NULL )
-				m_pPointer->releaseReference( reinterpret_cast<dword>( this ) );
+				m_pPointer->releaseReference( reinterpret_cast<uintptr_t>( this ) );
 			m_pPointer = pPointer;
 		}
 	}

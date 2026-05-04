@@ -572,7 +572,7 @@ CharString Widget::dumpWidgets()
 	for(int i=0;i<WIDGET_HASH_SIZE;++i)
 	{
 		WidgetMap & map = widgetMap( WidgetKey( (qword)i ) );
-		nTotalWidgets += map.size();
+		nTotalWidgets += (int)map.size();
 
 		for( WidgetMap::iterator iWidget = map.begin(); 
 			iWidget != map.end(); ++iWidget )

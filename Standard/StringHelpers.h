@@ -78,9 +78,12 @@ inline C * strncpy( C * dst, const C * src, size_t n )
     return dst;
 }
 
-// string compare
+// string compare — returns 3-way comparison result like the C stdlib strcmp.
+// Was size_t historically (returned ((size_t)*s1) - ((size_t)*s2), which on
+// x64 is unsigned 64-bit and never negative, breaking ordering).  int is the
+// correct return type and matches the C standard.
 template<typename C>
-inline size_t strcmp( const C * s1, const C * s2 )
+inline int strcmp( const C * s1, const C * s2 )
 {
     while (*s1 == *s2)
 	{
@@ -89,12 +92,12 @@ inline size_t strcmp( const C * s1, const C * s2 )
 			return 0;
 	}
 
-	return ((size_t)*s1) - ((size_t)*s2);
+	return ((int)*s1) - ((int)*s2);
 }
 
 // case insenstive compare
 template<typename C>
-inline size_t stricmp( const C * s1, const C * s2 )
+inline int stricmp( const C * s1, const C * s2 )
 {
     while ( tolower(*s1) == tolower(*s2) )
 	{
@@ -103,19 +106,19 @@ inline size_t stricmp( const C * s1, const C * s2 )
 			return 0;
 	}
 
-	return ((size_t)tolower( *s1 )) - ((size_t)tolower( *s2 ));
+	return ((int)tolower( *s1 )) - ((int)tolower( *s2 ));
 }
 
 // compare with limit
 template<typename C>
-inline size_t strncmp( const C * s1, const C * s2, size_t n )
+inline int strncmp( const C * s1, const C * s2, size_t n )
 {
 	if ( n == 0 )
 		return 0;
 
     do {
 		if (*s1 != *s2)
-			return ((size_t)*s1) - ((size_t)*s2);
+			return ((int)*s1) - ((int)*s2);
 		if (*s1++ == 0)
 			break;
 		s2++;
@@ -127,7 +130,7 @@ inline size_t strncmp( const C * s1, const C * s2, size_t n )
 
 // case insenstive compare with limit
 template<typename C>
-inline size_t strnicmp( const C * s1, const C * s2, size_t n )
+inline int strnicmp( const C * s1, const C * s2, size_t n )
 {
 	if ( n == 0 )
 		return 0;
@@ -137,7 +140,7 @@ inline size_t strnicmp( const C * s1, const C * s2, size_t n )
 		C c2 = tolower(*s2);
 
 		if (c1 != c2)
-			return ((size_t)c1) - ((size_t)c2);
+			return ((int)c1) - ((int)c2);
 		if (*s1++ == 0)
 			break;
 		s2++;

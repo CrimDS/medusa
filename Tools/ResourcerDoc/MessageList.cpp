@@ -81,7 +81,7 @@ void CMessageList::OnSize(UINT nType, int cx, int cy)
 		GetListCtrl().SetColumnWidth(0 , cx );
 }
 
-void CMessageList::OnTimer(UINT nIDEvent) 
+void CMessageList::OnTimer(UINT_PTR nIDEvent)
 {
 	CMainFrame * pMain = (CMainFrame *)AfxGetMainWnd();
 	ASSERT( pMain );

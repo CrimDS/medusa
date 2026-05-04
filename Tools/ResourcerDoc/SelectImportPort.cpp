@@ -61,7 +61,7 @@ void CSelectImportPort::OnOK()
 	if ( selectedItem < 0 )
 		return;
 
-	m_SelectedPort = m_PortList.GetItemData( selectedItem );
+	m_SelectedPort = (int)m_PortList.GetItemData( selectedItem );
 	
 	CDialog::OnOK();
 }

@@ -38,7 +38,7 @@ static int EnumClasses( CTreeCtrl & tree, HTREEITEM hParent, const ClassKey & ke
       nCount++;
 
       hParent = tree.InsertItem( pFactory->className(), hParent );
-      tree.SetItemData( hParent, (DWORD)&pFactory->classKey() );
+      tree.SetItemData( hParent, (DWORD_PTR)&pFactory->classKey() );
 
 	  for(int i=0;i<Factory::typeCount( key );i++)
 		nCount += EnumClasses( tree, hParent, Factory::type( key, i ) );

@@ -9,6 +9,14 @@
       <Configuration>Release</Configuration>
       <Platform>Win32</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{75497DF2-0C78-4129-900D-09ABA10FA45E}</ProjectGuid>
@@ -36,6 +44,18 @@
     <UseOfMfc>Dynamic</UseOfMfc>
     <CharacterSet>MultiByte</CharacterSet>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <UseOfMfc>Dynamic</UseOfMfc>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <UseOfMfc>Dynamic</UseOfMfc>
+    <CharacterSet>MultiByte</CharacterSet>
+  </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
@@ -46,6 +66,12 @@
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
     <Import Project="$(VCTargetsPath)Microsoft.CPP.UpgradeFromVC71.props" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup>
@@ -59,6 +85,17 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <OutDir>..\Bin\</OutDir>
     <IntDir>.\Debug\</IntDir>
+    <LinkIncremental>false</LinkIncremental>
+    <TargetName>$(ProjectName)D</TargetName>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>..\Bin\x64\</OutDir>
+    <IntDir>.\x64\Release\</IntDir>
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>..\Bin\x64\</OutDir>
+    <IntDir>.\x64\Debug\</IntDir>
     <LinkIncremental>false</LinkIncremental>
     <TargetName>$(ProjectName)D</TargetName>
   </PropertyGroup>
@@ -149,30 +186,114 @@
       <ProfileGuidedDatabase>$(OutDir)$(TargetName).pgd</ProfileGuidedDatabase>
     </Link>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Midl>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MkTypLibCompatible>true</MkTypLibCompatible>
+      <SuppressStartupBanner>true</SuppressStartupBanner>
+      <TargetEnvironment>X64</TargetEnvironment>
+      <TypeLibraryName>.\../Bin/x64/Resourcer.tlb</TypeLibraryName>
+      <HeaderFileName />
+    </Midl>
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <AdditionalIncludeDirectories>../../;../../../GameCQ/;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>NDEBUG;_WINDOWS;WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <PrecompiledHeaderOutputFile>.\x64\Release/Resourcer.pch</PrecompiledHeaderOutputFile>
+      <AssemblerListingLocation>.\x64\Release/</AssemblerListingLocation>
+      <ObjectFileName>.\x64\Release/</ObjectFileName>
+      <ProgramDataBaseFileName>.\x64\Release/</ProgramDataBaseFileName>
+      <WarningLevel>Level3</WarningLevel>
+      <SuppressStartupBanner>true</SuppressStartupBanner>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <CompileAs>Default</CompileAs>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <Culture>0x0409</Culture>
+    </ResourceCompile>
+    <Link>
+      <OutputFile>$(OutDir)$(ProjectName).exe</OutputFile>
+      <SuppressStartupBanner>true</SuppressStartupBanner>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\..\Bin\x64;../../../GameCQ/Bin;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <GenerateMapFile>true</GenerateMapFile>
+      <MapFileName>$(OutDir)$(TargetName).map</MapFileName>
+      <MapExports>true</MapExports>
+      <SubSystem>Windows</SubSystem>
+      <TargetMachine>MachineX64</TargetMachine>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Midl>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <MkTypLibCompatible>true</MkTypLibCompatible>
+      <SuppressStartupBanner>true</SuppressStartupBanner>
+      <TargetEnvironment>X64</TargetEnvironment>
+      <TypeLibraryName>.\../Bin/x64/Resourcer.tlb</TypeLibraryName>
+      <HeaderFileName />
+    </Midl>
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <AdditionalIncludeDirectories>../../;../../../GameCQ/;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>_DEBUG;_WINDOWS;WIN32;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <BufferSecurityCheck>false</BufferSecurityCheck>
+      <RuntimeTypeInfo>true</RuntimeTypeInfo>
+      <PrecompiledHeaderOutputFile>.\x64\Debug/Resourcer.pch</PrecompiledHeaderOutputFile>
+      <AssemblerListingLocation>.\x64\Debug/</AssemblerListingLocation>
+      <ObjectFileName>.\x64\Debug/</ObjectFileName>
+      <ProgramDataBaseFileName>.\x64\Debug/</ProgramDataBaseFileName>
+      <WarningLevel>Level3</WarningLevel>
+      <SuppressStartupBanner>true</SuppressStartupBanner>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <CompileAs>Default</CompileAs>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <Culture>0x0409</Culture>
+    </ResourceCompile>
+    <Link>
+      <OutputFile>$(OutDir)$(ProjectName)D.exe</OutputFile>
+      <SuppressStartupBanner>true</SuppressStartupBanner>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\..\Bin\x64;../../../GameCQ/Bin;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(OutDir)$(TargetName).pdb</ProgramDatabaseFile>
+      <GenerateMapFile>true</GenerateMapFile>
+      <MapFileName>$(OutDir)$(TargetName).map</MapFileName>
+      <MapExports>true</MapExports>
+      <SubSystem>Windows</SubSystem>
+      <TargetMachine>MachineX64</TargetMachine>
+    </Link>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="ClassHeirarchy.cpp">
-      <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Disabled</Optimization>
-      <BasicRuntimeChecks Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">EnableFastChecks</BasicRuntimeChecks>
-      <Optimization Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">MaxSpeed</Optimization>
+      <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
+      <BasicRuntimeChecks Condition="'$(Configuration)'=='Debug'">EnableFastChecks</BasicRuntimeChecks>
+      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
     </ClCompile>
     <ClCompile Include="MainFrm.cpp">
-      <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Disabled</Optimization>
-      <BasicRuntimeChecks Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">EnableFastChecks</BasicRuntimeChecks>
-      <Optimization Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">MaxSpeed</Optimization>
+      <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
+      <BasicRuntimeChecks Condition="'$(Configuration)'=='Debug'">EnableFastChecks</BasicRuntimeChecks>
+      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
     </ClCompile>
     <ClCompile Include="Resourcer.cpp">
-      <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Disabled</Optimization>
-      <BasicRuntimeChecks Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">EnableFastChecks</BasicRuntimeChecks>
-      <Optimization Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">MaxSpeed</Optimization>
+      <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
+      <BasicRuntimeChecks Condition="'$(Configuration)'=='Debug'">EnableFastChecks</BasicRuntimeChecks>
+      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
     </ClCompile>
     <ClCompile Include="StdAfx.cpp">
-      <Optimization Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Disabled</Optimization>
-      <BasicRuntimeChecks Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">EnableFastChecks</BasicRuntimeChecks>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Create</PrecompiledHeader>
-      <PrecompiledHeaderFile Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">stdafx.h</PrecompiledHeaderFile>
-      <Optimization Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">MaxSpeed</Optimization>
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Create</PrecompiledHeader>
-      <PrecompiledHeaderFile Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">stdafx.h</PrecompiledHeaderFile>
+      <Optimization Condition="'$(Configuration)'=='Debug'">Disabled</Optimization>
+      <BasicRuntimeChecks Condition="'$(Configuration)'=='Debug'">EnableFastChecks</BasicRuntimeChecks>
+      <PrecompiledHeader Condition="'$(Configuration)'=='Debug'">Create</PrecompiledHeader>
+      <PrecompiledHeaderFile Condition="'$(Configuration)'=='Debug'">stdafx.h</PrecompiledHeaderFile>
+      <Optimization Condition="'$(Configuration)'=='Release'">MaxSpeed</Optimization>
+      <PrecompiledHeader Condition="'$(Configuration)'=='Release'">Create</PrecompiledHeader>
+      <PrecompiledHeaderFile Condition="'$(Configuration)'=='Release'">stdafx.h</PrecompiledHeaderFile>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -357,21 +478,43 @@
     </VisualStudio>
   </ProjectExtensions>
   <!--
-    Stage darkspace runtime DLLs next to Resourcer.exe so DarkSpace.dll's
-    static-init LoadLibrary("Gadgets.dll" / "Interface.dll") in
-    darkspace\DarkSpace\GameDll.cpp resolves regardless of how the exe
-    is launched (VS / Explorer / shortcut).  Without this, only a launch
-    that puts darkspace\Bin on PATH would find them, and the legacy
-    factory-key aliases registered in Gadgets.dll's static init never
-    register — so loading any old .prt that references those legacy keys
-    (e.g. ShipCruiser=4134492549914846131 in Gadgets/Ships.cpp) silently
-    falls through createNode and the scene appears empty.
+    Stage runtime DLLs next to Resourcer.exe so the loader resolves them on
+    Explorer / shortcut / VS launches without relying on PATH.  Two groups:
+
+    1) darkspace runtime (DarkSpace.dll, Gadgets.dll, Interface.dll) — needed
+       because DarkSpace.dll's static init does LoadLibrary("Gadgets.dll" /
+       "Interface.dll") in darkspace\DarkSpace\GameDll.cpp.  Without these,
+       legacy factory-key aliases registered in Gadgets.dll's static init
+       never register — loading any old .prt that references those legacy
+       keys (e.g. ShipCruiser=4134492549914846131 in Gadgets/Ships.cpp)
+       silently falls through createNode and the scene appears empty.
+
+    2) medusa engine DLLs (Medusa, GUI3D, Render3D, Network, World, GCQ,
+       AudioXA2, SystemWin, DisplayD3D12, ijl15) — Resourcer.exe links to
+       these implicitly via the Tools port DLLs.  Without copying them
+       next to Resourcer.exe, the Windows loader can't find Medusa.dll
+       and bails before main() with "code execution cannot proceed".
+
+    Source paths are platform-aware: x64 builds pull from *\Bin\x64\ subdirs.
+    Engine DLLs use Exists() conditions so missing Debug-built engines don't
+    fail the deploy when the user hasn't built that config yet.
   -->
   <Target Name="DeployDarkSpaceRuntime" AfterTargets="Build">
     <ItemGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
       <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\DarkSpace.dll" />
       <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\Gadgets.dll" />
       <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\Interface.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\Medusa.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\GUI3D.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\Render3D.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\Network.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\World.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\GCQ.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\AudioXA2.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\SystemWin.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\DisplayD3D12.dll" Condition="Exists('$(ProjectDir)..\..\Bin\DisplayD3D12.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\DisplayD3D.dll" Condition="Exists('$(ProjectDir)..\..\Bin\DisplayD3D.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\ijl15.dll" Condition="Exists('$(ProjectDir)..\..\Bin\ijl15.dll')" />
     </ItemGroup>
     <ItemGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
       <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\DarkSpaceD.dll" />
@@ -380,8 +523,53 @@
       <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\DarkSpaceD.pdb" Condition="Exists('$(ProjectDir)..\..\..\darkspace\Bin\DarkSpaceD.pdb')" />
       <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\GadgetsD.pdb" Condition="Exists('$(ProjectDir)..\..\..\darkspace\Bin\GadgetsD.pdb')" />
       <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\InterfaceD.pdb" Condition="Exists('$(ProjectDir)..\..\..\darkspace\Bin\InterfaceD.pdb')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\MedusaD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\MedusaD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\GUI3DD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\GUI3DD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\Render3DD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\Render3DD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\NetworkD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\NetworkD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\WorldD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\WorldD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\GCQD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\GCQD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\AudioXA2D.dll" Condition="Exists('$(ProjectDir)..\..\Bin\AudioXA2D.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\SystemWinD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\SystemWinD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\DisplayD3D12D.dll" Condition="Exists('$(ProjectDir)..\..\Bin\DisplayD3D12D.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\DisplayD3DD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\DisplayD3DD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\ijl15.dll" Condition="Exists('$(ProjectDir)..\..\Bin\ijl15.dll')" />
+    </ItemGroup>
+    <ItemGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\x64\DarkSpace.dll" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\x64\Gadgets.dll" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\x64\Interface.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\Medusa.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\GUI3D.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\Render3D.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\Network.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\World.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\GCQ.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\AudioXA2.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\SystemWin.dll" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\DisplayD3D12.dll" />
+    </ItemGroup>
+    <ItemGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\x64\DarkSpaceD.dll" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\x64\GadgetsD.dll" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\x64\InterfaceD.dll" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\x64\DarkSpaceD.pdb" Condition="Exists('$(ProjectDir)..\..\..\darkspace\Bin\x64\DarkSpaceD.pdb')" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\x64\GadgetsD.pdb" Condition="Exists('$(ProjectDir)..\..\..\darkspace\Bin\x64\GadgetsD.pdb')" />
+      <_DSRuntime Include="$(ProjectDir)..\..\..\darkspace\Bin\x64\InterfaceD.pdb" Condition="Exists('$(ProjectDir)..\..\..\darkspace\Bin\x64\InterfaceD.pdb')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\MedusaD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\x64\MedusaD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\GUI3DD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\x64\GUI3DD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\Render3DD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\x64\Render3DD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\NetworkD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\x64\NetworkD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\WorldD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\x64\WorldD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\GCQD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\x64\GCQD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\AudioXA2D.dll" Condition="Exists('$(ProjectDir)..\..\Bin\x64\AudioXA2D.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\SystemWinD.dll" Condition="Exists('$(ProjectDir)..\..\Bin\x64\SystemWinD.dll')" />
+      <_Engine Include="$(ProjectDir)..\..\Bin\x64\DisplayD3D12D.dll" Condition="Exists('$(ProjectDir)..\..\Bin\x64\DisplayD3D12D.dll')" />
     </ItemGroup>
     <Copy SourceFiles="@(_DSRuntime)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(_Engine)"
           DestinationFolder="$(OutDir)"
           SkipUnchangedFiles="true" />
   </Target>

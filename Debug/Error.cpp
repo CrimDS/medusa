@@ -71,12 +71,12 @@ void ProcessError( const char * a_pMessage, const char * a_pFile, int a_nLine )
 
 			// give debugger a chance to debug the application before exiting...
 			if ( nChoice == IDABORT && IsDebuggerPresent() )
-				__asm { int 3 };
+				__debugbreak();
 		}
 		else
 		{
 			if ( IsDebuggerPresent() )
-				__asm { int 3 };
+				__debugbreak();
 		}
 #endif
 		exit( 1 );

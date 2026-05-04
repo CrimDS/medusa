@@ -140,7 +140,7 @@ int BaseNode::attachNode( BaseNode * pChild )
 	// notify the child object
 	pChild->onAttached();
 
-	return( m_Children.size() - 1 );
+	return( (int)(m_Children.size() - 1) );
 }
 
 int	BaseNode::insertNode( int n, BaseNode * pChild )
@@ -200,7 +200,7 @@ void BaseNode::detachNode( BaseNode * pChild )
 {
 	if ( pChild != NULL )
 	{
-		for(size_t i=0;i<m_Children.size();i++)
+		for(int i=0;i<(int)m_Children.size();i++)
 			if ( m_Children[i].pointer() == pChild )
 			{
 				detachNode( i );
@@ -234,7 +234,7 @@ void BaseNode::detachNodeSwap( int nChild )
 
 void BaseNode::detachNodeSwap( BaseNode * pChild )
 {
-	for(size_t i=0;i<m_Children.size();i++)
+	for(int i=0;i<(int)m_Children.size();i++)
 		if ( m_Children[i].pointer() == pChild )
 		{
 			detachNodeSwap( i );

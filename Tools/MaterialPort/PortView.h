@@ -122,7 +122,7 @@ protected:
 
 	// Generated message map functions
 	//{{AFX_MSG(CPortView)
-	afx_msg void OnTimer(UINT nIDEvent);
+	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg void OnCancel();
 	afx_msg void OnUpdateMaterial();
 	afx_msg void OnLight();

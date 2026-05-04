@@ -128,7 +128,7 @@ bool Registry::put( const char * pKey, const char * pValue )
 	if ( RegCreateKeyA( m_bUser ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE, sKey, &hKey ) != ERROR_SUCCESS )
 		return false;
 	bool bSuccess = false;
-	if ( !RegSetValueExA( hKey, sSubKey, 0, REG_SZ, (byte *)pValue, strlen(pValue) + 1 ) )
+	if ( !RegSetValueExA( hKey, sSubKey, 0, REG_SZ, (byte *)pValue, (DWORD)(strlen(pValue) + 1) ) )
 		bSuccess = true;
 
 	RegCloseKey( hKey );

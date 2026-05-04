@@ -30,7 +30,7 @@ MD5::MD5( const char * pInput )
 	initialize();
 
 	// hash the string
-	digest( (byte *)pInput, strlen( pInput ) );
+	digest( (byte *)pInput, (unsigned int)strlen( pInput ) );
 }
 
 //----------------------------------------------------------------------------

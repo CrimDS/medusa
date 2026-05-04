@@ -354,14 +354,14 @@ int WindowList::addColumn( int width, Color color )
 void WindowList::onSelectChange( int item )
 {
 	hoverSound();
-	postMessage( WL_SELECT_CHANGE, (dword)this, item );
+	postMessage( WL_SELECT_CHANGE, (uintptr_t)this, item );
 
 }
 
 void WindowList::onSelect( int item )
 {
 	selectSound();
-	postMessage( WL_SELECT, (dword)this, item );
+	postMessage( WL_SELECT, (uintptr_t)this, item );
 }
 
 //----------------------------------------------------------------------------

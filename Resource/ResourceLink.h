@@ -19,6 +19,7 @@
 #include "Factory/Widget.h"
 #include "Standard/StringHash64.h"
 
+#include <cstdint>
 #include <set>
 
 #include "MedusaDll.h"
@@ -155,7 +156,7 @@ template<typename T>
 inline ResourceLink<T>::~ResourceLink()
 {
 	if( m_pPointer )
-		m_pPointer->releaseReference( (dword)this );
+		m_pPointer->releaseReference( (uintptr_t)this );
 }
 
 template<typename T>
@@ -258,10 +259,10 @@ inline void	ResourceLink<T>::setPointer( T * pPointer )
 {
 	if ( pPointer != m_pPointer )
 	{
-		if ( pPointer == NULL || pPointer->grabReference( reinterpret_cast<dword>( this ) ) )
+		if ( pPointer == NULL || pPointer->grabReference( reinterpret_cast<uintptr_t>( this ) ) )
 		{
 			if( m_pPointer  != NULL )
-				m_pPointer->releaseReference( reinterpret_cast<dword>( this ) );
+				m_pPointer->releaseReference( reinterpret_cast<uintptr_t>( this ) );
 
 			m_pPointer = pPointer;
 			m_Key = m_pPointer != NULL ? m_pPointer->key() : NULL_WIDGET;

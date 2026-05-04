@@ -302,7 +302,7 @@ void WindowEdit::onBeginEdit()
 		context()->setFocus( this );
 	context()->lockFocus( this );
 
-	postMessage( WE_BEGINEDIT, (dword)this, 0 );
+	postMessage( WE_BEGINEDIT, (uintptr_t)this, 0 );
 }
 
 void WindowEdit::onEndEdit()
@@ -310,7 +310,7 @@ void WindowEdit::onEndEdit()
 	m_Editing = false;
 
 	// post message that edit is complete
-	postMessage( WE_EDITDONE, (dword)this, 0 );
+	postMessage( WE_EDITDONE, (uintptr_t)this, 0 );
 	// unlock the focus
 	context()->unlockFocus( this );
 }

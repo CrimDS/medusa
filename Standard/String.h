@@ -347,7 +347,7 @@ inline int StringTemplate<C>::compareNoCase(  const C * pCmp  ) const
 template<typename C>
 inline int StringTemplate<C>::compareCommand(  const C * pCmp  ) const
 {
-	return strnicmp<C>( m_pString, pCmp, Min<int>( length(), strlen( pCmp ) ) );
+	return strnicmp<C>( m_pString, pCmp, Min<int>( length(), (int)strlen( pCmp ) ) );
 }
 
 template<typename C>
@@ -361,13 +361,13 @@ inline int StringTemplate<C>::find( C ch, int nOffset /*= 0*/, bool bIgnoreCase 
 	C * pFound = bIgnoreCase ? strichr( m_pString + nOffset, ch ) : ((char*) strchr( m_pString + nOffset, ch));
 	if ( pFound == NULL )
 		return -1;
-	return pFound - m_pString;
+	return (int)(pFound - m_pString);
 }
 
 template<typename C>
 inline int StringTemplate<C>::find( const C * p, int n /*= 0*/, bool bIgnoreCase /*= false*/ ) const
 {
-	int nLen = strlen( p );
+	int nLen = (int)strlen( p );
 	if ( nLen <= 0 )
 		return -1;
 	if ( n < 0 )
@@ -381,7 +381,7 @@ inline int StringTemplate<C>::find( const C * p, int n /*= 0*/, bool bIgnoreCase
 	if ( pFound == NULL )
 		return -1;
 
-	return pFound - m_pString;
+	return (int)(pFound - m_pString);
 }
 
 template<typename C>
@@ -557,7 +557,7 @@ inline bool StringTemplate<C>::tokenize( StringTemplate<C> & t, const StringTemp
 		while( strlen(pEnd) > 0 && strcspn(pEnd, w.buffer()) == 0 )
 			pEnd++;
 
-		int nTokenLen = pBegin - m_pString;
+		int nTokenLen = (int)(pBegin - m_pString);
 
 		C * pToken = (C *)StringBase::malloc( (nTokenLen + 1) * sizeof(C) );
 		strncpy( pToken, m_pString, nTokenLen );
@@ -565,7 +565,7 @@ inline bool StringTemplate<C>::tokenize( StringTemplate<C> & t, const StringTemp
 
 		t.allocate( pToken );
 
-		right(nLen - (pEnd - m_pString));
+		right(nLen - (int)(pEnd - m_pString));
 		return true;
 	}
 
@@ -666,7 +666,7 @@ inline StringTemplate<C> & StringTemplate<C>::right(int n)
 		return *this;
 	}
 
-	int nLength = strlen( m_pString );
+	int nLength = (int)strlen( m_pString );
 	if ( n >= nLength )
 		return *this;
 
@@ -681,7 +681,7 @@ inline StringTemplate<C> & StringTemplate<C>::right(int n)
 template<typename C>
 inline StringTemplate<C> & StringTemplate<C>::mid(int nBegin,int n /*= -1*/)
 {
-	int nLength = strlen( m_pString );
+	int nLength = (int)strlen( m_pString );
 	if ( nBegin < 0 )
 		nBegin = 0;
 	if ( n < 0 || ( nBegin + n ) > nLength )

@@ -13,6 +13,7 @@
 #include <assert.h>
 #include <stddef.h>
 #include <map>
+#include <intrin.h>		// _InterlockedCompareExchangePointer (pointer-width atomic CAS)
 
 #include "Atomic.h"
 #include "Types.h"
@@ -59,8 +60,8 @@ public:
 
     // Mutators
 	WeakReferenced *	grabWeakReferenced();						// grab the WeakReferenced object, used by WeakReference<>, increments the weak reference count
-    bool				grabReference( dword nTrackingId = 0 );		// grab a reference to this object, returns false if object is already being destroyed
-    void				releaseReference( dword nTrackingId = 0 );			
+    bool				grabReference( uintptr_t nTrackingId = 0 );	// grab a reference to this object, returns false if object is already being destroyed
+    void				releaseReference( uintptr_t nTrackingId = 0 );
 	void				dumpTracking( CharString & a_sDump );		// dump tracking data into the provided string
 
 protected:
@@ -73,7 +74,7 @@ protected:
 	struct Stack {
 		dword nStack[ 8 ];
 	};
-	typedef std::map< dword, Stack >	TrackingMap;
+	typedef std::map< uintptr_t, Stack >	TrackingMap;
 
 	TrackingMap *		m_pTrackingMap;								// list of all current references
 	static CriticalSection		
@@ -129,25 +130,31 @@ inline bool Referenced::isTrackingEnabled() const
 
 //---------------------------------------------------------------------------------------------------
 
-#pragma warning( disable : 4311 )
-
-inline Referenced::WeakReferenced * Referenced::grabWeakReferenced() 
+inline Referenced::WeakReferenced * Referenced::grabWeakReferenced()
 {
 	while( m_pWeakRef == NULL || !m_pWeakRef->increment() )
 	{
 		WeakReferenced * pNewWeak = new WeakReferenced( const_cast<Referenced *>( this ) );
-		if ( !Atomic::compareSwap( reinterpret_cast<volatile int *>( &m_pWeakRef ), 
-			0, reinterpret_cast<int>( pNewWeak ) ) )
+		// Pointer-width CAS: legacy Atomic::compareSwap takes int (32-bit) which
+		// truncates pointers on x64 → memory corruption when initializing the
+		// weak-ref slot.  _InterlockedCompareExchangePointer handles full pointer
+		// width on both x86 and x64.  Returns the original value at the slot;
+		// success = it was NULL (we won the race), failure = something else (lost).
+		void * pPrev = _InterlockedCompareExchangePointer(
+			reinterpret_cast< void * volatile * >( &m_pWeakRef ),
+			pNewWeak,
+			NULL );
+		if ( pPrev != NULL )
 		{
 			// another thread got there before us, so delete our copy..
-			delete pNewWeak;		
+			delete pNewWeak;
 		}
 	}
 
 	return m_pWeakRef;
 }
 
-inline bool Referenced::grabReference( dword nTrackingId /*= 0*/ )
+inline bool Referenced::grabReference( uintptr_t nTrackingId /*= 0*/ )
 {
 	if (! m_StrongCount.increment() )
 		return false;		// failed to grab, because the object is being destroyed already..
@@ -164,7 +171,7 @@ inline bool Referenced::grabReference( dword nTrackingId /*= 0*/ )
 	return true;
 }
 
-inline void Referenced::releaseReference( dword nTrackingId /*= 0*/ )
+inline void Referenced::releaseReference( uintptr_t nTrackingId /*= 0*/ )
 {
 #if ENABLE_REF_TRACKING
 	if ( m_pTrackingMap != NULL && nTrackingId != 0 )

@@ -115,7 +115,7 @@ public:
 	virtual int count( void * pThis ) const
 	{
 		std::vector<T> * pVector = (std::vector<T> *)pThis;
-		return pVector->size();
+		return (int)pVector->size();
 	}
 	virtual void * pointer( void * pThis, int n ) const
 	{

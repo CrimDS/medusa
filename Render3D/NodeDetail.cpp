@@ -39,7 +39,7 @@ void NodeDetail::preRender( RenderContext &context,
 		Vector3 positionVS( context.worldToView( position ) );
 		float fDistance = positionVS.magnitude() * (1.0f - context.detail());
 
-		int nDetailLevel = Clamp<int>( fDistance / m_Distance, 0, m_Children.size() - 1 );
+		int nDetailLevel = Clamp<int>( (int)(fDistance / m_Distance), 0, (int)(m_Children.size() - 1) );
 		m_Children[ nDetailLevel ]->preRender( context, frame, position );
 	}
 }

@@ -5,8 +5,8 @@
 	(c)2005 Palestar Inc, Richard Lyle
 */
 
-#ifndef ZLIB_H
-#define ZLIB_H
+#ifndef MEDUSA_ZLIB_WRAPPER_H
+#define MEDUSA_ZLIB_WRAPPER_H
 
 #include "Standard/Types.h"
 #include "Standard/Codec.h"

@@ -385,8 +385,10 @@ static int loader_Lua (lua_State *L) {
   if (filename == NULL) return 1;  /* library not found in this path */
   if (luaL_loadfile(L, filename) != 0)
     loaderror(L, filename);
+#ifndef USE_PLAIN_LUA
   /* not useful to JIT compile main chunk of a module */
   luaJIT_setmode(L, -1, LUAJIT_MODE_FUNC|LUAJIT_MODE_OFF);
+#endif
   return 1;  /* library loaded successfully */
 }
 

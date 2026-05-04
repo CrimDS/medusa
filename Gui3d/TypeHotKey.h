@@ -12,6 +12,8 @@
 #include "Reflection/TypeCopy.h"
 #include "System/Keyboard.h"
 
+#include <cstdint>
+
 //---------------------------------------------------------------------------------------------------
 
 // TypeCopy object for converting a custom HotKey type
@@ -80,8 +82,8 @@ void AddHotKeyProperty( PropertyList * pList, const char * pName, const T & memb
 	Type * pType = new TypeSerialized<T>();
 	Type * pDWORD = TypeSerialized<dword>::instance();
 
-	Property * pProperty = new Property( new StaticContainer( nElements, pType->size() ), pName, 
-		reinterpret_cast<int>( &member ), pType, nFlags, pNote );
+	Property * pProperty = new Property( new StaticContainer( nElements, pType->size() ), pName,
+		(int)reinterpret_cast<uintptr_t>( &member ), pType, nFlags, pNote );
 	pList->addProperty( pProperty );
 
 	// T -> T

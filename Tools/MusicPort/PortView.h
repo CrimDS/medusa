@@ -119,7 +119,7 @@ protected:
 	afx_msg void OnTriggersActivate();
 	afx_msg void OnUpdateTriggersActivate(CCmdUI* pCmdUI);
 	afx_msg void OnRenameSegment(NMHDR* pNMHDR, LRESULT* pResult);
-	afx_msg void OnTimer(UINT nIDEvent);
+	afx_msg void OnTimer(UINT_PTR nIDEvent);
 	afx_msg void OnDestroy();
 	afx_msg void OnChangeSegment(NMHDR* pNMHDR, LRESULT* pResult);
 	afx_msg void OnRenameTrigger(NMHDR* pNMHDR, LRESULT* pResult);

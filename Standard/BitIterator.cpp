@@ -68,7 +68,7 @@ int BitIterator::Read( void * pDst, int n, bool bAligned )
 
 		int nBytes = n / 8;
 		if ( (m_pIt + nBytes) > (m_pEnd + 1) )
-			nBytes = (m_pEnd - m_pIt) + 1;		// trying to read too many bytes, how many can we actually read
+			nBytes = (int)(m_pEnd - m_pIt) + 1;		// trying to read too many bytes, how many can we actually read
 
 		if ( nBytes > 0 )
 		{
@@ -139,7 +139,7 @@ int BitIterator::Write( const void * pSrc, int n, bool bAligned )
 
 		int nBytes = n / 8;
 		if ( (m_pIt + nBytes) > (m_pEnd + 1) )
-			nBytes = (m_pEnd - m_pIt) + 1;		// trying to read too many bytes, how many can we actually read
+			nBytes = (int)(m_pEnd - m_pIt) + 1;		// trying to read too many bytes, how many can we actually read
 
 		if ( nBytes > 0 )
 		{

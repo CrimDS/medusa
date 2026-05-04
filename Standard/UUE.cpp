@@ -93,7 +93,7 @@ UUE & UUE::operator=( const UUE & copy )
 		m_pEncoded = NULL;
 	}
 
-	int nLength = strlen( copy.m_pEncoded );
+	int nLength = (int)strlen( copy.m_pEncoded );
 	m_pEncoded = new char[ nLength ];
 	strcpy( m_pEncoded, copy.m_pEncoded );
 
@@ -141,7 +141,7 @@ bool UUD::decode( const char * pEncoded )
 
 	// allocate a buffer for the decoded bytes
 	int		decodedBytes = 0;
-	int		expectedBytes = ((strlen( pEncoded ) + 2)/3) << 4;
+	int		expectedBytes = (int)(((strlen( pEncoded ) + 2)/3) << 4);
 	byte * pDecodedBuffer = new byte[ expectedBytes ];
 	byte * pDecoded = pDecodedBuffer;
 

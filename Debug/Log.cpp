@@ -238,7 +238,7 @@ int FileReactor::OutputThread::run()
 			m_OutputLock.unlock();
 
 #if defined(_WIN32)
-			_write( fp, sWrite.c_str(), sWrite.size() );
+			_write( fp, sWrite.c_str(), (unsigned int)sWrite.size() );
 #else
 			if ( ::write( fp, sWrite.c_str(), sWrite.size() ) != sWrite.size() )
 				fprintf( stderr, "Failed to write: %s\n", sWrite.c_str() );

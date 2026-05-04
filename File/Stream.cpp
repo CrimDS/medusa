@@ -312,14 +312,14 @@ void OutStream::writeLine( const char * pLine, bool a_bEscape /*= false*/ ) cons
 {
 	if ( m_pFile.valid() )
 	{
-		int nLength = strlen( pLine );
+		int nLength = (int)strlen( pLine );
 
 		char * pEscapedLine = NULL;
 		if ( a_bEscape )
 		{
 			pEscapedLine = escapeString( pLine );
 			pLine = pEscapedLine;
-			nLength = strlen( pLine );
+			nLength = (int)strlen( pLine );
 		}
 
 		if ( nLength > 0 && m_pFile->write( pLine, nLength ) != nLength )
@@ -397,7 +397,7 @@ void OutStream::flush() const
 
 char * OutStream::escapeString( const char * a_pIn )
 {
-	int nLength = strlen( a_pIn );
+	int nLength = (int)strlen( a_pIn );
 	char * pEscapedLine = new char[ (nLength * 2) + 1 ];
 	
 	char * pOut = pEscapedLine;

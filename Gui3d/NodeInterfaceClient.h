@@ -50,8 +50,8 @@ public:
 	virtual void		onUpdate( float deltaTime );					// called after each render
 	
 	// Helpers
-	bool				postMessage( dword message, 
-							dword wparam, dword lparam );				// this posts a message to the InterfaceContext
+	bool				postMessage( dword message,
+							uintptr_t wparam, uintptr_t lparam );		// this posts a message to the InterfaceContext
 private:
 	// Data
 	InterfaceContext *	m_pContext;

@@ -393,7 +393,7 @@ inline const Euler & Noun::orientation() const
 
 inline int Noun::traitCount() const
 {
-	return m_Traits.size();
+	return (int)m_Traits.size();
 }
 
 inline Trait * Noun::trait( int n ) const
@@ -546,7 +546,7 @@ inline bool Noun::detachTrait( Trait * pTrait )
 	if (! pTrait )
 		return false;
 
-	for(size_t i=0;i<m_Traits.size();i++)
+	for(int i=0;i<(int)m_Traits.size();i++)
 		if ( m_Traits[i].pointer() == pTrait )
 		{
 			detachTrait( i );
@@ -558,7 +558,7 @@ inline bool Noun::detachTrait( Trait * pTrait )
 
 inline bool Noun::detachTrait( const ClassKey & nKey )
 {
-	for(size_t i=0;i<m_Traits.size();i++)
+	for(int i=0;i<(int)m_Traits.size();i++)
 		if ( m_Traits[i]->factory()->classKey() == nKey )
 		{
 			detachTrait( i );

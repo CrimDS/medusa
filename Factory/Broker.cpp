@@ -251,7 +251,7 @@ void Broker::loadNotify( const WidgetKey & a_nKey, Widget * a_pWidget )
 		RequestList::Iterator iRequest = RequestList.head();
 		while( iRequest.valid() )
 		{
-			dword nRequestID = *iRequest;
+			uintptr_t nRequestID = *iRequest;
 			iRequest.next();
 
 			// If the request got deleted, it won't be in our hash..

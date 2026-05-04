@@ -79,7 +79,9 @@ static void f_luaopen (lua_State *L, void *ud) {
   luaX_init(L);
   luaS_fix(luaS_newliteral(L, MEMERRMSG));
   g->GCthreshold = 4*g->totalbytes;
+#ifndef USE_PLAIN_LUA
   luaJIT_initstate(L);
+#endif
 }
 
 
@@ -108,7 +110,9 @@ static void close_state (lua_State *L) {
   global_State *g = G(L);
   luaF_close(L, L->stack);  /* close all upvalues for this thread */
   luaC_freeall(L);  /* collect all objects */
+#ifndef USE_PLAIN_LUA
   luaJIT_freestate(L);
+#endif
   lua_assert(g->rootgc == obj2gco(L));
   lua_assert(g->strt.nuse == 0);
   luaM_freearray(L, G(L)->strt.hash, G(L)->strt.size, TString *);

@@ -282,7 +282,7 @@ bool WindowButton::onCursorMove( const RectInt & window, const PointInt & positi
 		{
 			if ( !m_bGreyed )
 			{
-				postMessage( WB_OVERBUTTON, (dword)this, 0 );
+				postMessage( WB_OVERBUTTON, (uintptr_t)this, 0 );
 				hoverSound();
 			}
 

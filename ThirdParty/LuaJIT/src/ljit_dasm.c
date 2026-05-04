@@ -28,11 +28,12 @@
 
 #define DASM_M_FREE(J, p, sz)	luaM_freemem(J->L, p, sz)
 
-/* Embed architecture-specific DynASM encoder. */
+/* Embed architecture-specific DynASM encoder.  Only x86 is supported in this
+   LuaJIT 1.x; on x64 the JIT is compiled out entirely (interpreter-only Lua).
+   Phase 2 of project_x64_cpp17_migration ships interpreter-only on x64; the
+   long-term fix is upgrading to LuaJIT 2.x with native x64 DynAsm support. */
 #if defined(__i386) || defined(__i386__) || defined(_M_IX86)
 #include "dasm_x86.h"
-#else
-#error "No support for this architecture (yet)"
 #endif
 
 

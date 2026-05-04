@@ -598,7 +598,7 @@ void CPortView::updateNodeTree(HTREEITEM parent, BaseNodePort * pNode)
 	if ( dynamic_cast< NodeWindowPort * >( pNode ) )
 	{
 		parent = m_Nodes.InsertItem( CString( pNode->name() ), parent );
-		m_Nodes.SetItemData( parent, (dword)pNode );
+		m_Nodes.SetItemData( parent, (DWORD_PTR)pNode );
 
 	}
 	for(int i=0;i<pNode->childCount();i++)
@@ -653,7 +653,7 @@ void CPortView::updateFunctionList()
 	if ( sHeaderText.GetLength() < 1 )
 		return;
 
-	int sectionBegin = sHeaderText.Find( BEGIN_MSG, 0) + _tcslen( BEGIN_MSG ); 
+	int sectionBegin = sHeaderText.Find( BEGIN_MSG, 0) + (int)_tcslen( BEGIN_MSG );
 	int sectionEnd = sHeaderText.Find( END_MSG, sectionBegin );
 	if ( sectionBegin < 0 || sectionEnd < 0 || sectionEnd < sectionBegin )
 	{
@@ -690,7 +690,7 @@ void CPortView::updateVariableList()
 	if ( sHeaderText.GetLength() < 1 )
 		return;
 
-	int sectionBegin = sHeaderText.Find( BEGIN_DATA, 0) + _tcslen( BEGIN_DATA ); 
+	int sectionBegin = sHeaderText.Find( BEGIN_DATA, 0) + (int)_tcslen( BEGIN_DATA );
 	int sectionEnd = sHeaderText.Find( END_DATA, sectionBegin );
 	if ( sectionBegin < 0 || sectionEnd < 0 || sectionEnd < sectionBegin )
 	{
@@ -774,7 +774,7 @@ bool CPortView::saveCPP( const char * pSourceText )
 
 bool CPortView::insertLine( CString & text, const TCHAR * sectionBegin, const TCHAR * sectionEnd, const TCHAR * line )
 {
-	int begin = text.Find( sectionBegin, 0) + _tcslen( sectionBegin ); 
+	int begin = text.Find( sectionBegin, 0) + (int)_tcslen( sectionBegin );
 	int end = text.Find( sectionEnd, begin );
 	if ( begin < 0 || end < 0 || end < begin )
 		return false;

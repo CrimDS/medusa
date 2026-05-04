@@ -114,7 +114,7 @@ void CChildFrame::OnMDIActivate(BOOL bActivate, CWnd* pActivateWnd, CWnd* pDeact
 								Port::portName( k ) );
 
 						pSubMenu->DeleteMenu(j,MF_BYPOSITION);
-						pSubMenu->InsertMenu(j,MF_POPUP|MF_BYPOSITION,(unsigned int)ResourceMenu.Detach(),_T("Create"));
+						pSubMenu->InsertMenu(j,MF_POPUP|MF_BYPOSITION,(UINT_PTR)ResourceMenu.Detach(),_T("Create"));
 
 						return;
 					}

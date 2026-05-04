@@ -99,10 +99,10 @@ inline int GetFirstBit( T mask )		// used for finding a shift value for the mask
 {
 	T i = 0;
 	for(;i<(sizeof(T) * 8);i++)
-		if ( (1 << i) & mask)
+		if ( (T(1) << i) & mask)
 			break;
 
-	return i;	// if not found, this should return 32 in the case of an 'int' 
+	return (int)i;	// if not found, this should return 32 in the case of an 'int'
 }
 
 template<class T>
@@ -110,10 +110,10 @@ inline int GetLastBit( T mask )
 {
 	T i = (sizeof(T) * 8) - 1;
 	for(;i>=0;i--)
-		if ( (1 << i) & mask)
+		if ( (T(1) << i) & mask)
 			break;
 
-	return i;	// if not found will return -1
+	return (int)i;	// if not found will return -1
 }
 
 //----------------------------------------------------------------------------

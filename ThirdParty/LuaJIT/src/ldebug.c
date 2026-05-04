@@ -36,8 +36,12 @@ static const char *getfuncname (lua_State *L, CallInfo *ci, const char **name);
 
 static int currentpc (lua_State *L, CallInfo *ci) {
   if (isLua(ci))  /* must be a Lua function to get current PC */
+#ifdef USE_PLAIN_LUA
+    return pcRel(ci==L->ci ? L->savedpc : ci->savedpc, ci_func(ci)->l.p);
+#else
     return luaJIT_findpc(ci_func(ci)->l.p,
                          ci==L->ci ? L->savedpc : ci->savedpc);
+#endif
   else
     return -1;
 }

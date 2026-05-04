@@ -99,7 +99,7 @@ void CSceneTree::populateTree( HTREEITEM hParent, BaseNodePort::Ref node )
 		treeItem.mask = TVIF_IMAGE | TVIF_PARAM | TVIF_SELECTEDIMAGE | TVIF_TEXT;
 		treeItem.pszText = itemName.buffer();
 		treeItem.iImage = treeItem.iSelectedImage = portIndex;
-		treeItem.lParam = (DWORD)pChild;
+		treeItem.lParam = (LPARAM)pChild;
 
 		if ( hItem != NULL )
 		{
@@ -172,7 +172,7 @@ void CSceneTree::OnInitialUpdate()
 
 	// add the root item
 	m_Root = GetTreeCtrl().InsertItem( _T("Scene"), rootImage, rootImage );
-	GetTreeCtrl().SetItemData( m_Root, (DWORD)rootNode );
+	GetTreeCtrl().SetItemData( m_Root, (DWORD_PTR)rootNode );
 	pPort->m_pSelectedNode = rootNode;
 
 	// populate the tree
@@ -402,7 +402,7 @@ void CSceneTree::OnRButtonDown(UINT nFlags, CPoint point)
 	contextMenu.AppendMenu(MF_SEPARATOR);
 	contextMenu.AppendMenu(MF_STRING,ID_NODE_OPEN,_T("Open"));
 	contextMenu.AppendMenu(MF_STRING,ID_NODE_DELETE,_T("Delete"));
-	contextMenu.InsertMenu(-1,MF_POPUP|MF_BYPOSITION,(unsigned int)createMenu.Detach(),_T("Create"));
+	contextMenu.InsertMenu(-1,MF_POPUP|MF_BYPOSITION,(UINT_PTR)createMenu.Detach(),_T("Create"));
 
 	// track the context menu
 	contextMenu.TrackPopupMenu(TPM_LEFTALIGN,point.x,point.y,GetParent());

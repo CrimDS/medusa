@@ -206,7 +206,7 @@ void DeleteChildItems( CTreeCtrl & tree, HTREEITEM hParent )
 	}
 }
 
-void CProfilerClientDlg::OnTimer(UINT nIDEvent) 
+void CProfilerClientDlg::OnTimer(UINT_PTR nIDEvent)
 {
 	CDialog::OnTimer(nIDEvent);
 
@@ -232,10 +232,10 @@ void CProfilerClientDlg::OnTimer(UINT nIDEvent)
 			bool bServerAlarm = false;
 
 			// update / create the root item 
-			if ( hServer == NULL || m_cProfileTree.GetItemData(hServer) != ((dword)server.pClient) )
+			if ( hServer == NULL || m_cProfileTree.GetItemData(hServer) != ((DWORD_PTR)server.pClient) )
 			{
 				hServer = m_cProfileTree.InsertItem( sName, TVI_ROOT, hServer );
-				m_cProfileTree.SetItemData( hServer, (dword)server.pClient );
+				m_cProfileTree.SetItemData( hServer, (DWORD_PTR)server.pClient );
 			}
 			else
 				m_cProfileTree.SetItemText( hServer, sName );		// update the existing item name

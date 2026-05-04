@@ -228,7 +228,7 @@ void CChildFrame::OnMDIActivate(BOOL bActivate, CWnd* pActivateWnd, CWnd* pDeact
 							ResourceMenu.AppendMenu(MF_STRING,ID_NODE_PORT_BEGIN + k, BaseNodePort::portName( k ) );
 
 						pSubMenu->DeleteMenu(j,MF_BYPOSITION);
-						pSubMenu->InsertMenu(j,MF_POPUP|MF_BYPOSITION,(unsigned int)ResourceMenu.Detach(),_T("Create"));
+						pSubMenu->InsertMenu(j,MF_POPUP|MF_BYPOSITION,(UINT_PTR)ResourceMenu.Detach(),_T("Create"));
 
 						return;
 					}

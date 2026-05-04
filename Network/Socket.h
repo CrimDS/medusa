@@ -190,7 +190,8 @@ inline dword Socket::sendingBytes() const
 
 inline dword Socket::instanceID() const
 {
-	return reinterpret_cast<dword>( this );
+	// Identity hash, low 32 bits of pointer is sufficient for log/debug.
+	return (dword)reinterpret_cast<uintptr_t>( this );
 }
 
 //----------------------------------------------------------------------------

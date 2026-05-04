@@ -226,17 +226,21 @@ void CSceneRender::OnInitialUpdate()
 	m_Light = AfxGetApp()->GetProfileInt( "CSceneRender", "m_Light", 0 ) != 0;
 
 	// The DX12 device resolves shaders as `<sm_sShadersPath>/Shaders/*.hlsl`.
-	// Pick a base that works in either layout:
+	// Pick a base that works in any layout:
 	//   - Deployed: Resourcer.exe sits next to the engine DLLs and a Shaders\
 	//     sibling (same as the client install).  Use <home>\.
-	//   - Dev tree: Resourcer.exe is at medusa\Tools\Bin\; HLSL sources live at
-	//     darkspace\Shaders\.  Walk up three levels and over.
+	//   - Win32 dev tree: Resourcer.exe is at medusa\Tools\Bin\; HLSL sources
+	//     live at darkspace\Shaders\.  Walk up three levels and over.
+	//   - x64 dev tree: Resourcer.exe is one level deeper at
+	//     medusa\Tools\Bin\x64\; walk up four levels and over.
 	{
 		CharString sHome = FileDisk::home();
 		if ( FileDisk::fileDate( sHome + "\\Shaders\\Default.hlsl" ) != 0 )
 			DisplayDevice::sm_sShadersPath = sHome + "\\";
 		else if ( FileDisk::fileDate( sHome + "\\..\\..\\..\\darkspace\\Shaders\\Default.hlsl" ) != 0 )
 			DisplayDevice::sm_sShadersPath = sHome + "\\..\\..\\..\\darkspace\\";
+		else if ( FileDisk::fileDate( sHome + "\\..\\..\\..\\..\\darkspace\\Shaders\\Default.hlsl" ) != 0 )
+			DisplayDevice::sm_sShadersPath = sHome + "\\..\\..\\..\\..\\darkspace\\";
 		else
 			DisplayDevice::sm_sShadersPath = sHome + "\\";
 	}
@@ -404,7 +408,7 @@ void CSceneRender::OnUpdateScenePlay(CCmdUI* pCmdUI)
 	pCmdUI->SetCheck( m_Playing );
 }
 
-void CSceneRender::OnTimer(UINT nIDEvent) 
+void CSceneRender::OnTimer(UINT_PTR nIDEvent)
 {
 	if ( nIDEvent == 0x1 )
 		OnDraw(NULL);
