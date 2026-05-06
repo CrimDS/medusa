@@ -27,6 +27,8 @@
 #include <stdint.h>
 #include <algorithm>
 #include <climits>
+#include <cstdio>
+#include <string>
 #include <vector>
 #include "PrimitiveFactory.h"
 #include "PrimitiveSurfaceD3D12.h"
@@ -1778,6 +1780,122 @@ void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::T
 
 //---------------------------------------------------------------------------------------------------
 
+// Build a stable, human-readable cache key for ID3D12PipelineLibrary.  The
+// in-memory PSOKey discriminates by shader BYTECODE POINTER, which is fine
+// within one process but useless across launches (different addresses).
+// Stable identity comes from the shader's source filename, which is invariant.
+static std::wstring makePSOCacheName( const PSOKey & key, ShaderD3D12 * pShader )
+{
+	const char * pShaderName = (pShader && pShader->valid())
+		? (const char *)pShader->shaderName()
+		: "passthru";
+	char buf[512];
+	std::snprintf( buf, sizeof buf,
+		"il%d_t%d_b%u_ds%d_dw%d_de%d_w%d_rtv%u_dsv%u_sc%u_%s",
+		(int)key.inputLayout, (int)key.topology, (unsigned)key.blendMode,
+		(int)key.doubleSided, (int)key.depthWrite, (int)key.depthEnable, (int)key.wireframe,
+		(unsigned)key.rtvFormat, (unsigned)key.dsvFormat, (unsigned)key.sampleCount,
+		pShaderName );
+	wchar_t wbuf[512] = {};
+	MultiByteToWideChar( CP_ACP, 0, buf, -1, wbuf, _countof(wbuf) );
+	return std::wstring( wbuf );
+}
+
+// pso_cache.bin lives next to the running exe — a per-install file, not
+// per-user-roaming, because it's keyed on the GPU + driver of THIS machine.
+// If the user moves to a different GPU the blob's driver hash mismatches and
+// CreatePipelineLibrary returns D3D12_ERROR_DRIVER_VERSION_MISMATCH, which
+// initPSOLibrary handles by discarding and starting fresh.
+static std::wstring psoCacheFilePath()
+{
+	wchar_t exePath[MAX_PATH] = {};
+	GetModuleFileNameW( nullptr, exePath, MAX_PATH );
+	std::wstring p = exePath;
+	const auto slash = p.find_last_of( L"\\/" );
+	if ( slash != std::wstring::npos ) p.resize( slash + 1 );
+	p += L"pso_cache.bin";
+	return p;
+}
+
+void DisplayDeviceD3D12::initPSOLibrary()
+{
+	ComPtr<ID3D12Device1> pDevice1;
+	if ( FAILED( m_pDevice.As( &pDevice1 ) ) )
+	{
+		TRACE( "DisplayDeviceD3D12::initPSOLibrary - ID3D12Device1 unavailable; PSO caching disabled" );
+		return;
+	}
+
+	// Read any existing cache blob.  The blob memory must live as long as the
+	// library does — store on the device.
+	HANDLE h = CreateFileW( psoCacheFilePath().c_str(), GENERIC_READ, FILE_SHARE_READ,
+		nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr );
+	if ( h != INVALID_HANDLE_VALUE )
+	{
+		LARGE_INTEGER size{};
+		if ( GetFileSizeEx( h, &size ) && size.QuadPart > 0 && size.QuadPart < (1LL << 30) )
+		{
+			m_PSOCacheBlob.resize( (size_t)size.QuadPart );
+			DWORD got = 0;
+			if ( !ReadFile( h, m_PSOCacheBlob.data(), (DWORD)m_PSOCacheBlob.size(), &got, nullptr )
+				|| got != m_PSOCacheBlob.size() )
+			{
+				m_PSOCacheBlob.clear();
+			}
+		}
+		CloseHandle( h );
+	}
+
+	HRESULT hr = pDevice1->CreatePipelineLibrary(
+		m_PSOCacheBlob.empty() ? nullptr : m_PSOCacheBlob.data(),
+		m_PSOCacheBlob.size(),
+		IID_PPV_ARGS( &m_pPSOLibrary ) );
+
+	// Driver upgrade / OS upgrade / corrupt blob → fall back to an empty
+	// library so this run still benefits from in-process caching, and the
+	// next savePSOLibrary() rewrites a fresh blob.
+	if ( FAILED(hr) )
+	{
+		TRACE( "DisplayDeviceD3D12::initPSOLibrary - existing cache rejected (hr=0x%08X), starting fresh", hr );
+		m_PSOCacheBlob.clear();
+		hr = pDevice1->CreatePipelineLibrary( nullptr, 0, IID_PPV_ARGS( &m_pPSOLibrary ) );
+		if ( FAILED(hr) )
+		{
+			TRACE( "DisplayDeviceD3D12::initPSOLibrary - CreatePipelineLibrary failed (hr=0x%08X)", hr );
+			m_pPSOLibrary.Reset();
+		}
+	}
+	else
+	{
+		TRACE( "DisplayDeviceD3D12::initPSOLibrary - loaded %zu bytes from pso_cache.bin", m_PSOCacheBlob.size() );
+	}
+}
+
+void DisplayDeviceD3D12::savePSOLibrary()
+{
+	if ( !m_pPSOLibrary ) return;
+
+	const SIZE_T sz = m_pPSOLibrary->GetSerializedSize();
+	if ( sz == 0 ) return;
+
+	// Skip writing if the library is unchanged (same size as the blob we
+	// loaded).  Cheap heuristic — GetSerializedSize is byte-exact for the
+	// library content, so size match implies content match in practice.
+	if ( sz == m_PSOCacheBlob.size() ) return;
+
+	std::vector<unsigned char> buf( sz );
+	if ( FAILED( m_pPSOLibrary->Serialize( buf.data(), sz ) ) )
+		return;
+
+	HANDLE h = CreateFileW( psoCacheFilePath().c_str(), GENERIC_WRITE, 0,
+		nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr );
+	if ( h == INVALID_HANDLE_VALUE ) return;
+	DWORD wrote = 0;
+	WriteFile( h, buf.data(), (DWORD)buf.size(), &wrote, nullptr );
+	CloseHandle( h );
+	TRACE( "DisplayDeviceD3D12::savePSOLibrary - wrote %zu bytes to pso_cache.bin", (size_t)sz );
+}
+
 ID3D12PipelineState * DisplayDeviceD3D12::getOrCreatePSO( const PSOKey & key, ShaderD3D12 * pShader )
 {
 	auto it = m_PSOCache.find( key );
@@ -1943,12 +2061,39 @@ ID3D12PipelineState * DisplayDeviceD3D12::getOrCreatePSO( const PSOKey & key, Sh
 	psoDesc.SampleMask = UINT_MAX;
 
 	ComPtr<ID3D12PipelineState> pso;
+
+	// Try the persistent library first.  A hit here skips DXIL→GPU codegen
+	// (the dominant cost of CreateGraphicsPipelineState on first launch) and
+	// returns a deserialized PSO in single-digit ms.  Misses fall through to
+	// the normal compile path and we store back below.
+	std::wstring psoCacheName;
+	if ( m_pPSOLibrary )
+	{
+		psoCacheName = makePSOCacheName( key, pShader );
+		HRESULT hrLoad = m_pPSOLibrary->LoadGraphicsPipeline(
+			psoCacheName.c_str(), &psoDesc, IID_PPV_ARGS( &pso ) );
+		if ( SUCCEEDED(hrLoad) )
+		{
+			m_PSOCache[key] = pso;
+			return pso.Get();
+		}
+		// E_INVALIDARG / DXGI_ERROR_NOT_FOUND mean "not in library" — normal
+		// for cold launches and new PSO permutations; just compile below.
+	}
+
 	HRESULT hr = m_pDevice->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&pso) );
 	if ( FAILED(hr) )
 	{
 		TRACE( "DisplayDeviceD3D12::getOrCreatePSO() - Failed to create PSO!" );
 		return nullptr;
 	}
+
+	// Store the freshly compiled PSO back into the library so the next launch
+	// finds it.  StorePipeline returning E_INVALIDARG on a duplicate name is
+	// non-fatal — just means another PSO already claimed the slot (shouldn't
+	// happen because m_PSOCache de-duplicates upstream, but harmless).
+	if ( m_pPSOLibrary && !psoCacheName.empty() )
+		m_pPSOLibrary->StorePipeline( psoCacheName.c_str(), pso.Get() );
 
 	m_PSOCache[key] = pso;
 	return pso.Get();
@@ -2570,6 +2715,11 @@ bool DisplayDeviceD3D12::initializeD3D12()
 	if ( FAILED(D3D12CreateDevice(m_pAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_pDevice))) )
 		return false;
 
+	// Build the persistent PSO cache library now so getOrCreatePSO can hit it
+	// on the very first PSO request.  Failure leaves m_pPSOLibrary null and
+	// the engine falls back to plain CreateGraphicsPipelineState — no harm.
+	initPSOLibrary();
+
 	// Query the info queue so we can drain validation messages each frame.
 	// Requires the debug layer to be enabled — only meaningful in debug builds.
 #if defined(_DEBUG) || 0
@@ -3019,6 +3169,11 @@ void DisplayDeviceD3D12::freeD3D12()
 	m_bShadowMapReady = false;
 	m_pShadowMapDepth.Reset();
 
+	// Persist the in-memory pipeline library to disk before tearing it down,
+	// so the next cold launch on the same GPU/driver gets the cache benefit.
+	savePSOLibrary();
+	m_pPSOLibrary.Reset();
+	m_PSOCacheBlob.clear();
 	m_PSOCache.clear();
 
 	// Upload queue cleanup

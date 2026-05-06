@@ -79,7 +79,7 @@ public:
 							PointInt & pos, const wchar * pText, Color color );
 	static void			push( DisplayDevice * pDisplay, Font * pFont,
 							PointInt & pos, const char * pText, Color color );
-							
+
 	static bool			sm_bEnableAlpha;								// enable alpha fonts instead of additive
 
 private:
@@ -94,17 +94,26 @@ private:
 
 	// non-serialized
 	int					m_SurfaceShift;								// character to surface
+	int					m_AtlasSurfaceWidth;						// pixel width of one atlas surface (constant, captured at create)
+	int					m_AtlasSurfaceHeight;						// pixel height of one atlas surface
+	int					m_AtlasColumns;								// glyph columns per surface (size.width / (m_Size.width+2))
 	PrimitiveMaterial::Ref
 						m_FontMaterial;
 	Array< PrimitiveSurface::Ref >
 						m_FontSurface;								// created font surface
 	Array< RectFloat >
-						m_FontUV;									// character UV's
+						m_FontUV;									// character UV's; sentinel (.right==0) means glyph not yet rasterised
 
 	// Mutators
 	void				createFontMaterial( DisplayDevice * pDisplay );
 	bool				createFontSurface( DisplayDevice * pDisplay );
 	ColorFormat::Ref	findFormat( DisplayDevice * pDisplay );
+	// Lazily rasterise a single glyph into its slot in the atlas if it hasn't
+	// been built yet.  Cheap no-op once cached.  Per-glyph outline costs ~µs
+	// instead of the ~80ms full-atlas scan, so cold startup costs come down
+	// from "rasterise 65K glyphs" to "rasterise the few hundred you actually
+	// render before the next idle moment".
+	void				ensureGlyph( int ch );
 };
 
 //----------------------------------------------------------------------------

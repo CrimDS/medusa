@@ -59,8 +59,6 @@ void WindowText::onRender( RenderContext & context, const RectInt & window )
 	{
 		updateCache( window );
 
-		//PROFILE_START( "WindowText::onRender" );
-
 		DisplayDevice * pDisplay = context.display();
 		ASSERT( pDisplay );
 
@@ -81,8 +79,6 @@ void WindowText::onRender( RenderContext & context, const RectInt & window )
 
 			Color drawColor( draw.color.r, draw.color.g, draw.color.b, (u8)(m_Alpha * draw.color.a) );
 			Font::push( pDisplay, draw.font, draw.position, draw.line, drawColor );
-
-			//TRACE( CharString("WindowText::onRender, line = %s, drawColor = %d, %d, %d, %d", draw.line, drawColor.r, drawColor.g, drawColor.b, drawColor.a ) );
 		}
 
 		// draw images

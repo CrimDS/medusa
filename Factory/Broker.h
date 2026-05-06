@@ -1,7 +1,7 @@
 /*
 	Broker.h
 
-	This object is used to store / load widgets 
+	This object is used to store / load widgets
 	(c)2005 Palestar, Richard Lyle
 */
 
@@ -16,8 +16,8 @@
 #include "ClassKey.h"
 
 #include <cstdint>
-#include <set>
 #include <list>
+#include <vector>
 
 #include "MedusaDll.h"
 
@@ -29,7 +29,7 @@ class DLL Broker
 {
 public:
 	// Types
-	class DLL Request 
+	class DLL Request
 	{
 	public:
 		// Construction
@@ -55,8 +55,16 @@ public:
 	// Data
 	static bool			sm_bEnableWidgetCache;
 
+	// When true, ResourceLink::operator>> fires a non-blocking requestLoad on
+	// every link it deserializes.  This is what produces actual parallelism
+	// in the loader pool — child dep loads fan out across idle workers as a
+	// Widget is being read, so by the time the read body's blocking .valid()
+	// calls arrive, the deps are already in flight.  Default ON; flip OFF
+	// (e.g. for savegame-only contexts) if eager loads of unused links bite.
+	static bool			sm_bEagerPrefetch;
+
 	// Mutators
-	virtual dword		version( const WidgetKey & key ) = 0;	
+	virtual dword		version( const WidgetKey & key ) = 0;
 	virtual dword		size( const WidgetKey & key ) = 0;
 	virtual Widget *	load( const WidgetKey & key ) = 0;
 	virtual bool		store( Widget * pWidget, dword version, bool autoLoad ) = 0;
@@ -67,15 +75,24 @@ public:
 	static bool			stopLoadingThread();
 	static void			flushCache();
 
-	// Returns true when the calling thread IS the broker loading thread —
-	// i.e. we are inside Broker::loadingThread → pBroker->load chain.
-	// Used by deserializers (Material::read) to avoid eagerly touching
-	// device-side state (D3D primitive factory pool, etc) from the loader
-	// thread, which can deadlock against the main thread holding the same
-	// pool's lock during render.  Lazy creation on first render is safe.
+	// Live in-flight count: queued items (sm_LoadList) plus currently active
+	// loads (inside pBroker->load).  Used by gating UI like ViewConnectServer
+	// to keep the splash visible until the prefetched load tree fully drains
+	// before transitioning to gameplay.  Cheap snapshot — locked just long
+	// enough to read sm_LoadList.size() and combine with the atomic active
+	// counter; safe to call every frame from the render thread.
+	static int			pendingLoadCount();
+
+	// Returns true when the calling thread IS one of the broker loader pool
+	// workers — i.e. we are inside a Broker pool thread executing
+	// pBroker->load (or its recursion).  Used by deserializers (Material::read)
+	// to avoid eagerly touching device-side state (D3D primitive factory pool,
+	// etc) from the loader thread, which can deadlock against the main thread
+	// holding the same pool's lock during render.  Lazy creation on first
+	// render is safe.
 	static bool			inLoadingThread();
 
-	//! This starts an asynchronous load of the widget in the background, it will invoked the onLoaded() virtual 
+	//! This starts an asynchronous load of the widget in the background, it will invoked the onLoaded() virtual
 	//! function in the LoadRequest object once the widget has been loaded...
 	static bool			requestLoad( const WidgetKey & a_nKey, const ClassKey & a_nType, Request * a_pRequest, bool a_bBlocking );
 	//! This is invoked to notify all waiting requests that the given load has either completed or failed.
@@ -85,13 +102,13 @@ public:
 
 protected:
 	// Static
-	static void			registerWidget( Broker * pBroker, 
-							const WidgetKey & key, 
+	static void			registerWidget( Broker * pBroker,
+							const WidgetKey & key,
 							dword version, bool autoLoad, bool local );
 	static void			unregisterWidget( Broker * pBroker,
-							const WidgetKey & key, 
+							const WidgetKey & key,
 							dword version );
-	
+
 	static void			autoLoadWidgets();
 
 private:
@@ -118,15 +135,28 @@ private:
 	typedef BrokerHash::Iterator				BrokerHashIt;
 	typedef Hash< uintptr_t, Request * >		RequestHash;
 	typedef List< uintptr_t >					RequestList;
-	typedef Hash< WidgetKey, RequestList >		LoadRequestHash;
+
+	// Per-key in-flight gate.  Mediates dedup AND cycle detection:
+	//   - observers : list of Request IDs waiting for this load.
+	//   - loaderTID : 0 if unclaimed (still in sm_LoadList awaiting a worker),
+	//                 otherwise the OS thread id of the worker actively
+	//                 running pBroker->load() for this key.  A second
+	//                 requestLoad on the same key that arrives on this same
+	//                 thread is a cycle.  An arrival from a different thread
+	//                 just registers as another observer and waits.
+	struct LoadRequestEntry
+	{
+		LoadRequestEntry() : loaderTID( 0 ) {}
+		RequestList		observers;
+		dword			loaderTID;
+	};
+	typedef Hash< WidgetKey, LoadRequestEntry >	LoadRequestHash;
 	typedef List< WidgetKey >					LoadList;
-	typedef std::set< WidgetKey >				BlockingLoadSet;
 	typedef std::list< Reference< Widget > >	WidgetCacheList;
+	typedef std::vector< LoadingThread * >		ThreadPool;
 
 	static CriticalSection
 						sm_Lock;				// lock for broker static data
-	static BlockingLoadSet
-						sm_BlockingLoadSet;		// this set is used to prevent circular asset dependecy lock ups
 	static BrokerHash	sm_BrokerHash;
 
 	static Array< WidgetKey >
@@ -136,17 +166,17 @@ private:
 
 	// Background Loading...
 	static bool			sm_bLoadingThreadActive;
-	static Event		sm_LoadThreadEvent;		// this event is signaled when new load requests are made...
-	static LoadList		sm_LoadList;			// list of widgets to load
+	static Event		sm_LoadThreadEvent;		// auto-reset event signaled when new load requests are queued
+	static LoadList		sm_LoadList;			// keys queued for the worker pool (loaderTID == 0 in the entry)
 	static LoadRequestHash
-						sm_LoadRequestHash;		// hash of widgets to the list of observers waiting for them to load..
+						sm_LoadRequestHash;		// in-flight gate: observers + loaderTID per key
 	static RequestHash	sm_RequestHash;			// hash of all requests by their ID
 
-	static LoadingThread *		
-						sm_pLoadingThread;
+	static ThreadPool	sm_LoadingPool;			// worker threads (1..N); stable between start/stop
 
 	// Static
 	static int			loadingThread();
+	static bool			processOneItem();		// pop+claim+load+notify exactly one queued key on the calling worker
 	static WidgetCacheList &
 						widgetCache();
 };

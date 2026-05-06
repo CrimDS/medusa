@@ -39,6 +39,7 @@ public:
 
 	virtual bool			setAlpha( Color colorKey );
 	virtual bool			outline( Color outline, Color with );
+	virtual bool			outline( RectInt region, Color outline, Color with );
 
 	// Static
 	static Ref				create( PrimitiveSurface * pSurface );	// creates the best draw object for this type of surface

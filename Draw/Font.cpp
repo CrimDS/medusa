@@ -23,10 +23,19 @@ bool			Font::sm_bEnableAlpha = true;					// enable alpha fonts instead of additi
 
 IMPLEMENT_RESOURCE_FACTORY( Font, Resource );
 
-Font::Font() : m_Offset( 0 )
+Font::Font()
+	: m_Offset( 0 )
+	, m_SurfaceShift( 0 )
+	, m_AtlasSurfaceWidth( 0 )
+	, m_AtlasSurfaceHeight( 0 )
+	, m_AtlasColumns( 0 )
 {}
 
 Font::Font( const Font & copy )
+	: m_SurfaceShift( 0 )
+	, m_AtlasSurfaceWidth( 0 )
+	, m_AtlasSurfaceHeight( 0 )
+	, m_AtlasColumns( 0 )
 {
 	//TRACE("Font: Copy Constructor Called");
 	m_Size = copy.m_Size;
@@ -36,7 +45,11 @@ Font::Font( const Font & copy )
 		memcpy( addCharacter( copy.size(i).width ), copy.character(i), characterSize() );
 }
 
-Font::Font( const SizeInt &size, int asciiOffset, int charCount ) 
+Font::Font( const SizeInt &size, int asciiOffset, int charCount )
+	: m_SurfaceShift( 0 )
+	, m_AtlasSurfaceWidth( 0 )
+	, m_AtlasSurfaceHeight( 0 )
+	, m_AtlasColumns( 0 )
 {
 	m_Size = size;
 	m_Offset = asciiOffset;
@@ -254,13 +267,16 @@ void Font::push( DisplayDevice * pDisplay, Vector3 & pos, const wchar * pText, C
 	{
 		int nSurface = -1;
 
-		// scan forward until the end of the string or a surface change occurs
+		// scan forward until the end of the string or a surface change occurs.
+		// ensureGlyph() lazily rasterises any glyph we touch but haven't seen
+		// before — cheap no-op for already-cached glyphs.
 		const wchar * pEnd = pText;
 		while( *pEnd != 0 )
 		{
 			int ch = (*pEnd) - m_Offset;
 			if ( ch >= 0 && ch < characters )
 			{
+				ensureGlyph( ch );
 				int chsurface = ch >> m_SurfaceShift;
 				if ( nSurface < 0 )
 					nSurface = chsurface;
@@ -441,7 +457,7 @@ bool Font::createFontSurface( DisplayDevice * pDisplay )
 		// determine how many characters will fit on the current surface size
 		int columns = size.width / (m_Size.width + 2);
 		int rows = size.height / (m_Size.height + 2 );
-		
+
 		charactersPerSurface = 1 << GetLastBit( columns * rows );	// calc the number of characters on 1 surface, make it a power of 2
 		if ( (charactersPerSurface * surfaceCount) < m_Characters.size() )
 		{
@@ -465,64 +481,94 @@ bool Font::createFontSurface( DisplayDevice * pDisplay )
 	m_SurfaceShift = GetLastBit( charactersPerSurface );
 	ASSERT( (1 << m_SurfaceShift) == charactersPerSurface );		// assert characters per surface power of 2
 
-	//TRACE( String().format("Font::createFontSurface(), surfaces = %d, width = %d, height = %d", surfaceCount, size.width, size.height) );
+	// Cache atlas geometry for ensureGlyph() so it doesn't have to recompute
+	// the columns/rows-per-surface every glyph.
+	m_AtlasSurfaceWidth  = size.width;
+	m_AtlasSurfaceHeight = size.height;
+	m_AtlasColumns       = size.width / (m_Size.width + 2);
 
 	// find the best format
 	ColorFormat::Ref pFormat = findFormat( pDisplay );
 	if (! pFormat.valid() )
 		return false;
 
-	int ch = 0;
 	int characters = m_Characters.size();
-	int col = size.width / (m_Size.width + 2);
-	int row = size.height / (m_Size.height + 2 );
 
-	// allocate the UV information for the characters
+	// Allocate UVs for every glyph index up-front; entries default to
+	// RectFloat(0,0,0,0) which is the "not rasterised" sentinel ensureGlyph
+	// looks for.  Allocate the atlas surfaces but DO NOT rasterise into them
+	// yet — a Latin font has ~65K glyphs and rasterising + outlining the
+	// whole atlas at startup is the multi-second cold-start hitch we're
+	// avoiding.  Glyphs get filled in lazily on first use by Font::push.
 	m_FontUV.allocate( characters );
-	// create and initialize the surfaces
 	m_FontSurface.allocate( surfaceCount );
 	for(int k=0;k<surfaceCount;k++)
 	{
-		// create the surface
-		m_FontSurface[k] = PrimitiveSurface::create( pDisplay, size.width, size.height, pFormat->format(), false );
-
-		// create the draw object for the surface
-		Draw::Ref drawer = Draw::create( m_FontSurface[k] );
-		
-		// calculate the texel size per pixel of this surface
-		double du = 1.0 / size.width;
-		double dv = 1.0 / size.height;
-
-		Color fontColor( 255, 255, 255, 255 );
-
-		// draw the font into the surface
-		int chs = 0;
-		for(int i=0;i<row && ch < characters && chs < charactersPerSurface;i++)
-			for(int j=0;j<col && ch < characters && chs < charactersPerSurface;j++)
-			{
-				// calculate the draw position
-				PointInt position( (j * (m_Size.width + 2)) + 1, (i * (m_Size.height + 2)) + 1 );
-				// store the UVs for this character
-				m_FontUV[ ch ] = RectFloat( 
-					(du * position.x), 
-					(dv * position.y), 
-					(du * (position.x + m_CharacterWidth[ ch ])),
-					(dv * (position.y + m_Size.height)) );
-
-				// draw the character into the texture
-				drawer->draw( position, this, ch + m_Offset, fontColor );
-				
-				// next character
-				ch++;
-				chs++;
-			}
-
-		// outline the font text with black with an alpha
-		if ( pFormat->alphaMask() != 0 )
-			drawer->outline( fontColor, Color(0,0,0,255) );
+		m_FontSurface[k] = PrimitiveSurface::create(
+			pDisplay, size.width, size.height, pFormat->format(), false );
 	}
 
+	// Pre-rasterise the first ASCII_PREBUILD glyphs so the common case (every
+	// English string anywhere in the UI) hits zero per-frame cost.  Cap is in
+	// glyph indices into m_Characters, which after m_Offset typically covers
+	// printable ASCII + Latin-1.  Anything past the cap goes through the
+	// lazy ensureGlyph path on first render.
+	const int ASCII_PREBUILD = 256;
+	const int prebuilt = characters < ASCII_PREBUILD ? characters : ASCII_PREBUILD;
+	for ( int ch = 0; ch < prebuilt; ++ch )
+		ensureGlyph( ch );
+
 	return true;
+}
+
+void Font::ensureGlyph( int ch )
+{
+	if ( ch < 0 || ch >= m_FontUV.size() )
+		return;
+	// Sentinel: a fresh-allocated RectFloat is (0,0,0,0).  Once rasterised
+	// the right edge is non-zero (m_CharacterWidth[ch] worth of u-coordinate).
+	if ( m_FontUV[ ch ].m_Right > 0.0f )
+		return;
+	if ( m_FontSurface.size() < 1 )
+		return;	// atlas not allocated yet (ought not happen in practice)
+
+	const int charactersPerSurface = 1 << m_SurfaceShift;
+	const int surfaceIdx = ch >> m_SurfaceShift;
+	if ( surfaceIdx >= m_FontSurface.size() )
+		return;
+	const int slotInSurface = ch & (charactersPerSurface - 1);
+	const int j = slotInSurface % m_AtlasColumns;
+	const int i = slotInSurface / m_AtlasColumns;
+
+	const PointInt slotPos( (j * (m_Size.width + 2)) + 1, (i * (m_Size.height + 2)) + 1 );
+
+	const double du = 1.0 / m_AtlasSurfaceWidth;
+	const double dv = 1.0 / m_AtlasSurfaceHeight;
+
+	m_FontUV[ ch ] = RectFloat(
+		(du * slotPos.x),
+		(dv * slotPos.y),
+		(du * (slotPos.x + m_CharacterWidth[ ch ])),
+		(dv * (slotPos.y + m_Size.height)) );
+
+	Draw::Ref drawer = Draw::create( m_FontSurface[ surfaceIdx ] );
+	const Color fontColor( 255, 255, 255, 255 );
+
+	// Draw::draw advances its `point` parameter by the glyph width on
+	// success, so we pass a working copy and keep slotPos pinned for the
+	// outline rect below.  (Without this, outlineRect ends up shifted right
+	// by one glyph-width and the actual glyph stays unoutlined.)
+	PointInt drawPos( slotPos );
+	drawer->draw( drawPos, this, ch + m_Offset, fontColor );
+
+	// Outline only this glyph's region (with one pixel of padding so the
+	// outline pass can sample its neighbours) instead of scanning the whole
+	// 4K×4K atlas.  Cuts outline cost from O(atlas) to O(glyph).  Draw::outline
+	// internally no-ops if the surface format has no alpha channel.
+	RectInt outlineRect(
+		slotPos.x - 1,                            slotPos.y - 1,
+		slotPos.x + m_CharacterWidth[ ch ] + 1,   slotPos.y + m_Size.height + 1 );
+	drawer->outline( outlineRect, fontColor, Color( 0, 0, 0, 255 ) );
 }
 
 ColorFormat::Ref Font::findFormat( DisplayDevice * pDisplay )

@@ -70,6 +70,41 @@ ShaderD3D12::~ShaderD3D12()
 bool ShaderD3D12::compileShader( const wchar_t * pFilePath, const char * pEntryPoint,
 	const char * pTarget, ComPtr<ID3DBlob> & pBlobOut )
 {
+	// Fast path: try the precompiled .cso emitted by the build's CompileShaders
+	// target.  Layout: alongside the .hlsl, named "<basename>.<entry>.cso".
+	// HLSL→DXBC is vendor-independent so these blobs are portable across GPUs;
+	// the per-machine GPU codegen lives in ID3D12PipelineLibrary instead.
+	// Skipped in debug builds — debug compile flags need to round-trip from
+	// source so PIX captures and the shader debugger pick up symbols.
+	//
+	// Path is anchored to the .exe directory rather than the process CWD,
+	// so the lookup works whether the launcher set CWD to Bin\, Bin\x64\,
+	// or the repo root (VS F5 default).
+#if !defined(_DEBUG) && !ENABLE_SHADER_DEBUGGING
+	{
+		std::wstring csoPath = pFilePath;
+		const auto dot = csoPath.find_last_of(L'.');
+		if ( dot != std::wstring::npos ) csoPath.resize( dot );
+		csoPath += L'.';
+		wchar_t wEntry[64] = {};
+		MultiByteToWideChar( CP_ACP, 0, pEntryPoint, -1, wEntry, _countof(wEntry) );
+		csoPath += wEntry;
+		csoPath += L".cso";
+
+		wchar_t exeDir[ MAX_PATH ] = {};
+		GetModuleFileNameW( nullptr, exeDir, MAX_PATH );
+		if ( wchar_t * pSep = wcsrchr( exeDir, L'\\' ) )
+			pSep[ 1 ] = 0;	// keep trailing slash, drop exe filename
+
+		std::wstring absCsoPath = exeDir;
+		absCsoPath += csoPath;
+
+		if ( SUCCEEDED( D3DReadFileToBlob( absCsoPath.c_str(), pBlobOut.GetAddressOf() ) ) )
+			return true;
+		// fall through to runtime compile if no precompiled blob
+	}
+#endif
+
 	UINT compileFlags = 0;
 #if defined(_DEBUG)
 	compileFlags |= D3DCOMPILE_DEBUG;

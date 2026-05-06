@@ -198,9 +198,13 @@ inline void WindowView::View::setCursorTip( const char * pTip )
 
 #else
 
+// __asm int 3 is x86-only; on x64 we use the __debugbreak intrinsic which
+// emits the same int 3 trap on x86/x64 and a brk on ARM.  Same effect, no
+// architecture restriction.  intrin.h declares the intrinsic.
+#include <intrin.h>
 #define DATA_MAP( member, type, name )												\
 	if ( (member = WidgetCast<type>( window()->findNode( name ) )) == NULL )		\
-		__asm int 3;
+		__debugbreak();
 
 #endif
 

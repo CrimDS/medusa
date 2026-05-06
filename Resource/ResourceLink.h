@@ -350,6 +350,16 @@ inline const InStream & operator>>( const InStream &input, ResourceLink<T> & ref
 	input >> key;
 
 	ref.setKey( key );
+
+	// Eager prefetch: kick off the load now, non-blocking.  This is what
+	// makes the Broker pool actually parallel — every child link in a Widget
+	// being deserialized queues immediately, so workers start loading them
+	// in parallel before the consumer gets to its first blocking .valid().
+	// Skipped if the link is empty, already cached (requestLoad's own cache
+	// check fast-paths it), or if the global flag is off.
+	if ( Broker::sm_bEagerPrefetch && key != NULL_WIDGET )
+		ref.load( false );
+
 	return input;
 }
 

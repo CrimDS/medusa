@@ -179,6 +179,13 @@ public:
 
 	// PSO management
 	ID3D12PipelineState *			getOrCreatePSO( const PSOKey & key, ShaderD3D12 * pShader = nullptr );
+
+	// Persistent PSO cache plumbing (see m_pPSOLibrary).  Init reads an
+	// existing pso_cache.bin and constructs a pipeline library from it (or an
+	// empty library if no/stale blob); save serializes the in-memory library
+	// back to disk during shutdown.
+	void							initPSOLibrary();
+	void							savePSOLibrary();
 	ID3D12RootSignature *			getRootSignature() const { return m_pRootSignature.Get(); }
 	ID3D12RootSignature *			getPostProcessRootSignature() const { return m_pPostProcessRootSig.Get(); }
 
@@ -501,6 +508,15 @@ public:
 
 	// Pipeline State Object cache
 	std::map<PSOKey, ComPtr<ID3D12PipelineState>>	m_PSOCache;
+
+	// Persistent (cross-launch) PSO cache via ID3D12PipelineLibrary.
+	// Cold first launch on a given (GPU, driver) compiles every PSO from
+	// HLSL/DXBC and stores the GPU machine code into the library; subsequent
+	// launches skip the codegen and load from disk.  The blob backing the
+	// library MUST stay alive for the lifetime of the library — keep it in
+	// m_PSOCacheBlob, only freed in freeD3D12() after Reset().
+	ComPtr<ID3D12PipelineLibrary>	m_pPSOLibrary;
+	std::vector<unsigned char>		m_PSOCacheBlob;
 
 	// Static samplers are baked into root signature
 

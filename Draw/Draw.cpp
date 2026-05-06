@@ -437,14 +437,24 @@ bool Draw::setAlpha( Color key )
 // with a black border around them
 bool Draw::outline( Color outline, Color with )
 {
+	return Draw::outline( m_Surface->rectangle(), outline, with );
+}
+
+bool Draw::outline( RectInt region, Color outline, Color with )
+{
 	ColorFormat::Ref dstFormat = ColorFormat::allocateFormat( m_Surface->colorFormat() );
 	if ( dstFormat->alphaMask() == 0x0 )
 		return false;		// no alpha channel in surface
 
+	// Clamp the requested region to the surface's actual extent so per-glyph
+	// callers don't have to worry about edge cases at the atlas boundary.
+	RectInt srcRect( region & m_Surface->rectangle() );
+	if (! srcRect.valid() )
+		return false;
+
 	dword outlinePixel = dstFormat->pixel( outline );
 	dword withPixel = dstFormat->pixel( with );
 
-	RectInt srcRect( m_Surface->rectangle() );
 	int pixelSize = dstFormat->byteSize();
 
 	dword dstPitch = m_Surface->pitch();
@@ -455,6 +465,11 @@ bool Draw::outline( Color outline, Color with )
 		TRACE( "Draw::outline() - Failed to lock surface" );
 		return false;
 	}
+
+	// Advance to the first line/column of the region.  When region is the
+	// full surface (0,0)–(w,h), this is a no-op; for regional outline it
+	// puts dst at the top-left of the requested rect.
+	dstSurface += ( srcRect.top * dstPitch ) + ( srcRect.left * pixelSize );
 
 	for(int line = srcRect.top; line <= srcRect.bottom;line++)
 	{
