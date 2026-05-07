@@ -212,7 +212,6 @@ public:
 
 	//! Configuration
 	static bool					sm_bEnableHDR;
-	static bool					sm_bUpdateHDR;
 	static bool					sm_bEnableShadows;
 	static int					sm_nMaxShadowLights;
 	static bool					sm_bEnableSSAO;

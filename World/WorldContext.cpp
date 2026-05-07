@@ -41,7 +41,6 @@ static Constant SLEEP_MODE_UPDATE_RATE( "SLEEP_MODE_UPDATE_RATE", 5.0f );
 bool		WorldContext::sm_bEnableHDR = true;
 bool		WorldContext::sm_bEnableGodRays = true;		// volumetric sun shafts (DisplayEffectGodRays) — cheap quarter-res radial blur from directional light's screen-space vanishing point; big vista impact for a space sim
 bool		WorldContext::sm_bEnableExposure = true;	// auto-exposure (DisplayEffectExposure) — 1x1 EMA-smoothed luminance multiplier consumed by FXAA tonemap. Disabling pins exposure to 1.0 via FXAA's fallback texture.
-bool		WorldContext::sm_bUpdateHDR = false;
 bool		WorldContext::sm_bEnableShadows = true;
 int			WorldContext::sm_nMaxShadowLights = 4;
 bool		WorldContext::sm_bEnableSSAO = false;	// Temporarily off 2026-04-25 to focus on god rays; GTAO implementation (horizon-based, Jiménez 2016) can be re-enabled by flipping to true. Doesn't produce the silhouette-halo artefacts of the old Crytek hemisphere-sampling SSAO on smooth convex spheres, so the "disable because of planets/stars" concern no longer applies.
@@ -599,6 +598,17 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 		// runs LAST so the auto-exposure 1×1 luminance sample reflects
 		// the FINAL scene (including rays).
 
+		// All four post-process effects use the same lifetime policy: created
+		// lazily on first enable, then KEPT ALIVE for the rest of the session
+		// even when their sm_bEnable* flag toggles off — we just stop pushing
+		// them.  Reason: each effect owns RTV/SRV slots in the device's
+		// descriptor heaps, and nothing calls Free() on those slots, so a
+		// destroy/recreate cycle leaks them.  RTV heap is only 32 slots; a few
+		// HDR toggles (8 mip RTVs each) will exhaust it, after which the next
+		// allocation returns UINT(-1) and CreateRenderTargetView crashes deep
+		// inside D3D12Core.dll on the wild handle.  GodRays already had this
+		// fix; Exposure/HDR/SSAO now match.
+
 		if ( sm_bEnableExposure )
 		{
 			if ( !m_pExposure.valid() )
@@ -608,11 +618,6 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 				pDisplay->push( m_pExposure );
 			else
 				sm_bEnableExposure = false;
-		}
-		else
-		{
-			if ( m_pExposure.valid() )
-				m_pExposure = NULL;
 		}
 
 		if ( sm_bEnableGodRays && sm_bGameView )
@@ -625,34 +630,18 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 			else
 				sm_bEnableGodRays = false;
 		}
-		// Note: m_pGodRays is kept alive when sm_bGameView is false — we just
-		// don't push it this frame.  Avoids destroy/recreate churn as the user
-		// toggles between gameview and sub-views.
 
 		if ( sm_bEnableHDR )
 		{
-			if ( sm_bUpdateHDR )
-			{
-				m_pHDR = NULL;
-				sm_bUpdateHDR = false;
-			}
-
 			if (! m_pHDR.valid() )
 				m_pHDR = pDisplay->createEffect( "HDR" );
 
-			// push our bloom effect
 			if ( m_pHDR.valid() )
 				pDisplay->push( m_pHDR );
 			else
 				sm_bEnableHDR = false;		// failed to create the HDR effect, disable it..
 		}
-		else
-		{
-			if ( m_pHDR.valid() )
-				m_pHDR = NULL;
-		}
 
-		// Push SSAO effect
 		if ( sm_bEnableSSAO )
 		{
 			if (! m_pSSAO.valid() )
@@ -662,11 +651,6 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 				pDisplay->push( m_pSSAO );
 			else
 				sm_bEnableSSAO = false;
-		}
-		else
-		{
-			if ( m_pSSAO.valid() )
-				m_pSSAO = NULL;
 		}
 
 		// Lens flares left enabled even when HDR is on.  HDR bloom alone

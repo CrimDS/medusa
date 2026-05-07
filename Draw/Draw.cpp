@@ -437,10 +437,10 @@ bool Draw::setAlpha( Color key )
 // with a black border around them
 bool Draw::outline( Color outline, Color with )
 {
-	return Draw::outline( m_Surface->rectangle(), outline, with );
+	return Draw::outline( m_Surface->rectangle(), outline, with, 1 );
 }
 
-bool Draw::outline( RectInt region, Color outline, Color with )
+bool Draw::outline( RectInt region, Color outline, Color with, int thickness )
 {
 	ColorFormat::Ref dstFormat = ColorFormat::allocateFormat( m_Surface->colorFormat() );
 	if ( dstFormat->alphaMask() == 0x0 )
@@ -449,7 +449,7 @@ bool Draw::outline( RectInt region, Color outline, Color with )
 	// Clamp the requested region to the surface's actual extent so per-glyph
 	// callers don't have to worry about edge cases at the atlas boundary.
 	RectInt srcRect( region & m_Surface->rectangle() );
-	if (! srcRect.valid() )
+	if (! srcRect.valid() || thickness < 1 )
 		return false;
 
 	dword outlinePixel = dstFormat->pixel( outline );
@@ -471,6 +471,12 @@ bool Draw::outline( RectInt region, Color outline, Color with )
 	// puts dst at the top-left of the requested rect.
 	dstSurface += ( srcRect.top * dstPitch ) + ( srcRect.left * pixelSize );
 
+	// For each outline-coloured pixel, paint every neighbour within
+	// `thickness` pixels (Chebyshev distance) with the with-colour, skipping
+	// pixels that are already outline-coloured (so we don't overwrite glyph
+	// strokes).  thickness=1 is the classic 8-neighbour 1-pixel ring;
+	// thickness=2 expands to a 5×5 kernel for a fatter, more legible outline
+	// against busy backgrounds.
 	for(int line = srcRect.top; line <= srcRect.bottom;line++)
 	{
 		byte * dst = dstSurface;
@@ -478,27 +484,26 @@ bool Draw::outline( RectInt region, Color outline, Color with )
 
 		for(int pixel = srcRect.left;pixel <= srcRect.right;pixel++)
 		{
-			// get the color from the surface
 			dword dstPixel = dstFormat->getPixel( dst );
-			// if the color is the outline color, then set the 4 surrounding pixels to the with color
 			if ( dstPixel == outlinePixel )
 			{
-				if ( line > srcRect.top && pixel > srcRect.left && dstFormat->getPixel( dst - dstPitch - pixelSize ) != outlinePixel )	
-					dstFormat->setPixel( dst - dstPitch - pixelSize, withPixel );	// top left
-				if ( line > srcRect.top && dstFormat->getPixel( dst - dstPitch ) != outlinePixel )	
-					dstFormat->setPixel( dst - dstPitch, withPixel );				// top
-				if ( line > srcRect.top && pixel < srcRect.right && dstFormat->getPixel( dst - dstPitch + pixelSize ) != outlinePixel )	
-					dstFormat->setPixel( dst - dstPitch + pixelSize, withPixel );	// top right
-				if ( pixel < srcRect.right && dstFormat->getPixel( dst + pixelSize ) != outlinePixel )	
-					dstFormat->setPixel( dst + pixelSize, withPixel );				// right
-				if ( line < srcRect.bottom && pixel < srcRect.right && dstFormat->getPixel( dst + dstPitch + pixelSize ) != outlinePixel )	
-					dstFormat->setPixel( dst + dstPitch + pixelSize, withPixel );	// bottom right
-				if ( line < srcRect.bottom && dstFormat->getPixel( dst + dstPitch ) != outlinePixel )
-					dstFormat->setPixel( dst + dstPitch, withPixel );				// bottom
-				if ( line < srcRect.bottom && pixel > srcRect.left && dstFormat->getPixel( dst + dstPitch - pixelSize ) != outlinePixel )	
-					dstFormat->setPixel( dst + dstPitch - pixelSize, withPixel );	// bottom left
-				if ( pixel > srcRect.left && dstFormat->getPixel( dst - pixelSize ) != outlinePixel )
-					dstFormat->setPixel( dst - pixelSize, withPixel );				// left
+				for ( int dy = -thickness; dy <= thickness; ++dy )
+				{
+					int ny = line + dy;
+					if ( ny < srcRect.top || ny > srcRect.bottom )
+						continue;
+					for ( int dx = -thickness; dx <= thickness; ++dx )
+					{
+						if ( dx == 0 && dy == 0 )
+							continue;
+						int nx = pixel + dx;
+						if ( nx < srcRect.left || nx > srcRect.right )
+							continue;
+						byte * neighbour = dst + dy * (int)dstPitch + dx * pixelSize;
+						if ( dstFormat->getPixel( neighbour ) != outlinePixel )
+							dstFormat->setPixel( neighbour, withPixel );
+					}
+				}
 			}
 
 			dst += pixelSize;

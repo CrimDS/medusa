@@ -186,15 +186,33 @@ bool DisplayEffectExposureD3D12::initExposure( DisplayDeviceD3D12 * pDevice )
 		hr = pDevice->getDevice()->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
 			&rtDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clearValue,
 			IID_PPV_ARGS(&m_pExposureRT[i]) );
-		if ( FAILED(hr) ) { TRACE( "Exposure: Failed 1x1 RT %d", i ); return false; }
+		if ( FAILED(hr) ) { TRACE( "Exposure: Failed 1x1 RT %d (hr=0x%08X)", i, hr ); return false; }
+		if ( !m_pExposureRT[i] ) { TRACE( "Exposure: 1x1 RT %d null after S_OK", i ); return false; }
 
+		// Guard against heap exhaustion — match HDR/SSAO pattern.  Without this
+		// check, GetCPUHandle(UINT(-1)) computes base + (size_t)-1*stride, a wild
+		// address that CreateRenderTargetView writes to deep inside D3D12Core.dll.
+		// That presents as a crash with no diagnostic; the TRACE turns it into a
+		// loggable failure that tells us heap pressure caused it.
 		if ( m_nExposureRTVIndex[i] == UINT(-1) )
 			m_nExposureRTVIndex[i] = pDevice->m_RTVHeap.Allocate();
+		if ( m_nExposureRTVIndex[i] == UINT(-1) )
+		{
+			TRACE( "Exposure: Failed to allocate RTV %d (RTV heap allocated=%u)",
+				i, pDevice->m_RTVHeap.GetNumAllocated() );
+			return false;
+		}
 		pDevice->getDevice()->CreateRenderTargetView( m_pExposureRT[i].Get(), nullptr,
 			pDevice->m_RTVHeap.GetCPUHandle( m_nExposureRTVIndex[i] ) );
 
 		if ( m_nExposureSRVIndex[i] == UINT(-1) )
 			m_nExposureSRVIndex[i] = pDevice->m_SRVStagingHeap.Allocate();
+		if ( m_nExposureSRVIndex[i] == UINT(-1) )
+		{
+			TRACE( "Exposure: Failed to allocate SRV %d (SRV staging allocated=%u)",
+				i, pDevice->m_SRVStagingHeap.GetNumAllocated() );
+			return false;
+		}
 
 		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 		srvDesc.Format = DXGI_FORMAT_R32_FLOAT;

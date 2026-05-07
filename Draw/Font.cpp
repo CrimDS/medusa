@@ -425,7 +425,13 @@ void Font::createFontMaterial( DisplayDevice * pDisplay )
 	m_FontMaterial = PrimitiveMaterial::create( pDisplay, WHITE, WHITE, WHITE, WHITE, 0.0f,
 		sm_bEnableAlpha ? PrimitiveMaterial::ALPHA : PrimitiveMaterial::ADDITIVE );
 	m_FontMaterial->setPass( DisplayDevice::OVERLAY );
-	m_FontMaterial->setFilterMode( PrimitiveMaterial::FILTER_OFF );
+	// FILTER_ON (linear) gives anti-aliased transitions between glyph-white
+	// and outline-black at glyph edges — softens the otherwise pixel-staircase
+	// appearance with negligible perf cost.  The ceil-0.5 vertex alignment in
+	// Font::push keeps text sharp at native resolution; linear only kicks in
+	// where it would help (sub-pixel positioning, OS DPI scaling, transformed
+	// text quads).
+	m_FontMaterial->setFilterMode( PrimitiveMaterial::FILTER_ON );
 	m_FontMaterial->setLightEnable( false );
 	TRACE( "Font::createFontMaterial pass=%d (OVERLAY=%d) alpha=%d",
 		m_FontMaterial->pass(), (int)DisplayDevice::OVERLAY, sm_bEnableAlpha ? 1 : 0 );
@@ -556,18 +562,21 @@ void Font::ensureGlyph( int ch )
 
 	// Draw::draw advances its `point` parameter by the glyph width on
 	// success, so we pass a working copy and keep slotPos pinned for the
-	// outline rect below.  (Without this, outlineRect ends up shifted right
-	// by one glyph-width and the actual glyph stays unoutlined.)
+	// outline rect below.
 	PointInt drawPos( slotPos );
 	drawer->draw( drawPos, this, ch + m_Offset, fontColor );
 
-	// Outline only this glyph's region (with one pixel of padding so the
-	// outline pass can sample its neighbours) instead of scanning the whole
-	// 4K×4K atlas.  Cuts outline cost from O(atlas) to O(glyph).  Draw::outline
-	// internally no-ops if the surface format has no alpha channel.
+	// Outline within the entire glyph cell — clamped to cell bounds rather
+	// than the glyph's own width — so the outline pass can never spill into
+	// the next glyph's atlas slot.  1-pixel thickness is the right amount
+	// for this 12px bitmap font: anything larger fills inter-stroke gaps
+	// in tight letterforms (Verdana 'B', 'a', etc.) and turns characters
+	// into black blobs.  Draw::outline no-ops on surfaces without alpha.
+	const int cellLeft = j * (m_Size.width + 2);
+	const int cellTop  = i * (m_Size.height + 2);
 	RectInt outlineRect(
-		slotPos.x - 1,                            slotPos.y - 1,
-		slotPos.x + m_CharacterWidth[ ch ] + 1,   slotPos.y + m_Size.height + 1 );
+		cellLeft,                       cellTop,
+		cellLeft + m_Size.width + 1,    cellTop + m_Size.height + 1 );
 	drawer->outline( outlineRect, fontColor, Color( 0, 0, 0, 255 ) );
 }
 
