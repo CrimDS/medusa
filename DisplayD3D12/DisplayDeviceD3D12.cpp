@@ -37,7 +37,7 @@
 #include "DisplayEffectHDR.h"
 #include "DisplayEffectBlur.h"
 #include "DisplayEffectSSAO.h"
-#include "DisplayEffectGodRays.h"
+#include "DisplayEffectLimbGlow.h"
 #include "DisplayEffectExposure.h"
 
 #include <math.h>
@@ -179,7 +179,7 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	registerEffect( "HDR", DisplayEffectHDRD3D12::staticFactory() );
 	registerEffect( "BLUR", DisplayEffectBlurD3D12::staticFactory() );
 	registerEffect( "SSAO", DisplayEffectSSAOD3D12::staticFactory() );
-	registerEffect( "GODRAYS", DisplayEffectGodRaysD3D12::staticFactory() );
+	registerEffect( "LIMBGLOW", DisplayEffectLimbGlowD3D12::staticFactory() );
 	registerEffect( "EXPOSURE", DisplayEffectExposureD3D12::staticFactory() );
 }
 
@@ -2251,25 +2251,13 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 			m_CBPerFrame.vSunWorldPos = ShaderFloat4( 0.0f, 0.0f, 0.0f, 0.0f );
 	}
 
-	// Chunk 4.5 — pack celestial occluders submitted this frame by
-	// NounPlanet::render et al.  Drive the directional sun shadow test
-	// in Default.hlsl (per-pixel) and the screen-space silhouette test
-	// in GodRays.hlsl (per-pixel against tangent-plane discs).
-	//
-	// We do NOT filter occluders that are themselves in another's 3D
-	// shadow.  Reasons:
-	//  - Default.hlsl iterates all occluders per surface point and the
-	//    geometry naturally handles the case (an obscured planet's
-	//    surface ray-tests against the obscurer and gets shadowed).
-	//  - GodRays.hlsl needs every visible silhouette in the list,
-	//    including obscured ones — their tangent-plane disc catches
-	//    sky pixels near their on-screen rim regardless of whether the
-	//    planet is in another's 3D shadow.  Filtering them out (as an
-	//    earlier finalizeOccluders pass did) created a parallax bug
-	//    where a small body visually well-separated from a larger
-	//    obscurer in screen-space lost its shadow contribution and
-	//    leaked rays at its silhouette.
-	finalizeOccluders();		// diagnostic trace only — no longer compacts
+	// Pack celestial occluders submitted this frame by NounPlanet::render
+	// et al.  Used by:
+	//  - Default.hlsl, for the directional sun shadow ray-sphere test
+	//    (per-pixel against worldPos+radius).
+	//  - LimbGlow.hlsl, for the per-pixel rim glow test (against the
+	//    occluder's tangent-plane silhouette disc, packed in the LimbGlow
+	//    CB by DisplayEffectLimbGlow).
 	int occCount = getOccluderCount();
 	if ( occCount < 0 ) occCount = 0;
 	if ( occCount > 32 ) occCount = 32;

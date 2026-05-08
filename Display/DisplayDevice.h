@@ -258,8 +258,8 @@ public:
 
 	// Sun candidate tracking — game code (e.g. NounStar::render) submits each
 	// star's world-space position; the closest submission wins per-frame.
-	// DisplayEffectGodRays reads the result at postRender time and projects
-	// to screen space as the ray origin.  RenderContext::beginScene calls
+	// DisplayEffectLimbGlow reads the result at postRender time and projects
+	// to screen space as the rim halo origin.  RenderContext::beginScene calls
 	// resetSunCandidate which only clears the per-frame distance comparator —
 	// m_vSunWorldPos and the validity flag are STICKY across frames so
 	// CBPerFrame fill (which happens BEFORE NounStar::render) sees last
@@ -278,14 +278,13 @@ public:
 	// (radius / distance) so the shaders only see the bodies that actually
 	// matter as occluders.  Default.hlsl ray-tests the directional sun
 	// against these spheres so a planet behind another planet falls into
-	// shadow; GodRays.hlsl tests at composite time so screen-space rays
-	// don't appear in 3D shadow cones.
+	// shadow; LimbGlow.hlsl uses each silhouette's tangent-plane disc to
+	// test sun proximity per-pixel and emit the rim halo.
 	struct OccluderInfo
 	{
 		Vector3			worldPos;
 		float			radius;
 		const char *	pName;		// borrowed pointer to BaseNode::name() — stable for noun lifetime
-		bool			bShadowed;	// set by finalizeOccluders if this body's centre is in another occluder's 3D sun-shadow
 	};
 	enum { MAX_OCCLUDERS = 32 };
 	void							submitOccluder(
@@ -296,15 +295,6 @@ public:
 	void							resetOccluders();
 	int								getOccluderCount() const;
 	const OccluderInfo &			getOccluder( int idx ) const;
-	// Drop occluders that are themselves in another occluder's 3D shadow
-	// from the current sun candidate.  An obscured planet shouldn't act
-	// as a separate occluder because its silhouette area is already
-	// covered by whatever's blocking it from the sun, and treating it
-	// as active would let it contribute its own shadow column even
-	// though it isn't actually receiving sunlight.  Idempotent: safe
-	// to call multiple times per frame; ignored if no sun candidate
-	// is set.  Compacts the active list in place.
-	void							finalizeOccluders();
 
 	// Helpers
 	static DisplayDevice *			create( const char * pClass );		// create a DisplayDevice by key
@@ -333,9 +323,8 @@ public:
 
 	// Generic shader-quality knob — read from the "shaderDetail" config
 	// setting (LOW/MEDIUM/HIGH/EXTREME) at startup.  Individual effects
-	// pick their own scale: e.g. DisplayEffectGodRays maps it to march
-	// sample count (24/48/64/96).  Default HIGH so existing configs that
-	// don't have shaderDetail keep current behaviour.
+	// pick their own scale (e.g. shadow PCF tap count).  Default HIGH so
+	// existing configs that don't have shaderDetail keep current behaviour.
 	enum ShaderDetail
 	{
 		SHADER_DETAIL_LOW     = 0,

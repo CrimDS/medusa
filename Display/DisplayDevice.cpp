@@ -170,7 +170,6 @@ void DisplayDevice::submitOccluder( const Vector3 & worldPos, float radius, floa
 		m_Occluders[idx].worldPos  = worldPos;
 		m_Occluders[idx].radius    = radius;
 		m_Occluders[idx].pName     = pName;
-		m_Occluders[idx].bShadowed = false;
 		m_OccluderPriority[idx]    = priority;
 		return;
 	}
@@ -186,7 +185,6 @@ void DisplayDevice::submitOccluder( const Vector3 & worldPos, float radius, floa
 		m_Occluders[weakest].worldPos  = worldPos;
 		m_Occluders[weakest].radius    = radius;
 		m_Occluders[weakest].pName     = pName;
-		m_Occluders[weakest].bShadowed = false;
 		m_OccluderPriority[weakest]    = priority;
 	}
 }
@@ -204,84 +202,6 @@ int DisplayDevice::getOccluderCount() const
 const DisplayDevice::OccluderInfo & DisplayDevice::getOccluder( int idx ) const
 {
 	return m_Occluders[idx];
-}
-
-//----------------------------------------------------------------------------
-// Diagnostic — log the current occluder list once a second.  Originally
-// this method also filtered out occluders that were themselves in another's
-// 3D sun-shadow on the theory that an obscured planet shouldn't contribute
-// its own shadow column.  That turned out to be wrong for screen-space
-// godrays: an obscured planet's silhouette is still on-screen and its
-// tangent-plane disc is what kills rays around its visible rim.  Filtering
-// it out created a parallax bug where bodies well-separated in screen-space
-// from their obscurer would leak rays.  Default.hlsl handles obscured-
-// surface lighting per-pixel via celestialSunVisibility and doesn't need
-// the C++-side filter either.  Function kept as a diagnostic-only pass.
-//----------------------------------------------------------------------------
-void DisplayDevice::finalizeOccluders()
-{
-	if ( !m_bSunCandidateValid )
-		return;
-	if ( m_nOccluderCount < 1 )
-		return;
-
-	// Per-occluder shadowed-by-another flag.  Computed via pairwise
-	// ray-sphere test (same math as celestialSunVisibility).  When set,
-	// the GodRays compositor wraps the occluder's silhouette in a radial
-	// halo (in addition to its directional cylinder), because the
-	// obscurer's screen-space tangent cylinder usually misses this
-	// body's silhouette area due to camera-vs-sun parallax.
-	for ( int i = 0; i < m_nOccluderCount; ++i )
-		m_Occluders[i].bShadowed = false;
-	for ( int i = 0; i < m_nOccluderCount; ++i )
-	{
-		const Vector3 & posI = m_Occluders[i].worldPos;
-		Vector3 sunDelta = m_vSunWorldPos - posI;
-		float sunDist = sunDelta.magnitude();
-		if ( sunDist < 0.001f )
-			continue;
-		Vector3 toSun = sunDelta * (1.0f / sunDist);
-
-		for ( int j = 0; j < m_nOccluderCount; ++j )
-		{
-			if ( i == j ) continue;
-			const Vector3 & posJ = m_Occluders[j].worldPos;
-			float radiusJ = m_Occluders[j].radius;
-			Vector3 toJ = posJ - posI;
-			float t = toJ | toSun;
-			if ( t <= 0.0f || t >= sunDist )
-				continue;
-			Vector3 perp = toJ - toSun * t;
-			float perpDistSq = perp | perp;
-			if ( perpDistSq < radiusJ * radiusJ )
-			{
-				m_Occluders[i].bShadowed = true;
-				break;
-			}
-		}
-	}
-
-	// Throttle the trace ~to once a second so it doesn't spam the log.
-	static int s_callCount = 0;
-	++s_callCount;
-	if ( ( s_callCount % 120 ) != 0 )
-		return;
-
-	int shadowedCount = 0;
-	for ( int i = 0; i < m_nOccluderCount; ++i )
-		if ( m_Occluders[i].bShadowed ) ++shadowedCount;
-
-	TRACE( "occluders: %d total (%d in another's 3D shadow), sun=(%.0f,%.0f,%.0f)",
-		m_nOccluderCount, shadowedCount,
-		m_vSunWorldPos.x, m_vSunWorldPos.y, m_vSunWorldPos.z );
-	for ( int i = 0; i < m_nOccluderCount; ++i )
-	{
-		const Vector3 & p = m_Occluders[i].worldPos;
-		const char * name = m_Occluders[i].pName ? m_Occluders[i].pName : "?";
-		TRACE( "  occ[%d] '%s': pos=(%.0f,%.0f,%.0f) r=%.0f%s",
-			i, name, p.x, p.y, p.z, m_Occluders[i].radius,
-			m_Occluders[i].bShadowed ? "  (3D-shadowed → halo applied)" : "" );
-	}
 }
 
 //----------------------------------------------------------------------------

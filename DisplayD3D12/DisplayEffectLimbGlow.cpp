@@ -1,100 +1,84 @@
 /*
-	DisplayEffectGodRays.cpp - D3D12 version
-	Volumetric light scattering — 48-tap radial blur composited additively
-	into the HDR scene RT.  The ray ORIGIN is the screen-space projection of
-	the nearest star's world position, read from DisplayDevice's sun
-	candidate slot (populated each frame by NounStar::render during scene
-	rendering).  Off-screen / behind-camera stars produce fSunVisible=0
-	which short-circuits the shader to black — no rays without a visible
-	star.
-	(c)2024 Palestar
+	DisplayEffectLimbGlow.cpp - D3D12 version
+	Cinematic limb-glow effect.  For each foreground celestial occluder, the
+	shader renders a halo at the silhouette edge biased toward the sun-facing
+	side; intensity ramps with how close the sun's screen UV is to the disc.
+	Composited additively into the HDR scene RT before bloom.  Clear sky
+	produces zero output; far-side bodies excluded by view-Z.
+	(c)2024-2026 Palestar
 */
 
-#include "DisplayEffectGodRays.h"
+#include "DisplayEffectLimbGlow.h"
 #include "Debug/Trace.h"
+#include "Standard/Constant.h"
 #include <DirectXMath.h>
+
+//---------------------------------------------------------------------------------------------------
+
+// Distance-from-camera fade band (world units).  Rim glow is at full
+// intensity below NEAR, linearly fades across the band, and is zeroed
+// beyond FAR.  Defaults are generous so the effect only fades at extreme
+// camera→sun distances — the in-game zoom range is up to 6000 units
+// from focus, and players routinely sit 5000-12000 units from the sun.
+// Tunable via Constants.ini.
+static Constant LIMBGLOW_FADE_NEAR( "LIMBGLOW_FADE_NEAR", 15000.0f );
+static Constant LIMBGLOW_FADE_FAR ( "LIMBGLOW_FADE_FAR",  30000.0f );
 
 using namespace DirectX;
 
 //---------------------------------------------------------------------------------------------------
 
-IMPLEMENT_FACTORY( DisplayEffectGodRaysD3D12, DisplayEffect );
+IMPLEMENT_FACTORY( DisplayEffectLimbGlowD3D12, DisplayEffect );
 
 //---------------------------------------------------------------------------------------------------
 
-// CB layout — must match CBGodRays in GodRays.hlsl exactly
-struct CBGodRays
+// CB layout — must match CBLimbGlow in LimbGlow.hlsl exactly.
+// 16-byte aligned in 4-element float groups.
+struct CBLimbGlow
 {
 	float	sunU;
 	float	sunV;
 	float	fSunVisible;
-	float	fDensity;
-
 	float	fWeight;
-	float	fDecay;
-	float	fExposure;
-	float	fEclipseStrength;	// PS_Eclipse multiplicative darken — 0 disables, 1 = occluders at sunUV go fully black
 
-	float	texelSizeX;
-	float	texelSizeY;
+	float	fExposure;
+	float	fSunViewZ;			// sun's view-space Z (camera-forward distance, world units) — used to classify foreground/background occluders and to depth-gate sky pixels
 	float	fProjNear;			// projection near-plane distance, world units
 	float	fProjFar;			// projection far-plane distance, world units
 
-	// Sun's view-space position (xyz in world units, w unused).
-	// .z is the sky/foreground threshold in view-Z; .xy unused now (we
-	// project to UV CPU-side and pass sunU/V in the screen-space slot
-	// above).
-	float	sunViewX;
-	float	sunViewY;
-	float	sunViewZ;
-	float	fPadA;
-
-	// Projection matrix _11 / _22 diagonals — used by the shader to
-	// convert pixel UV into tangent-plane (z=1) coordinates so the
-	// screen-space silhouette test against vOccluders is a true 2D
-	// circle test (a sphere projects to a circle in tangent-plane space).
-	float	fProjM11;
-	float	fProjM22;
-	float	fPadB;
-	float	fPadC;
-
-	// Chunk 4.5 — celestial occluders packed as TANGENT-PLANE silhouette
-	// discs.  Tangent-plane is the z=1 image plane in view space; a
-	// sphere at view-space (X,Y,Z) with radius R projects to a perfect
-	// circle at (X/Z, Y/Z) with radius R/Z there.  Stored as
-	//   xy = tangent-plane centre   (analogous to "screen position")
-	//   z  = tangent-plane radius   (the disc's silhouette radius)
-	//   w  = original view-space Z  (for gating: we only care about
-	//        occluders between camera and sun, i.e. 0 < w < sunViewZ)
-	// PS_Composite does a 2D ray-circle test against these along the
-	// line from input.vUV → sunUV (both also converted to tangent
-	// plane), so a "sky" pixel whose sightline-to-sun crosses any
-	// planet's silhouette gets its rays killed.
-	float	vOccluders[32 * 4];
+	float	fProjM11;			// projection matrix [0][0] — converts NDC.x to tangent-plane.x
+	float	fProjM22;			// projection matrix [1][1] — converts NDC.y to tangent-plane.y
 	int		nNumOccluders;
-	int		nGodRaysSamples;	// PS_GodRays march sample count — set per-frame from DisplayDevice::sm_nShaderDetail
-	int		fPadE;
-	int		fPadF;
+	float	fPad0;
+
+	// Celestial occluders packed as TANGENT-PLANE silhouette discs.  A
+	// sphere at view-space (X,Y,Z) with radius R projects to a circle at
+	// (X/Z, Y/Z) with radius R/Z on the z=1 image plane.  Stored as
+	//   xy = disc centre (tangent-plane coords)
+	//   z  = disc radius (tangent-plane units)
+	//   w  = original view-space Z (filter: only 0 < w < sunViewZ
+	//        contributes; w == 0 is sentinel for skip)
+	// Packed as float[32*4] rather than DirectX::XMFLOAT4 to keep the CB
+	// definition self-contained and avoid alignment surprises across the
+	// CPU/GPU boundary.
+	float	vOccluders[32 * 4];
 };
 
 //---------------------------------------------------------------------------------------------------
 
-DisplayEffectGodRaysD3D12::DisplayEffectGodRaysD3D12() :
-	m_fDensity( 0.85f ),
-	m_fWeight( 0.55f ),		// bumped from 0.45 for more visible rays
-	m_fDecay( 0.97f ),		// slightly longer falloff (0.96 → 0.97) so rays extend further from sun
-	m_fExposure( 0.75f ),	// 1.20 was way too hot; 0.50 was the prior baseline. 0.75 is a gentle +50% over baseline.
-	m_fEclipseStrength( 0.0f ),	// disabled by default. Was needed when god rays ran BEFORE HDR (bloom would smear glow onto occluders). Now god rays runs AFTER HDR (see WorldContext::render comment), so bloom never sees the rays and the eclipse darken is unnecessary. Code retained — set non-zero to enable.
-	m_nRaysRTVIndex( UINT(-1) ),
-	m_nRaysSRVIndex( UINT(-1) ),
+DisplayEffectLimbGlowD3D12::DisplayEffectLimbGlowD3D12() :
+	m_fWeight( 0.55f ),		// rim glow intensity scale; tunable at runtime via Constants.ini
+	m_fExposure( 0.75f ),	// final scale; tunable at runtime via Constants.ini
+	m_nGlowRTVIndex( UINT(-1) ),
+	m_nGlowSRVIndex( UINT(-1) ),
 	m_LastSize( 0, 0 ),
-	m_RaysSize( 0, 0 ),
+	m_GlowSize( 0, 0 ),
 	m_bInitialized( false ),
 	m_bFailed( false )
 {
 }
 
-DisplayEffectGodRaysD3D12::~DisplayEffectGodRaysD3D12()
+DisplayEffectLimbGlowD3D12::~DisplayEffectLimbGlowD3D12()
 {
 	release();
 }
@@ -115,7 +99,7 @@ static bool compileShaderEntry( const wchar_t * pPath, const char * pEntry, cons
 	if ( FAILED(hr) )
 	{
 		if ( errors )
-			TRACE( "GodRays shader compile error (%s): %s", pEntry, (const char *)errors->GetBufferPointer() );
+			TRACE( "LimbGlowshader compile error (%s): %s", pEntry, (const char *)errors->GetBufferPointer() );
 		return false;
 	}
 	return true;
@@ -123,7 +107,7 @@ static bool compileShaderEntry( const wchar_t * pPath, const char * pEntry, cons
 
 //---------------------------------------------------------------------------------------------------
 
-bool DisplayEffectGodRaysD3D12::initGodRays( DisplayDeviceD3D12 * pDevice )
+bool DisplayEffectLimbGlowD3D12::initLimbGlow( DisplayDeviceD3D12 * pDevice )
 {
 	if ( m_bFailed )
 		return false;
@@ -142,25 +126,23 @@ bool DisplayEffectGodRaysD3D12::initGodRays( DisplayDeviceD3D12 * pDevice )
 	m_bFailed = true;
 
 	m_LastSize = currentSize;
-	// Half-res rays RT.  Dropped back from full-res after the full-res
-	// 8MB allocation stalled the main thread in NtGdiDdDDICreateAllocation
-	// at launch under VRAM fragmentation — memory climbed to ~4GB before
-	// the app became responsive.  The actual quality lever is sample count
-	// + jitter + sun-proximity mask (96 samples, half-amplitude IGN, 6.0
-	// falloff rate from sunUV); resolution gives diminishing returns past
-	// half-res when those are tuned.  Half-res = 2MB at 1080p, fits in
-	// fragmented VRAM without paging / eviction stalls.
-	m_RaysSize = SizeInt( Max<int>( (int)width / 2, 4 ), Max<int>( (int)height / 2, 4 ) );
+	// Half-res rim-glow RT.  Full-res allocations stalled the main thread
+	// in NtGdiDdDDICreateAllocation at launch under VRAM fragmentation —
+	// memory climbed to ~4GB before the app became responsive.  Half-res
+	// is also fine quality-wise: PS_Composite re-tests depth at full-res
+	// to keep the silhouette tight, and the bilinear upscale gives the
+	// rim a slight natural smoothing that suits the cinematic look.
+	// Half-res = 2MB at 1080p, fits in fragmented VRAM cleanly.
+	m_GlowSize = SizeInt( Max<int>( (int)width / 2, 4 ), Max<int>( (int)height / 2, 4 ) );
 
 	// --- Compile shaders ---
-	CharString sPath = DisplayDevice::sm_sShadersPath + "Shaders/GodRays.hlsl";
+	CharString sPath = DisplayDevice::sm_sShadersPath + "Shaders/LimbGlow.hlsl";
 	wchar_t wszPath[MAX_PATH];
 	MultiByteToWideChar( CP_ACP, 0, sPath, -1, wszPath, MAX_PATH );
 
-	if ( !compileShaderEntry( wszPath, "vs_main",     "vs_5_1", m_pVSBlob ) )      { TRACE( "GodRays: Failed VS" );        return false; }
-	if ( !compileShaderEntry( wszPath, "PS_GodRays",  "ps_5_1", m_pPSRays ) )      { TRACE( "GodRays: Failed PS_GodRays" ); return false; }
-	if ( !compileShaderEntry( wszPath, "PS_Eclipse",  "ps_5_1", m_pPSEclipse ) )   { TRACE( "GodRays: Failed PS_Eclipse" ); return false; }
-	if ( !compileShaderEntry( wszPath, "PS_Composite","ps_5_1", m_pPSComposite ) ) { TRACE( "GodRays: Failed PS_Composite" );return false; }
+	if ( !compileShaderEntry( wszPath, "vs_main",      "vs_5_1", m_pVSBlob ) )     { TRACE( "LimbGlow: Failed VS" );          return false; }
+	if ( !compileShaderEntry( wszPath, "PS_LimbGlow",  "ps_5_1", m_pPSGlow ) )     { TRACE( "LimbGlow: Failed PS_LimbGlow" ); return false; }
+	if ( !compileShaderEntry( wszPath, "PS_Composite", "ps_5_1", m_pPSComposite ) ){ TRACE( "LimbGlow: Failed PS_Composite" );return false; }
 
 	// --- Root signature (mirror DisplayEffectHDR pattern) ---
 	D3D12_ROOT_PARAMETER params[3] = {};
@@ -172,7 +154,7 @@ bool DisplayEffectGodRaysD3D12::initGodRays( DisplayDeviceD3D12 * pDevice )
 
 	D3D12_DESCRIPTOR_RANGE srvRange = {};
 	srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-	srvRange.NumDescriptors = 2;		// t0 = scene/rays RT, t1 = depth (rays pass foreground reject)
+	srvRange.NumDescriptors = 2;		// t0 = scene RT (in glow pass) / glow RT (in composite pass), t1 = depth
 	srvRange.BaseShaderRegister = 0;
 	srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -201,12 +183,12 @@ bool DisplayEffectGodRaysD3D12::initGodRays( DisplayDeviceD3D12 * pDevice )
 	HRESULT hr = D3D12SerializeRootSignature( &rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err );
 	if ( FAILED(hr) )
 	{
-		if ( err ) TRACE( "GodRays root sig error: %s", (const char *)err->GetBufferPointer() );
+		if ( err ) TRACE( "LimbGlowroot sig error: %s", (const char *)err->GetBufferPointer() );
 		return false;
 	}
 	hr = pDevice->getDevice()->CreateRootSignature( 0, sig->GetBufferPointer(), sig->GetBufferSize(),
 		IID_PPV_ARGS(&m_pRootSig) );
-	if ( FAILED(hr) ) { TRACE( "GodRays: Failed root sig" ); return false; }
+	if ( FAILED(hr) ) { TRACE( "LimbGlow: Failed root sig" ); return false; }
 
 	// --- PSOs ---
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
@@ -223,25 +205,11 @@ bool DisplayEffectGodRaysD3D12::initGodRays( DisplayDeviceD3D12 * pDevice )
 	psoDesc.SampleDesc.Count = 1;
 	psoDesc.SampleMask = UINT_MAX;
 
-	// Rays PSO (writes quarter-res rays RT, no blend)
-	psoDesc.PS = { m_pPSRays->GetBufferPointer(), m_pPSRays->GetBufferSize() };
-	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pRaysPSO) );
-	if ( FAILED(hr) ) { TRACE( "GodRays: Failed rays PSO" ); return false; }
-
-	// Eclipse PSO (DST_new = DST * SRC, multiplicative darken on scene RT).
-	// Output of PS_Eclipse IS the multiplier — values in [0,1], where 1.0
-	// leaves the destination unchanged.  Blend equation:
-	//   DST = DST * SRC_COLOR + 0 * SRC = DST * SRC.
-	psoDesc.PS = { m_pPSEclipse->GetBufferPointer(), m_pPSEclipse->GetBufferSize() };
-	psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
-	psoDesc.BlendState.RenderTarget[0].SrcBlend      = D3D12_BLEND_ZERO;
-	psoDesc.BlendState.RenderTarget[0].DestBlend     = D3D12_BLEND_SRC_COLOR;
-	psoDesc.BlendState.RenderTarget[0].BlendOp       = D3D12_BLEND_OP_ADD;
-	psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha  = D3D12_BLEND_ZERO;
-	psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
-	psoDesc.BlendState.RenderTarget[0].BlendOpAlpha   = D3D12_BLEND_OP_ADD;
-	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pEclipsePSO) );
-	if ( FAILED(hr) ) { TRACE( "GodRays: Failed eclipse PSO" ); return false; }
+	// Glow PSO (writes half-res rim glow RT, no blend — clears each frame
+	// and overwrites with the per-occluder rim accumulation).
+	psoDesc.PS = { m_pPSGlow->GetBufferPointer(), m_pPSGlow->GetBufferSize() };
+	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pGlowPSO) );
+	if ( FAILED(hr) ) { TRACE( "LimbGlow: Failed glow PSO" ); return false; }
 
 	// Composite PSO (ONE+ONE additive into scene RT)
 	psoDesc.PS = { m_pPSComposite->GetBufferPointer(), m_pPSComposite->GetBufferSize() };
@@ -253,13 +221,13 @@ bool DisplayEffectGodRaysD3D12::initGodRays( DisplayDeviceD3D12 * pDevice )
 	psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
 	psoDesc.BlendState.RenderTarget[0].BlendOpAlpha   = D3D12_BLEND_OP_ADD;
 	hr = pDevice->getDevice()->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pCompositePSO) );
-	if ( FAILED(hr) ) { TRACE( "GodRays: Failed composite PSO" ); return false; }
+	if ( FAILED(hr) ) { TRACE( "LimbGlow: Failed composite PSO" ); return false; }
 
-	// --- Rays RT (quarter-res, HDR float) ---
+	// --- Rim glow RT (half-res, HDR float) ---
 	D3D12_RESOURCE_DESC rtDesc = {};
 	rtDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-	rtDesc.Width  = (UINT64)m_RaysSize.width;
-	rtDesc.Height = (UINT)  m_RaysSize.height;
+	rtDesc.Width  = (UINT64)m_GlowSize.width;
+	rtDesc.Height = (UINT)  m_GlowSize.height;
 	rtDesc.DepthOrArraySize = 1;
 	rtDesc.MipLevels = 1;
 	rtDesc.Format = DisplayDeviceD3D12::SCENE_RT_FORMAT;
@@ -274,43 +242,43 @@ bool DisplayEffectGodRaysD3D12::initGodRays( DisplayDeviceD3D12 * pDevice )
 
 	hr = pDevice->getDevice()->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
 		&rtDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clearValue,
-		IID_PPV_ARGS(&m_pRaysRT) );
-	if ( FAILED(hr) ) { TRACE( "GodRays: Failed rays RT creation %dx%d", m_RaysSize.width, m_RaysSize.height ); return false; }
+		IID_PPV_ARGS(&m_pGlowRT) );
+	if ( FAILED(hr) ) { TRACE( "LimbGlow: Failed glow RT creation %dx%d", m_GlowSize.width, m_GlowSize.height ); return false; }
 
-	if ( m_nRaysRTVIndex == UINT(-1) )
-		m_nRaysRTVIndex = pDevice->m_RTVHeap.Allocate();
-	pDevice->getDevice()->CreateRenderTargetView( m_pRaysRT.Get(), nullptr,
-		pDevice->m_RTVHeap.GetCPUHandle( m_nRaysRTVIndex ) );
+	if ( m_nGlowRTVIndex == UINT(-1) )
+		m_nGlowRTVIndex = pDevice->m_RTVHeap.Allocate();
+	pDevice->getDevice()->CreateRenderTargetView( m_pGlowRT.Get(), nullptr,
+		pDevice->m_RTVHeap.GetCPUHandle( m_nGlowRTVIndex ) );
 
-	if ( m_nRaysSRVIndex == UINT(-1) )
-		m_nRaysSRVIndex = pDevice->m_SRVStagingHeap.Allocate();
+	if ( m_nGlowSRVIndex == UINT(-1) )
+		m_nGlowSRVIndex = pDevice->m_SRVStagingHeap.Allocate();
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	srvDesc.Format = DisplayDeviceD3D12::SCENE_RT_FORMAT;
 	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 	srvDesc.Texture2D.MipLevels = 1;
-	pDevice->getDevice()->CreateShaderResourceView( m_pRaysRT.Get(), &srvDesc,
-		pDevice->m_SRVStagingHeap.GetCPUHandle( m_nRaysSRVIndex ) );
+	pDevice->getDevice()->CreateShaderResourceView( m_pGlowRT.Get(), &srvDesc,
+		pDevice->m_SRVStagingHeap.GetCPUHandle( m_nGlowSRVIndex ) );
 
 	m_bInitialized = true;
 	m_bFailed = false;
 
-	TRACE( "GodRays initialized: screen=%dx%d, rays=%dx%d",
-		width, height, m_RaysSize.width, m_RaysSize.height );
+	TRACE( "LimbGlow initialized: screen=%dx%d, glow=%dx%d",
+		width, height, m_GlowSize.width, m_GlowSize.height );
 	return true;
 }
 
 //---------------------------------------------------------------------------------------------------
 
-bool DisplayEffectGodRaysD3D12::preRender( DisplayDevice * )
+bool DisplayEffectLimbGlowD3D12::preRender( DisplayDevice * )
 {
 	return true;
 }
 
 //---------------------------------------------------------------------------------------------------
 
-void DisplayEffectGodRaysD3D12::drawFullscreenTriangle( DisplayDeviceD3D12 * pDevice )
+void DisplayEffectLimbGlowD3D12::drawFullscreenTriangle( DisplayDeviceD3D12 * pDevice )
 {
 	ID3D12GraphicsCommandList * cl = pDevice->getCommandList();
 	cl->IASetPrimitiveTopology( D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
@@ -319,13 +287,17 @@ void DisplayEffectGodRaysD3D12::drawFullscreenTriangle( DisplayDeviceD3D12 * pDe
 }
 
 //---------------------------------------------------------------------------------------------------
-// Project the current sun-candidate world position (populated during scene
-// rendering by NounStar::render via DisplayDevice::submitSunCandidate) to a
-// screen-space UV.  Returns true if a sun was submitted this frame AND its
-// projection lands in front of the camera.  sunVisible=1 when the projection
-// is within a reasonable screen margin; 0 when off-screen or far off-screen
-// (beyond that, marching 48 rays from every pixel toward a nonsense UV
-// would sample garbage).
+// Project the current sun-candidate world position (submitted during the
+// scene render by NounStar::render → DisplayDevice::submitSunCandidate) to
+// a screen-space UV.  Returns true if a sun was submitted this frame.
+// sunVisible=1 when the projection lands in front of the camera and within
+// a generous screen margin; 0 when behind the camera or far off-screen
+// (the shader uses fSunVisible to short-circuit to black).
+//
+// sunViewX/Y/Z are the sun's view-space coords; the shader only consumes
+// .Z (for the foreground/sky depth classification), but X and Y are used
+// CPU-side in postRender to compute the camera→sun world distance for
+// the distance fade.
 //---------------------------------------------------------------------------------------------------
 
 static bool projectSunToScreen( DisplayDeviceD3D12 * pDevice,
@@ -356,18 +328,19 @@ static bool projectSunToScreen( DisplayDeviceD3D12 * pDevice,
 	sunU =  ndcX * 0.5f + 0.5f;
 	sunV = -ndcY * 0.5f + 0.5f;
 
-	// Full view-space sun position (Chunk 4.5) — needed for the ray-sphere
-	// occluder test in the composite pass, plus the existing depth/sky
-	// classification (which uses Z only).
+	// Full view-space sun position.  The shader only reads .Z (for the
+	// foreground/sky depth classification); X and Y are returned for
+	// the CPU-side distance fade in postRender.
 	XMVECTOR sunView = XMVector4Transform( sunHomog, viewMat );
 	sunViewX = XMVectorGetX( sunView );
 	sunViewY = XMVectorGetY( sunView );
 	sunViewZ = XMVectorGetZ( sunView );
 
-	// Accept rays even when the sun is slightly off-screen (they still
-	// converge on the implied point and produce pleasing edge streaks).
-	// Reject only when the projection is so far off that 48-tap radial
-	// marches would walk into unrelated UVs and produce noise.
+	// Reject when the sun's projection is far off-screen.  The rim glow
+	// depends on the sun's tangent-plane position vs each occluder's
+	// silhouette, so a wildly off-screen sun would still produce valid
+	// (though invisible) rim contributions; the bound is mostly a sanity
+	// check against degenerate projections.
 	if ( sunU < -1.5f || sunU > 2.5f || sunV < -1.5f || sunV > 2.5f )
 		return true;
 
@@ -377,7 +350,7 @@ static bool projectSunToScreen( DisplayDeviceD3D12 * pDevice,
 
 //---------------------------------------------------------------------------------------------------
 
-bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
+bool DisplayEffectLimbGlowD3D12::postRender( DisplayDevice * pDevice )
 {
 	DisplayDeviceD3D12 * pDev = (DisplayDeviceD3D12 *)pDevice;
 	if ( !pDev || !pDev->isCommandListOpen() )
@@ -388,21 +361,107 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 	if ( DisplayDevice::sm_bUseFixedFunction )
 		return true;
 
-	if ( !m_bInitialized && !initGodRays( pDev ) )
+	if ( !m_bInitialized && !initLimbGlow( pDev ) )
 		return true;
 
-	// Depth SRV must exist — god rays' foreground reject reads depth at t1.
-	// Without it the shader would fetch whatever is bound as the neutral
-	// staging descriptor and produce garbage.
+	// Depth SRV must exist — both PS_LimbGlow and PS_Composite read depth at
+	// t1 (foreground reject + full-res silhouette gate respectively).
 	if ( pDev->m_nDepthSRVIndex == UINT(-1) )
 		return true;
 
 	// Resolve the nearest submitted star's screen-space UV + view-space
-	// position.  No star → no rays; behind camera / far off-screen →
+	// position.  No star → effect skipped; behind camera / far off-screen →
 	// shader short-circuits via fSunVisible=0.
 	float sunU, sunV, sunVis, sunViewX, sunViewY, sunViewZ;
 	if ( !projectSunToScreen( pDev, sunU, sunV, sunVis, sunViewX, sunViewY, sunViewZ ) )
 		return true;	// no star submitted this frame, nothing to do
+
+	// Diagnostic.  Logs the sun candidate's world position, the camera's
+	// world position, and every submitted occluder every ~2 seconds (120
+	// frames at 60 fps) so we can reconstruct scene geometry when a
+	// player reports unexpected glow / no glow.
+	//
+	// For each occluder we print:
+	//   camDist     — camera-to-occluder distance in world units
+	//   sunOffsetD  — camera-to-sun-direction angular offset (DEGREES);
+	//                 ~0° means the occluder is along the same view ray
+	//                 as the sun (in front, behind, or at it).  Small
+	//                 sunOffset on a FRONT body is the cinematic case
+	//                 where rim glow should fire.
+	//   inFrontSun  — is this occluder closer to camera than the sun?
+	{
+		static int s_diagFrame = 0;
+		if ( (s_diagFrame++ % 120) == 0 )
+		{
+			Vector3 sunWorld;
+			pDev->getSunCandidate( sunWorld );
+
+			// Recover camera world position from the view matrix:
+			// view = T(-cam) * R(-orientation), so the camera's world pos
+			// is the inverse-view's 4th row translation.
+			XMVECTOR det;
+			XMMATRIX invView = XMMatrixInverse( &det, pDev->getViewMatrix() );
+			XMFLOAT4 camP;
+			XMStoreFloat4( &camP, invView.r[3] );
+			Vector3 camWorld( camP.x, camP.y, camP.z );
+
+			Vector3 toSun = sunWorld - camWorld;
+			float   sunCamDist = toSun.magnitude();
+			Vector3 sunDir = (sunCamDist > 1e-3f) ? toSun * (1.0f / sunCamDist) : Vector3(0,0,1);
+
+			TRACE( "LimbGlowDiag: cam=(%.0f,%.0f,%.0f) sun=(%.0f,%.0f,%.0f) cam→sun=%.0f sunUV=(%.2f,%.2f) sunVis=%.2f",
+				camWorld.x, camWorld.y, camWorld.z,
+				sunWorld.x, sunWorld.y, sunWorld.z,
+				sunCamDist, sunU, sunV, sunVis );
+
+			int nOcc = pDev->getOccluderCount();
+			TRACE( "LimbGlowDiag: %d occluders:", nOcc );
+			for ( int i = 0; i < nOcc; ++i )
+			{
+				const DisplayDevice::OccluderInfo & o = pDev->getOccluder( i );
+				const char * pName = o.pName ? o.pName : "<unnamed>";
+
+				Vector3 toOcc = o.worldPos - camWorld;
+				float occCamDist = toOcc.magnitude();
+				float angleDeg = 0.0f;
+				if ( occCamDist > 1e-3f && sunCamDist > 1e-3f )
+				{
+					float dot = (toOcc * (1.0f / occCamDist)) | sunDir;
+					if ( dot >  1.0f ) dot =  1.0f;
+					if ( dot < -1.0f ) dot = -1.0f;
+					angleDeg = acosf( dot ) * (180.0f / 3.14159265f);
+				}
+				const char * inFront = (occCamDist < sunCamDist) ? "FRONT" : "BEHIND";
+
+				TRACE( "  [%d] '%s' world=(%.0f,%.0f,%.0f) r=%.0f camDist=%.0f sunOffset=%.2f° %s sun",
+					i, pName, o.worldPos.x, o.worldPos.y, o.worldPos.z, o.radius,
+					occCamDist, angleDeg, inFront );
+			}
+		}
+	}
+
+	// Distance-from-camera fade.  At extreme camera→sun distances the
+	// sun's projected disc shrinks to a sub-pixel point and any rim glow
+	// from a foreground body coincidentally aligned with that direction
+	// reads as visually dubious — the player can't perceptibly tell where
+	// the sun is, so a halo "from" something near it looks attached to
+	// the wrong source.  Linear fade between NEAR and FAR; beyond FAR
+	// sunVis = 0 and the shader short-circuits to black.  Thresholds
+	// tunable via Constants.ini — defaults are deliberately generous
+	// (15k-30k) so the fade only applies at extreme zooms.  Guard against
+	// pathological config (FAR ≤ NEAR) to avoid div-by-zero.
+	{
+		float fadeNear  = (float)LIMBGLOW_FADE_NEAR;
+		float fadeFar   = (float)LIMBGLOW_FADE_FAR;
+		float fadeBand  = fadeFar - fadeNear;
+		if ( fadeBand < 1.0f ) fadeBand = 1.0f;
+		float distSq    = sunViewX*sunViewX + sunViewY*sunViewY + sunViewZ*sunViewZ;
+		float distToSun = sqrtf( distSq );
+		float fade      = (fadeFar - distToSun) / fadeBand;
+		if ( fade < 0.0f ) fade = 0.0f;
+		else if ( fade > 1.0f ) fade = 1.0f;
+		sunVis *= fade;
+	}
 
 	ID3D12GraphicsCommandList * cl = pDev->getCommandList();
 	ID3D12Device * dev = pDev->getDevice();
@@ -413,9 +472,9 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 	cl->SetDescriptorHeaps( _countof(heaps), heaps );
 	cl->SetGraphicsRootDescriptorTable( 2, pDev->m_SamplerHeap.GetGPUHandle( 2 ) );	// linear clamp
 
-	auto uploadCB = [&]( const CBGodRays & cb )
+	auto uploadCB = [&]( const CBLimbGlow & cb )
 	{
-		UploadRingBuffer::Allocation cbAlloc = pDev->allocateCB( sizeof(CBGodRays) );
+		UploadRingBuffer::Allocation cbAlloc = pDev->allocateCB( sizeof(CBLimbGlow) );
 		memcpy( cbAlloc.cpuAddress, &cb, sizeof(cb) );
 		cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 	};
@@ -434,78 +493,52 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 		cl->SetGraphicsRootDescriptorTable( 1, pDev->m_SRVHeap.GetGPUHandle( slot ) );
 	};
 
-	// --- Step 1: Scene RT → rays RT (half-res, radial blur + brightpass + depth reject) ---
+	// --- Step 1: render rim glow into half-res RT.  PS_LimbGlow walks
+	// the foreground occluder list and accumulates a halo contribution at
+	// each sky pixel near a foreground silhouette; foreground pixels are
+	// rejected via the depth buffer at t1. ---
 	if ( pDev->m_bSceneRTisRT )
 	{
 		TransitionResource( cl, pDev->m_pSceneRT.Get(),
 			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 		pDev->m_bSceneRTisRT = false;
 	}
-	TransitionResource( cl, m_pRaysRT.Get(),
+	TransitionResource( cl, m_pGlowRT.Get(),
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
-	// Depth → PSR for the foreground-reject lookup in PS_GodRays.  Restored
+	// Depth → PSR for the foreground-reject lookup in PS_LimbGlow.  Restored
 	// to DEPTH_WRITE at the end of postRender before the DSV is rebound.
 	TransitionResource( cl, pDev->m_pDepthStencil.Get(),
 		D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 
-	CBGodRays cb = {};
+	CBLimbGlow cb = {};
 	cb.sunU = sunU;
 	cb.sunV = sunV;
 	cb.fSunVisible = sunVis;
-	cb.fDensity   = m_fDensity;
 	cb.fWeight    = m_fWeight;
-	cb.fDecay     = m_fDecay;
 	cb.fExposure  = m_fExposure;
-	cb.fEclipseStrength = m_fEclipseStrength;
-	cb.texelSizeX = 1.0f / (float)m_RaysSize.width;
-	cb.texelSizeY = 1.0f / (float)m_RaysSize.height;
+	cb.fSunViewZ  = sunViewZ;
 	cb.fProjNear  = pDev->m_Proj.m_fFront;
 	cb.fProjFar   = pDev->m_Proj.m_fBack;
-	cb.sunViewX   = sunViewX;
-	cb.sunViewY   = sunViewY;
-	cb.sunViewZ   = sunViewZ;
 
-	// Projection matrix _11 / _22 diagonals — read directly from the
-	// device's projection matrix.  XMMATRIX.r[0].m128_f32[0] = m11,
-	// .r[1].m128_f32[1] = m22.  These let the shader reconstruct view-X
-	// and view-Y from screen UV + view-Z without needing the full inverse
-	// projection matrix (cheaper CB, simpler shader).
+	// Projection matrix _11 / _22 diagonals — used by the shader to
+	// convert pixel UV into tangent-plane (z=1) coords for the per-pixel
+	// rim test against vOccluders.
 	XMMATRIX projMat = pDev->getProjMatrix();
 	XMFLOAT4X4 projF;
 	XMStoreFloat4x4( &projF, projMat );
 	cb.fProjM11 = projF.m[0][0];
 	cb.fProjM22 = projF.m[1][1];
 
-	// Pack occluders as TANGENT-PLANE silhouette discs.  See CBGodRays
-	// definition for the format.  Behind-camera and behind-sun occluders
-	// get a sentinel w<=0 so the shader skips them.
-	//
-	// We use the FULL submitted list — no 3D-shadow filtering.  An
-	// obscured planet (one in another's 3D sun-shadow) still has a
-	// visible silhouette on screen, and its tangent-plane disc is what
-	// kills rays at its on-screen rim.  Skipping those would create a
-	// parallax bug: a small body visually well-separated from its
-	// obscurer in the camera's view would lose silhouette shadow even
-	// though geometrically (from the sun's POV) it sits in the larger
-	// body's shadow column.
+	// Pack occluders as TANGENT-PLANE silhouette discs (see CBLimbGlow).
+	// Behind-camera occluders get sentinel (w == 0) so the shader skips
+	// them; foreground vs background filtering by view-Z is done in the
+	// shader (only 0 < w < fSunViewZ contributes to rim glow).
 	XMMATRIX viewMat = pDev->getViewMatrix();
 	const int occCount = pDev->getOccluderCount();
 	cb.nNumOccluders = (occCount > 32) ? 32 : occCount;
+	cb.fPad0 = 0.0f;
 
-	// Map the global shaderDetail knob to PS_GodRays' march sample count.
-	// 96 (EXTREME) is the original/Mitchell-conservative value; 64 (HIGH)
-	// halves the depth-sample bandwidth with minimal visible change thanks
-	// to the jitter dither; 24 (LOW) is for low-end iGPUs where rays were
-	// the dominant frame cost.
-	switch ( DisplayDevice::sm_nShaderDetail )
-	{
-	case DisplayDevice::SHADER_DETAIL_LOW:		cb.nGodRaysSamples = 24; break;
-	case DisplayDevice::SHADER_DETAIL_MEDIUM:	cb.nGodRaysSamples = 48; break;
-	case DisplayDevice::SHADER_DETAIL_HIGH:		cb.nGodRaysSamples = 64; break;
-	case DisplayDevice::SHADER_DETAIL_EXTREME:	cb.nGodRaysSamples = 96; break;
-	default:									cb.nGodRaysSamples = 64; break;
-	}
 	for ( int i = 0; i < cb.nNumOccluders; ++i )
 	{
 		const DisplayDevice::OccluderInfo & o = pDev->getOccluder( i );
@@ -519,10 +552,7 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 			cb.vOccluders[i*4 + 0] = vX / vZ;			// tangent-plane centre x
 			cb.vOccluders[i*4 + 1] = vY / vZ;			// tangent-plane centre y
 			cb.vOccluders[i*4 + 2] = o.radius / vZ;		// tangent-plane radius
-			// Encode bShadowed in the sign of the view-Z gate value.
-			// Shader uses abs(w) for the actual view-Z and (w<0) as the
-			// shadowed flag.  Sentinel (skip) is now w == 0.
-			cb.vOccluders[i*4 + 3] = o.bShadowed ? -vZ : vZ;
+			cb.vOccluders[i*4 + 3] = vZ;				// view-space Z, used for foreground/background filter in shader
 		}
 		else
 		{
@@ -545,29 +575,23 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 
 	bindSRVs( pDev->m_nSceneSRVIndex, pDev->m_nDepthSRVIndex );
 
-	D3D12_CPU_DESCRIPTOR_HANDLE rtv = pDev->m_RTVHeap.GetCPUHandle( m_nRaysRTVIndex );
+	D3D12_CPU_DESCRIPTOR_HANDLE rtv = pDev->m_RTVHeap.GetCPUHandle( m_nGlowRTVIndex );
 	cl->OMSetRenderTargets( 1, &rtv, FALSE, nullptr );
-	D3D12_VIEWPORT vp = { 0, 0, (float)m_RaysSize.width, (float)m_RaysSize.height, 0, 1 };
-	D3D12_RECT sc   = { 0, 0, (LONG)m_RaysSize.width, (LONG)m_RaysSize.height };
+	D3D12_VIEWPORT vp = { 0, 0, (float)m_GlowSize.width, (float)m_GlowSize.height, 0, 1 };
+	D3D12_RECT sc   = { 0, 0, (LONG)m_GlowSize.width, (LONG)m_GlowSize.height };
 	cl->RSSetViewports( 1, &vp );
 	cl->RSSetScissorRects( 1, &sc );
 	float clearColor[4] = { 0, 0, 0, 0 };
 	cl->ClearRenderTargetView( rtv, clearColor, 0, nullptr );
-	cl->SetPipelineState( m_pRaysPSO.Get() );
+	cl->SetPipelineState( m_pGlowPSO.Get() );
 	drawFullscreenTriangle( pDev );
 
-	// --- Step 2: Eclipse darken pass on scene RT (DST *= SRC).
-	// Foreground occluders near the sun get multiplicatively darkened so
-	// they read as silhouettes against the additive ray glow that follows.
-	// Without this, the additive rays brighten the surrounding sky and HDR
-	// bloom (post-god-rays) bleeds that brightness back across occluder
-	// edges — occluders end up looking semi-transparent / washed-out.
-	//
-	// Eclipse runs at FULL res on the scene RT (not the half-res rays RT),
-	// since we're modifying the actual scene pixels.  Reads depth (still
-	// in PSR state from step 1) at t1; t0 is a don't-care, bound to the
-	// rays SRV to satisfy the 2-SRV root table.
-	TransitionResource( cl, m_pRaysRT.Get(),
+	// --- Step 2: rim-glow RT → scene RT (full-res, ONE+ONE additive) ---
+	// Transition the rim-glow RT to a shader resource and the scene RT
+	// back to a render target.  Depth stays in PSR state from step 1 —
+	// the composite shader re-tests it at full-res so half-res bilinear
+	// filtering doesn't bleed the rim onto adjacent foreground bodies.
+	TransitionResource( cl, m_pGlowRT.Get(),
 		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 	if ( !pDev->m_bSceneRTisRT )
 	{
@@ -585,25 +609,7 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 	cl->RSSetViewports( 1, &sceneVP );
 	cl->RSSetScissorRects( 1, &sceneScissor );
 
-	if ( m_fEclipseStrength > 0.0f )
-	{
-		bindSRVs( m_nRaysSRVIndex, pDev->m_nDepthSRVIndex );
-		uploadCB( cb );
-		cl->SetPipelineState( m_pEclipsePSO.Get() );
-		drawFullscreenTriangle( pDev );
-	}
-
-	// --- Step 3: Rays RT → scene RT (full-res, ONE+ONE additive) ---
-	// Composite reads rays at t0 and depth at t1.  Depth is needed so the
-	// shader can gate by destination-pixel depth — rays composite onto sky
-	// pixels only, never onto foreground occluders (otherwise distant
-	// stars / moons paint rays ON TOP of nearer planets and ships).
-	// Depth is still in PIXEL_SHADER_RESOURCE state from step 1, so no
-	// transition needed here.
-	bindSRVs( m_nRaysSRVIndex, pDev->m_nDepthSRVIndex );
-
-	// CB unchanged from prior pass; composite reads fExposure, fSunDepth,
-	// fSunVisible.
+	bindSRVs( m_nGlowSRVIndex, pDev->m_nDepthSRVIndex );
 	cl->SetPipelineState( m_pCompositePSO.Get() );
 	drawFullscreenTriangle( pDev );
 
@@ -626,16 +632,14 @@ bool DisplayEffectGodRaysD3D12::postRender( DisplayDevice * pDevice )
 
 //---------------------------------------------------------------------------------------------------
 
-void DisplayEffectGodRaysD3D12::release()
+void DisplayEffectLimbGlowD3D12::release()
 {
-	m_pRaysRT.Reset();
-	m_pRaysPSO.Reset();
-	m_pEclipsePSO.Reset();
+	m_pGlowRT.Reset();
+	m_pGlowPSO.Reset();
 	m_pCompositePSO.Reset();
 	m_pRootSig.Reset();
 	m_pVSBlob.Reset();
-	m_pPSRays.Reset();
-	m_pPSEclipse.Reset();
+	m_pPSGlow.Reset();
 	m_pPSComposite.Reset();
 	// RTV / SRV staging indices left allocated — same resize recovery pattern
 	// as DisplayEffectHDR.

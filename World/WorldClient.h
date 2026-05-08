@@ -520,8 +520,8 @@ public:
 	// reads world transforms from the published snapshot via
 	// Noun::calculateWorld's snapshot short-circuit (gated on the
 	// tl_bRenderingFromSnapshot thread-local set by InterfaceContext::render).
-	// Default off — set "pipelinedSimRender=1" in config.ini to enable.
-	// Auto-enables sm_bUseRenderSnapshot when on.
+	// Default on — set "pipelinedSimRender=0" in config.ini to fall back
+	// to the serial path.  Auto-enables sm_bUseRenderSnapshot when on.
 	static bool			sm_bPipelinedSimRender;
 
 	// Phase D audit flag — when true, SNAPSHOT_ASSERT_COVERED markers in

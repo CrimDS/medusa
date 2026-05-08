@@ -150,7 +150,7 @@
     <ClCompile Include="DisplayDeviceD3D12.cpp" />
     <ClCompile Include="DisplayEffectBlur.cpp" />
     <ClCompile Include="DisplayEffectExposure.cpp" />
-    <ClCompile Include="DisplayEffectGodRays.cpp" />
+    <ClCompile Include="DisplayEffectLimbGlow.cpp" />
     <ClCompile Include="DisplayEffectHDR.cpp" />
     <ClCompile Include="DisplayEffectSSAO.cpp" />
     <ClCompile Include="ImageCodecBC7.cpp" />
@@ -172,7 +172,7 @@
     <ClInclude Include="DisplayDeviceD3D12.h" />
     <ClInclude Include="DisplayEffectBlur.h" />
     <ClInclude Include="DisplayEffectExposure.h" />
-    <ClInclude Include="DisplayEffectGodRays.h" />
+    <ClInclude Include="DisplayEffectLimbGlow.h" />
     <ClInclude Include="DisplayEffectHDR.h" />
     <ClInclude Include="DisplayEffectSSAO.h" />
     <ClInclude Include="ImageCodecBC7.h" />

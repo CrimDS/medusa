@@ -39,12 +39,12 @@ static Constant SLEEP_MODE_UPDATE_RATE( "SLEEP_MODE_UPDATE_RATE", 5.0f );
 //---------------------------------------------------------------------------------------------------
 
 bool		WorldContext::sm_bEnableHDR = true;
-bool		WorldContext::sm_bEnableGodRays = true;		// volumetric sun shafts (DisplayEffectGodRays) — cheap quarter-res radial blur from directional light's screen-space vanishing point; big vista impact for a space sim
+bool		WorldContext::sm_bEnableLimbGlow = true;	// cinematic limb glow (DisplayEffectLimbGlow) — bright halo at the silhouette of a foreground celestial body when the sun is at or behind it.
 bool		WorldContext::sm_bEnableExposure = true;	// auto-exposure (DisplayEffectExposure) — 1x1 EMA-smoothed luminance multiplier consumed by FXAA tonemap. Disabling pins exposure to 1.0 via FXAA's fallback texture.
 bool		WorldContext::sm_bEnableShadows = true;
 int			WorldContext::sm_nMaxShadowLights = 4;
-bool		WorldContext::sm_bEnableSSAO = false;	// Temporarily off 2026-04-25 to focus on god rays; GTAO implementation (horizon-based, Jiménez 2016) can be re-enabled by flipping to true. Doesn't produce the silhouette-halo artefacts of the old Crytek hemisphere-sampling SSAO on smooth convex spheres, so the "disable because of planets/stars" concern no longer applies.
-bool		WorldContext::sm_bGameView = false;	// set true by ViewTactical around its render call; gates god rays so they only appear in the main game view, not planet/navigation/observer/engineering sub-views.
+bool		WorldContext::sm_bEnableSSAO = false;	// Off by default — GTAO implementation (horizon-based, Jiménez 2016) can be re-enabled by flipping to true. Doesn't produce the silhouette-halo artefacts of the old Crytek hemisphere-sampling SSAO on smooth convex spheres, so the "disable because of planets/stars" concern no longer applies.
+bool		WorldContext::sm_bGameView = false;	// set true by ViewTactical around its render call; gates view-specific post effects (limb glow) so they only appear in the main game view, not planet/navigation/observer/engineering sub-views.
 bool				WorldContext::sm_bParallelSimulate = true;		// default on — cross-zone mutations guarded by sm_SimMutLock
 CriticalSection		WorldContext::sm_SimMutLock;						// coarse lock for cross-zone mutations during parallel simulate
 
@@ -587,16 +587,16 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 
 	if (! bProxy )
 	{
-		// Chunk-1-era push order: Exposure first, GodRays, HDR, SSAO.
+		// Push order: Exposure first, HDR, LimbGlow, SSAO.
 		// Effects iterate in REVERSE push order during postRender, so
 		// first-pushed = last-executed.  Execution order:
 		//
-		//     SSAO  →  HDR/bloom  →  GodRays  →  Exposure
+		//     SSAO  →  LimbGlow  →  HDR/bloom  →  Exposure
 		//
-		// GodRays runs AFTER HDR so bloom (an isotropic blur) doesn't
-		// smear ray glow across foreground occluder edges.  Exposure
-		// runs LAST so the auto-exposure 1×1 luminance sample reflects
-		// the FINAL scene (including rays).
+		// LimbGlow runs BEFORE HDR (see comment block at the HDR push
+		// below) so the rim halo is bloomed together with the rest of
+		// the scene rather than separately.  Exposure runs LAST so the
+		// auto-exposure 1×1 luminance sample reflects the FINAL scene.
 
 		// All four post-process effects use the same lifetime policy: created
 		// lazily on first enable, then KEPT ALIVE for the rest of the session
@@ -606,7 +606,7 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 		// destroy/recreate cycle leaks them.  RTV heap is only 32 slots; a few
 		// HDR toggles (8 mip RTVs each) will exhaust it, after which the next
 		// allocation returns UINT(-1) and CreateRenderTargetView crashes deep
-		// inside D3D12Core.dll on the wild handle.  GodRays already had this
+		// inside D3D12Core.dll on the wild handle.  LimbGlow already had this
 		// fix; Exposure/HDR/SSAO now match.
 
 		if ( sm_bEnableExposure )
@@ -620,17 +620,16 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 				sm_bEnableExposure = false;
 		}
 
-		if ( sm_bEnableGodRays && sm_bGameView )
-		{
-			if ( !m_pGodRays.valid() )
-				m_pGodRays = pDisplay->createEffect( "GODRAYS" );
-
-			if ( m_pGodRays.valid() )
-				pDisplay->push( m_pGodRays );
-			else
-				sm_bEnableGodRays = false;
-		}
-
+		// HDR pushed BEFORE LimbGlow so that — given postRender iterates
+		// effects in REVERSE push order — LimbGlow runs FIRST (before
+		// HDR/bloom).  Reasoning: the scene RT must be un-bloomed when
+		// LimbGlow composites, otherwise the planet's HDR limb glint has
+		// already been blurred through the bloom mip chain into a
+		// ~30-pixel halo around each planet by the time PS_Composite
+		// runs, which fights the rim halo geometry.  Compositing the
+		// rim BEFORE bloom means bloom then expands the rim and any
+		// natural limb glint together as one combined source — what we
+		// actually want for the cinematic look.
 		if ( sm_bEnableHDR )
 		{
 			if (! m_pHDR.valid() )
@@ -640,6 +639,17 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 				pDisplay->push( m_pHDR );
 			else
 				sm_bEnableHDR = false;		// failed to create the HDR effect, disable it..
+		}
+
+		if ( sm_bEnableLimbGlow && sm_bGameView )
+		{
+			if ( !m_pLimbGlow.valid() )
+				m_pLimbGlow = pDisplay->createEffect( "LIMBGLOW" );
+
+			if ( m_pLimbGlow.valid() )
+				pDisplay->push( m_pLimbGlow );
+			else
+				sm_bEnableLimbGlow = false;
 		}
 
 		if ( sm_bEnableSSAO )

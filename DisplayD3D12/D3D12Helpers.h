@@ -158,8 +158,9 @@ struct CBPerFrame
 	// position, w = radius (world units).  nNumOccluders gives count; up
 	// to 32 (DisplayDevice::MAX_OCCLUDERS).  The shader does ray-sphere
 	// tests from each lit pixel toward the sun's direction and zeroes
-	// directional lighting if any sphere is hit.  Ditto for godrays at
-	// composite, against the sun's actual world position.
+	// directional lighting if any sphere is hit.  LimbGlow uses the same
+	// occluder list (re-packed as tangent-plane discs in its own CB) for
+	// the per-pixel rim halo test.
 	ShaderFloat4	vOccluders[32];
 	int				nNumOccluders;
 	int				nShadowPCFTaps;	// per-frame from DisplayDevice::sm_nShaderDetail (LOW=4, MED=8, HIGH/EXTREME=16)
