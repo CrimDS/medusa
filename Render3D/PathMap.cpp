@@ -32,20 +32,27 @@ void PathMap::render( RenderContext & context, const Matrix33 &frame, const Vect
 {
 	BaseNode::render( context, frame, position );
 
-	// render the nodes if this is the selected node
-	if ( s_pSelectedNode == this )
+	// render the nodes if this is the selected node (Resourcer-side debug
+	// visualization only — the runtime game never satisfies this gate)
+	if ( s_pSelectedNode == this && m_Nodes.size() > 0 )
 	{
 		DisplayDevice * pDisplay = context.display();
 		ASSERT( pDisplay );
 
-		// set a material
 		PrimitiveMaterial::push( pDisplay, WHITE, PrimitiveMaterial::ALPHA );
-		// set the transform
 		PrimitiveSetTransform::push( pDisplay, Matrix33( frame ).normalize(), position );
-		
-		PrimitiveLineList::Ref lines = PrimitiveLineList::create( context.display(), m_Nodes.size() );
 
-		Line * pLines = lines->lock();
+		// Build the line buffer up-front and pass it to the static
+		// initialize path.  Under DX12, PrimitiveLineList is the
+		// "static" variant — its lock() unconditionally returns NULL
+		// (PrimitiveLineListD3D12.cpp:71), so the previous lock/fill/
+		// unlock pattern null-deref'd on the first vertex write the
+		// moment a Resourcer user selected a populated PathMap.  The
+		// static initialize overload copies the supplied Lines into a
+		// GPU upload buffer at create time, so we can free the local
+		// Array as soon as create() returns.
+		Array<Line> buffer;
+		buffer.allocate( m_Nodes.size() );
 		for(int i=0;i<m_Nodes.size();i++)
 		{
 			Node & node = m_Nodes[ i ];
@@ -53,16 +60,17 @@ void PathMap::render( RenderContext & context, const Matrix33 &frame, const Vect
 			Vector3 n( node.position );
 			n.normalize();
 
-			pLines[i].v[0].normal = n;
-			pLines[i].v[0].position = node.position;
-			pLines[i].v[0].u = pLines[i].v[0].v = 0.0f;
+			buffer[i].v[0].normal = n;
+			buffer[i].v[0].position = node.position;
+			buffer[i].v[0].u = buffer[i].v[0].v = 0.0f;
 
-			pLines[i].v[1].normal = n;
-			pLines[i].v[1].position = node.position + n;
-			pLines[i].v[1].u = pLines[i].v[1].v = 0.0f;
+			buffer[i].v[1].normal = n;
+			buffer[i].v[1].position = node.position + n;
+			buffer[i].v[1].u = buffer[i].v[1].v = 0.0f;
 		}
-		lines->unlock();
 
+		PrimitiveLineList::Ref lines = PrimitiveLineList::create(
+			pDisplay, m_Nodes.size(), &buffer[0] );
 		pDisplay->push( lines );
 	}
 }

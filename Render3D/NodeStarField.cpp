@@ -1,6 +1,13 @@
 /*
 	NodeStarField.cpp
 	(c)2005 Palestar Inc, Richard Lyle
+
+	See header for the design.  Summary: motes are stationary in world
+	space inside a sphere around the camera; each frame we transform the
+	mote's world position into view space ("head") and remember last
+	frame's view-space position ("prev view") to use as the tail.  Camera
+	motion (translation OR rotation) makes head differ from prev view, so
+	the streak just emerges — no jump flag, no per-star doppler.
 */
 
 #define RENDER3D_DLL
@@ -13,10 +20,7 @@
 
 Color NodeStarField::s_StarColor( 255, 255, 255, 255 );
 float NodeStarField::s_StarSize = 0.001f;
-float NodeStarField::s_DopplerVelocity = 500.0f;
-
-const Color BLUE_SHIFT( 128,128,255,128 );
-const Color RED_SHIFT( 255,128,128,128 );
+float NodeStarField::s_DopplerVelocity = 500.0f;	// legacy; unused
 
 //----------------------------------------------------------------------------
 
@@ -31,18 +35,21 @@ END_PROPERTY_LIST();
 
 //----------------------------------------------------------------------------
 
-NodeStarField::NodeStarField() : m_bActive( true ), m_bTrailActive( true ), m_bJumpActive( false )
+NodeStarField::NodeStarField()
+	: m_bActive( true )
+	, m_bTrailActive( true )
+	, m_bJumpActive( false )
+	, m_bHaveLastCamera( false )
 {
 	m_ParticleCount = 150;
 	m_Front = 1.0f;
 	m_Back = 500.0f;
-	m_LastTime = 0.0f;
 }
 
 //----------------------------------------------------------------------------
 
-void NodeStarField::render( RenderContext &context, 
-		const Matrix33 & frame, 
+void NodeStarField::render( RenderContext &context,
+		const Matrix33 & frame,
 		const Vector3 & position )
 {
 	if (! m_bActive )
@@ -51,51 +58,90 @@ void NodeStarField::render( RenderContext &context,
 	DisplayDevice * pDisplay = context.display();
 	ASSERT( pDisplay );
 
-	if ( m_Stars.size() != m_ParticleCount )
+	if ( m_Particles.size() != m_ParticleCount )
 	{
-		int nPreviousCount = m_Stars.size();
-		m_Stars.realloc( m_ParticleCount );
+		int nPreviousCount = m_Particles.size();
+		m_Particles.realloc( m_ParticleCount );
 		for(int i=nPreviousCount;i<m_ParticleCount;i++)
 			createParticle( context, i );
 	}
 
+	// Camera-teleport detection: if the camera moved more than the follow
+	// radius in one frame, our cached prev-view positions are nonsense and
+	// would draw scene-spanning streaks.  Reset the tails this frame.
+	const Vector3 vCamPos = context.position();
+	bool bCameraTeleported = false;
+	if ( m_bHaveLastCamera )
+	{
+		Vector3 vCamDelta = vCamPos - m_vLastCameraPos;
+		if ( vCamDelta.magnitude2() > (m_Back * m_Back) )
+			bCameraTeleported = true;
+	}
+	m_vLastCameraPos = vCamPos;
+	m_bHaveLastCamera = true;
+
 	const Vector3 N(0,0,-1.0f);
+	const float fBackSq = m_Back * m_Back;
 
-	// get the star color
-	Color color( s_StarColor );
-
-	// allocate a triangle list
-	PrimitiveTriangleListDL::Ref pTriangleList = 
+	PrimitiveTriangleListDL::Ref pTriangleList =
 		PrimitiveTriangleListDL::create( pDisplay, m_ParticleCount );
 
-	Vector3 vDelta( context.position() - m_LastPosition );
-	m_LastPosition = context.position();
-
-	// update the triangle list
 	VertexL * pVertex = (VertexL *)pTriangleList->lock();
-	for(int i=0;i<m_Stars.size();i++)
+	for(int i=0;i<m_Particles.size();i++)
 	{
-		Star & star = m_Stars[ i ];
+		Particle & p = m_Particles[ i ];
 
-		color = s_StarColor;
-		// transform the position into view space
-		Vector3 head( context.worldToView( star.m_vHead ) );
-		Vector3 tail( star.m_vTail );
-		star.m_vTail = head;
-
-		if ( m_bJumpActive )
+		// Respawn motes that have drifted outside the follow-shell.  We
+		// re-spawn in the camera's leading hemisphere so motion through
+		// space looks like the camera is entering fresh dust ahead.
+		Vector3 vToParticle = p.m_vWorldPos - vCamPos;
+		if ( vToParticle.magnitude2() > fBackSq )
 		{
-			// do doppler effect per star...
-			float deltaZ = (head.z - tail.z) / context.elapsed();
-			if ( deltaZ < 0.0f )
-				color.iterpolate( BLUE_SHIFT, Clamp<float>( -deltaZ / s_DopplerVelocity, 0.0f, 1.0f ) );
-			else if ( deltaZ > 0.0f )
-				color.iterpolate( RED_SHIFT, Clamp<float>( deltaZ / s_DopplerVelocity, 0.0f, 1.0f ) );
+			Vector3 vsp( RandomFloat( -1.0f, 1.0f ),
+			             RandomFloat( -1.0f, 1.0f ),
+			             RandomFloat(  0.5f, 1.0f ) );	// forward-biased
+			vsp.normalize();
+			vsp *= RandomFloat( m_Front, m_Back );
+			p.m_vWorldPos = context.viewToWorld( vsp );
+			p.m_vPrevView = context.worldToView( p.m_vWorldPos );	// no spurious streak this frame
+			p.m_fBrightness = RandomFloat( 0.4f, 1.0f );
 		}
-		
+
+		Vector3 head( context.worldToView( p.m_vWorldPos ) );
+		Vector3 tail( bCameraTeleported ? head : p.m_vPrevView );
+		p.m_vPrevView = head;
+
+		// Cull motes behind the near plane: write a degenerate triangle
+		// at the origin so vertex count stays in lockstep with particle
+		// count (the dynamic VB is allocated for m_ParticleCount tris).
+		if ( head.z <= m_Front )
+		{
+			for(int v=0;v<3;v++)
+			{
+				pVertex->position = Vector3( 0, 0, 0 );
+				pVertex->diffuse = Color( 0, 0, 0, 0 );
+				pVertex->normal = N;
+				pVertex->u = 0.0f;
+				pVertex->v = 0.0f;
+				pVertex++;
+			}
+			continue;
+		}
+
+		// Per-particle brightness modulates the base tint.  Alpha fades
+		// with depth so motes wink out at the back of the shell instead
+		// of clipping abruptly when they exit and respawn.
+		Color color = s_StarColor;
+		color.r = (u8)( color.r * p.m_fBrightness );
+		color.g = (u8)( color.g * p.m_fBrightness );
+		color.b = (u8)( color.b * p.m_fBrightness );
+		float fAlpha = Clamp<float>( 1.0f - (head.z / m_Back), 0.0f, 1.0f );
+		color.a = (u8)( 255.0f * fAlpha );
+
+		// Size scales linearly with view-space depth so projected pixel
+		// size stays roughly constant under perspective (s_StarSize is
+		// a per-Z scale, not a world-space size).
 		float size = s_StarSize * head.z;
-		float alpha = 1.0f - (head.z / m_Back);
-		color.a = (u8)( 255.0f * alpha );
 
 		pVertex->position = head + Vector3( 0, size, 0 );
 		pVertex->diffuse = color;
@@ -111,40 +157,31 @@ void NodeStarField::render( RenderContext &context,
 		pVertex->v = 0.0f;
 		pVertex++;
 
-		if ( m_bTrailActive || m_bJumpActive )
+		if ( m_bTrailActive )
 		{
+			// Streak vertex: previous-frame view-space position, faded
+			// to black so additive Gouraud gives a tail that dims with
+			// length.  Streak length scales naturally with camera speed.
 			pVertex->position = tail;
 			pVertex->diffuse = BLACK;
-			pVertex->normal = N;
-			pVertex->u = 0.0f;
-			pVertex->v = 0.0f;
-			pVertex++;
 		}
 		else
 		{
 			pVertex->position = head + Vector3( -size, 0, 0 );
 			pVertex->diffuse = color;
-			pVertex->normal = N;
-			pVertex->u = 0.0f;
-			pVertex->v = 0.0f;
-			pVertex++;
 		}
-
-		// has the particle left the field of view
-		if ( fabs( head.x ) > head.z || fabs( head.y ) > head.z || head.z > m_Back || head.z < m_Front )
-		{
-			Vector3 vRandomDirection( RandomVector( Vector3( -1.0f, -1.0f, -1.0f ), Vector3( 1.0f, 1.0f, 1.0f ) ) );
-			vRandomDirection.normalize();
-
-			// convert back to world space
-			star.m_vHead = context.position() + (vRandomDirection * RandomFloat( m_Back * 0.5f, m_Back ));
-			star.m_vTail = context.worldToView( star.m_vHead );
-		}
+		pVertex->normal = N;
+		pVertex->u = 0.0f;
+		pVertex->v = 0.0f;
+		pVertex++;
 	}
 
 	pTriangleList->unlock();
 
-	// push the primitives
+	// Submit in camera-local space: pushTransform(camFrame, camPos) makes
+	// the world matrix equal to the camera-to-world transform, so vertices
+	// authored in view-space coords transform back to view-space at draw
+	// time and the field stays locked to the camera.
 	context.push( PrimitiveMaterial::create( pDisplay, PrimitiveMaterial::ADDITIVE, false, true ) );
 	context.pushTransform( context.frame(), context.position() );
 	context.push( pTriangleList );
@@ -157,6 +194,8 @@ void NodeStarField::render( RenderContext &context,
 void NodeStarField::setActive( bool bActive )
 {
 	m_bActive = bActive;
+	if (! bActive )
+		m_bHaveLastCamera = false;	// next activation reseeds tails cleanly
 }
 
 void NodeStarField::setTrailActive( bool bTrailActive )
@@ -164,9 +203,12 @@ void NodeStarField::setTrailActive( bool bTrailActive )
 	m_bTrailActive = bTrailActive;
 }
 
-void NodeStarField::setJumpActive( bool bDopplerActive )
+void NodeStarField::setJumpActive( bool bActive )
 {
-	m_bJumpActive = bDopplerActive;
+	// Streak length is now velocity-driven (jump = high cam velocity =
+	// long streaks automatically), so this is a no-op for visuals.
+	// Retained because GadgetJumpDrive still toggles it as a state flag.
+	m_bJumpActive = bActive;
 }
 
 void NodeStarField::initialize( int particles, float front, float back )
@@ -186,13 +228,19 @@ void NodeStarField::setParticleCount( int particles )
 
 void NodeStarField::createParticle( RenderContext & context, int n )
 {
-	// create particle somewhere in the viewspace of the context
-	Vector3 vsp( RandomFloat( -0.5f, 0.5f ), RandomFloat( -0.5f, 0.5f ), 1.0f );
+	// Initial spawn: forward-biased direction in view space at a random
+	// depth in the [front, back] shell, transformed to world space so the
+	// mote is stationary in world thereafter.
+	Vector3 vsp( RandomFloat( -1.0f, 1.0f ),
+	             RandomFloat( -1.0f, 1.0f ),
+	             RandomFloat(  0.5f, 1.0f ) );
+	vsp.normalize();
 	vsp *= RandomFloat( m_Front, m_Back );
 
-	// transform from viewspace to objectspace
-	Star & star = m_Stars[ n ];
-	star.m_vTail = star.m_vHead = context.viewToWorld( vsp );
+	Particle & p = m_Particles[ n ];
+	p.m_vWorldPos = context.viewToWorld( vsp );
+	p.m_vPrevView = context.worldToView( p.m_vWorldPos );	// tail = head -> no streak frame 1
+	p.m_fBrightness = RandomFloat( 0.4f, 1.0f );
 }
 
 //----------------------------------------------------------------------------

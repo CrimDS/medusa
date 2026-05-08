@@ -161,6 +161,39 @@ long PlatformWin::winProc( HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam
 		// ignore all mouse move messages, we poll for the cursor position always..
 		activateCursor();
 		return 0;
+	case WM_INPUT:
+		{
+			// Raw HID mouse delta — sub-pixel, no OS acceleration, no
+			// integer-pixel quantization.  Used by update() in place of
+			// the polled GetCursorPos delta when the cursor is hidden
+			// (camera mouselook), so diagonal mouse motion produces a
+			// genuinely diagonal camera rotation per frame instead of
+			// the staircase pattern that pixel-grid cursor stepping
+			// otherwise creates.  See update() for the consumer side.
+			UINT cbSize = 0;
+			::GetRawInputData( (HRAWINPUT)lParam, RID_INPUT, NULL, &cbSize, sizeof(RAWINPUTHEADER) );
+			if ( cbSize > 0 && cbSize <= sizeof(RAWINPUT) )
+			{
+				BYTE buffer[sizeof(RAWINPUT)];
+				if ( ::GetRawInputData( (HRAWINPUT)lParam, RID_INPUT, buffer, &cbSize, sizeof(RAWINPUTHEADER) ) == cbSize )
+				{
+					RAWINPUT * pRaw = (RAWINPUT *)buffer;
+					if ( pRaw->header.dwType == RIM_TYPEMOUSE
+					  && (pRaw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0 )
+					{
+						// Relative motion (the common case — physical mice and
+						// most laptop trackpads).  Virtual / RDP / tablet inputs
+						// can deliver MOUSE_MOVE_ABSOLUTE which would need a
+						// previous-position diff; skip those for now and fall
+						// back to the OS cursor for camera in that case.
+						m_RawDeltaX += pRaw->data.mouse.lLastX;
+						m_RawDeltaY += pRaw->data.mouse.lLastY;
+					}
+				}
+			}
+		}
+		// WM_INPUT must be passed to DefWindowProc to clean up the input data.
+		return ::DefWindowProc( hwnd, message, wParam, lParam );
 	case WM_MOUSEACTIVATE:
 		activateCursor();
 		return MA_ACTIVATE;
@@ -218,6 +251,8 @@ PlatformWin::PlatformWin()
 	m_CursorPosition.set( 320, 240 );
 	m_CursorButtons = 0;
 	m_bInvertButtons = false;
+	m_RawDeltaX = 0;
+	m_RawDeltaY = 0;
 }
 
 PlatformWin::~PlatformWin()
@@ -312,6 +347,27 @@ bool PlatformWin::initialize( Config & context )
 
 		ShowWindow( m_hWnd, SW_SHOWNORMAL );
 		SetFocus(m_hWnd );
+
+		// Register for raw mouse input (WM_INPUT).  Used to drive camera
+		// mouselook with sub-pixel HID counts instead of pixel-quantized
+		// cursor deltas — fixes the visible staircase / L-shape pattern
+		// seen on diagonal mouse motion (the cursor lives on the integer
+		// pixel grid, so each frame's delta tends to be axis-aligned).
+		// dwFlags = 0 means foreground-only delivery, which is exactly
+		// what we want for a game window — no input while alt-tabbed.
+		RAWINPUTDEVICE rid;
+		rid.usUsagePage = 0x01;		// HID_USAGE_PAGE_GENERIC
+		rid.usUsage     = 0x02;		// HID_USAGE_GENERIC_MOUSE
+		rid.dwFlags     = 0;
+		rid.hwndTarget  = m_hWnd;
+		if ( !::RegisterRawInputDevices( &rid, 1, sizeof(rid) ) )
+		{
+			// Non-fatal: with no raw input the camera will still
+			// respond, but mouselook will fall back to no movement
+			// (we no longer post pixel deltas in mouselook mode).
+			// XP+ should always succeed; if this fires, investigate.
+			TRACE( "PlatformWin: RegisterRawInputDevices failed (mouselook will be unresponsive)" );
+		}
 	}
 
 	// create the display device
@@ -448,21 +504,52 @@ bool PlatformWin::update()
 	
 	bool bWindowed = display()->windowed();
 
-	// poll the cursors current position... 
+	// poll the cursors current position...
 	POINT pt;
 	::GetCursorPos( &pt );
 	::ScreenToClient( m_hWnd, &pt );
-
 	PointInt ptCurrentCursor( pt.x, pt.y );
-	if ( ptCurrentCursor != m_CursorPosition )
+
+	if ( m_CursorEnabled )
 	{
-		PointInt ptDelta( ptCurrentCursor.x - m_CursorPosition.x, ptCurrentCursor.y - m_CursorPosition.y );
-		if ( m_CursorEnabled )
+		// UI mode: pixel cursor delta drives the UI hit-testing.  This
+		// path is unchanged from the original behaviour — UI clicks and
+		// hover effects need OS-acceleration-applied cursor positions.
+		if ( ptCurrentCursor != m_CursorPosition )
 		{
+			PointInt ptDelta( ptCurrentCursor.x - m_CursorPosition.x, ptCurrentCursor.y - m_CursorPosition.y );
 			m_CursorPosition.m_X = ptCurrentCursor.x;
 			m_CursorPosition.m_Y = ptCurrentCursor.y;
+			CommandTarget::postWindowMessage( m_hWnd, HM_MOUSEMOVE, (uintptr_t)&ptDelta, (uintptr_t)&m_CursorPosition );
 		}
-		else
+		// Drop any raw deltas accumulated while UI was active so they
+		// don't leak into the first mouselook frame after a transition.
+		m_RawDeltaX = 0;
+		m_RawDeltaY = 0;
+	}
+	else
+	{
+		// Mouselook: post the raw HID delta accumulated by WM_INPUT
+		// since the previous frame, instead of the pixel cursor delta.
+		// Raw deltas are sub-pixel and not axis-quantized, so diagonal
+		// mouse motion produces a diagonal camera rotation per frame
+		// (no staircase from cursor pixel-stepping) and OS pointer
+		// acceleration no longer distorts the per-pixel turn rate.
+		if ( m_RawDeltaX != 0 || m_RawDeltaY != 0 )
+		{
+			PointInt ptDelta( m_RawDeltaX, m_RawDeltaY );
+			m_RawDeltaX = 0;
+			m_RawDeltaY = 0;
+			// m_CursorPosition is the locked anchor — don't update it
+			// in mouselook mode so the cursor doesn't drift over time.
+			CommandTarget::postWindowMessage( m_hWnd, HM_MOUSEMOVE, (uintptr_t)&ptDelta, (uintptr_t)&m_CursorPosition );
+		}
+		// Re-anchor the OS cursor to the locked centre so it doesn't
+		// drift to a screen edge during long sweeps and so it lands
+		// somewhere sensible when the user releases the mouselook
+		// button.  We don't use the resulting pixel delta any more —
+		// raw input is the source of truth above.
+		if ( ptCurrentCursor != m_CursorPosition )
 		{
 			POINT ptRestore;
 			ptRestore.x = m_CursorPosition.x;
@@ -470,8 +557,6 @@ bool PlatformWin::update()
 			::ClientToScreen( m_hWnd, &ptRestore );
 			::SetCursorPos( ptRestore.x, ptRestore.y );
 		}
-
-		CommandTarget::postWindowMessage( m_hWnd, HM_MOUSEMOVE, (uintptr_t)&ptDelta, (uintptr_t)&m_CursorPosition );
 	}
 
 	return true;

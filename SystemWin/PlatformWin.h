@@ -77,6 +77,15 @@ private:
 	PointInt				m_CursorPosition;
 	dword					m_CursorButtons;
 	bool					m_bInvertButtons;	// true to swap left/right mouse buttons
+
+	// Raw Input delta accumulator for camera mouselook.  WM_INPUT events
+	// fired between frames push their lLastX / lLastY into these (sub-
+	// pixel HID counts, no OS acceleration, no integer-pixel quantization
+	// from GetCursorPos), and update() drains and zeroes them per frame
+	// when the cursor is hidden — see PlatformWin.cpp WM_INPUT handler
+	// and update() for the full rationale.
+	int						m_RawDeltaX;
+	int						m_RawDeltaY;
 };
 
 //----------------------------------------------------------------------------
