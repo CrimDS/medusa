@@ -40,6 +40,7 @@ static Constant SLEEP_MODE_UPDATE_RATE( "SLEEP_MODE_UPDATE_RATE", 5.0f );
 
 bool		WorldContext::sm_bEnableHDR = true;
 bool		WorldContext::sm_bEnableLimbGlow = true;	// cinematic limb glow (DisplayEffectLimbGlow) — bright halo at the silhouette of a foreground celestial body when the sun is at or behind it.
+bool		WorldContext::sm_bEnableLensFlare = true;	// anamorphic lens flare (DisplayEffectLensFlare) — wide horizontal streak + vertical secondary at the sun's screen UV when the sun is on-screen and not occluded.  Hands off to limb glow when the sun goes behind a foreground body.
 bool		WorldContext::sm_bEnableExposure = true;	// auto-exposure (DisplayEffectExposure) — 1x1 EMA-smoothed luminance multiplier consumed by FXAA tonemap. Disabling pins exposure to 1.0 via FXAA's fallback texture.
 bool		WorldContext::sm_bEnableShadows = true;
 int			WorldContext::sm_nMaxShadowLights = 4;
@@ -587,16 +588,21 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 
 	if (! bProxy )
 	{
-		// Push order: Exposure first, HDR, LimbGlow, SSAO.
+		// Push order: Exposure first, HDR, LimbGlow, LensFlare, SSAO.
 		// Effects iterate in REVERSE push order during postRender, so
 		// first-pushed = last-executed.  Execution order:
 		//
-		//     SSAO  →  LimbGlow  →  HDR/bloom  →  Exposure
+		//     SSAO  →  LensFlare  →  LimbGlow  →  HDR/bloom  →  Exposure
 		//
-		// LimbGlow runs BEFORE HDR (see comment block at the HDR push
-		// below) so the rim halo is bloomed together with the rest of
-		// the scene rather than separately.  Exposure runs LAST so the
-		// auto-exposure 1×1 luminance sample reflects the FINAL scene.
+		// Both LimbGlow and LensFlare run BEFORE HDR (see comment block
+		// at the HDR push below) so their additive contributions are
+		// bloomed together with the rest of the scene rather than
+		// separately.  LimbGlow + LensFlare are mutually exclusive in
+		// practice — LimbGlow fires only when a foreground body occludes
+		// the sun, LensFlare fires only when the sun's screen pixel is
+		// unoccluded — so order between them is academic.  Exposure
+		// runs LAST so the auto-exposure 1×1 luminance sample reflects
+		// the FINAL scene.
 
 		// All four post-process effects use the same lifetime policy: created
 		// lazily on first enable, then KEPT ALIVE for the rest of the session
@@ -650,6 +656,17 @@ void WorldContext::render( RenderContext & context, const Matrix33 & frame, cons
 				pDisplay->push( m_pLimbGlow );
 			else
 				sm_bEnableLimbGlow = false;
+		}
+
+		if ( sm_bEnableLensFlare && sm_bGameView )
+		{
+			if ( !m_pLensFlare.valid() )
+				m_pLensFlare = pDisplay->createEffect( "LENSFLARE" );
+
+			if ( m_pLensFlare.valid() )
+				pDisplay->push( m_pLensFlare );
+			else
+				sm_bEnableLensFlare = false;
 		}
 
 		if ( sm_bEnableSSAO )

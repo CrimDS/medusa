@@ -100,6 +100,7 @@ bool DisplayEffectExposureD3D12::initExposure( DisplayDeviceD3D12 * pDevice )
 	if ( !compileShaderEntry( wszPath, "PS_AdaptExposure", "ps_5_1", m_pPSAdapt ) )  { TRACE( "Exposure: Failed PS_AdaptExposure" ); return false; }
 
 	// --- Root signature: CBV at b0, 2-SRV table at t0/t1, sampler at s0 ---
+
 	D3D12_ROOT_PARAMETER params[3] = {};
 
 	params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;

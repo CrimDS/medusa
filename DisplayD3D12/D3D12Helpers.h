@@ -163,7 +163,7 @@ struct CBPerFrame
 	// the per-pixel rim halo test.
 	ShaderFloat4	vOccluders[32];
 	int				nNumOccluders;
-	int				nShadowPCFTaps;	// per-frame from DisplayDevice::sm_nShaderDetail (LOW=4, MED=8, HIGH/EXTREME=16)
+	int				nShadowPCFTaps;	// per-frame from DisplayDevice::sm_nShaderDetail (LOW=4, MED=8, HIGH=16, EXTREME=32)
 	int				pad_occ1;
 	int				pad_occ2;
 

@@ -256,21 +256,39 @@ public:
 
 	virtual bool					capture( const char * pFilename ) = 0;	// save screenshot to given file, returns true on success!
 
-	// Sun candidate tracking — game code (e.g. NounStar::render) submits each
-	// star's world-space position; the closest submission wins per-frame.
-	// DisplayEffectLimbGlow reads the result at postRender time and projects
-	// to screen space as the rim halo origin.  RenderContext::beginScene calls
-	// resetSunCandidate which only clears the per-frame distance comparator —
-	// m_vSunWorldPos and the validity flag are STICKY across frames so
-	// CBPerFrame fill (which happens BEFORE NounStar::render) sees last
-	// frame's sun position.  One-frame staleness is invisible for
-	// celestial-scale geometry.  Non-virtual base-class storage so both
-	// D3D9 and D3D12 paths get it for free.
+	// Per-frame star submission.  NounStar::render calls submitSunCandidate
+	// for each visible star; the device keeps:
+	//   - the closest submission as the primary sun (m_vSunWorldPos /
+	//     m_fSunRadius), consumed by LimbGlow, CBPerFrame.vSunWorldPos,
+	//     and Planet.hlsl for geometry-correct sun direction.
+	//   - the top-N closest entries in m_Stars[], consumed by
+	//     DisplayEffectLensFlare to render a flare per visible star.
+	// resetSunCandidate clears the per-frame distance comparator and the
+	// star list, but m_vSunWorldPos / validity flag are STICKY across
+	// frames so CBPerFrame fill (which runs before NounStar::render) sees
+	// last frame's sun.  One-frame staleness is invisible at celestial
+	// scale.  Non-virtual base-class storage so both D3D9 and D3D12 paths
+	// share the same plumbing.
 	void							submitSunCandidate(
 										const Vector3 & worldPos,
-										float distanceSq );		// closer distance wins
+										float radius,
+										float distanceSq );
 	void							resetSunCandidate();
 	bool							getSunCandidate( Vector3 & outWorldPos ) const;
+	bool							getSunCandidate( Vector3 & outWorldPos, float & outRadius ) const;
+
+	// Star list — top-N closest entries this frame, eviction is replace-
+	// furthest-when-full.  N is capped low because overlapping flares
+	// just smear into noise; scenes typically have 1-2 stars in view.
+	struct StarInfo
+	{
+		Vector3		worldPos;
+		float		radius;
+		float		distSq;
+	};
+	enum { MAX_STARS = 4 };
+	int								getStarCount() const;
+	const StarInfo &				getStar( int idx ) const;
 
 	// Celestial body shadow casting (Chunk 4.5).  NounPlanet (and any other
 	// large-body Noun) submits its world position + radius each frame; the
@@ -341,8 +359,16 @@ public:
 
 protected:
 	Vector3							m_vSunWorldPos;			// valid only when m_bSunCandidateValid
+	float							m_fSunRadius;			// world-space radius of the winning candidate
 	float							m_fSunDistSq;			// best (smallest) submitted distance² this frame
 	bool							m_bSunCandidateValid;	// reset each frame by RenderContext::beginScene
+
+	// Top-N star list, populated alongside the closest tracker above.
+	// Order is insertion-order with "replace furthest when full" eviction,
+	// so the closest few survive but their slots aren't sorted (consumers
+	// iterate the whole array anyway).
+	StarInfo						m_Stars[ MAX_STARS ];
+	int								m_nStarCount;
 
 	// Occluders: kept sorted by angular-size priority (radius/distance)
 	// so the highest-impact bodies always win the top-N slots.  Submitted

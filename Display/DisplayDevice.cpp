@@ -50,8 +50,10 @@ IMPLEMENT_ABSTRACT_FACTORY( DisplayDevice, Widget );
 
 DisplayDevice::DisplayDevice()
 	: m_vSunWorldPos( Vector3::ZERO )
+	, m_fSunRadius( 0.0f )
 	, m_fSunDistSq( 3.4028235e+38f )	// FLT_MAX
 	, m_bSunCandidateValid( false )
+	, m_nStarCount( 0 )
 	, m_nOccluderCount( 0 )
 {}
 
@@ -67,13 +69,44 @@ DisplayDevice::DisplayDevice()
 // One frame of staleness is invisible for celestial-scale geometry.
 //----------------------------------------------------------------------------
 
-void DisplayDevice::submitSunCandidate( const Vector3 & worldPos, float distanceSq )
+void DisplayDevice::submitSunCandidate( const Vector3 & worldPos, float radius, float distanceSq )
 {
+	// Closest-sun tracker (LimbGlow / CBPerFrame consumers).
 	if ( distanceSq < m_fSunDistSq )
 	{
 		m_vSunWorldPos       = worldPos;
+		m_fSunRadius         = radius;
 		m_fSunDistSq         = distanceSq;
 		m_bSunCandidateValid = true;
+	}
+
+	// Top-N list (DisplayEffectLensFlare consumer).  Append until full,
+	// then replace the furthest entry whenever a closer one arrives.
+	if ( m_nStarCount < MAX_STARS )
+	{
+		m_Stars[ m_nStarCount ].worldPos = worldPos;
+		m_Stars[ m_nStarCount ].radius   = radius;
+		m_Stars[ m_nStarCount ].distSq   = distanceSq;
+		++m_nStarCount;
+	}
+	else
+	{
+		int   furthestIdx  = 0;
+		float furthestDist = m_Stars[ 0 ].distSq;
+		for ( int i = 1; i < MAX_STARS; ++i )
+		{
+			if ( m_Stars[ i ].distSq > furthestDist )
+			{
+				furthestDist = m_Stars[ i ].distSq;
+				furthestIdx  = i;
+			}
+		}
+		if ( distanceSq < furthestDist )
+		{
+			m_Stars[ furthestIdx ].worldPos = worldPos;
+			m_Stars[ furthestIdx ].radius   = radius;
+			m_Stars[ furthestIdx ].distSq   = distanceSq;
+		}
 	}
 }
 
@@ -84,6 +117,12 @@ void DisplayDevice::resetSunCandidate()
 	// time (before any NounStar::render runs) get last frame's sun rather
 	// than zero / a stale flag.
 	m_fSunDistSq = 3.4028235e+38f;	// FLT_MAX
+
+	// Star list is consumed at postRender time (DisplayEffectLensFlare),
+	// AFTER all NounStar::render calls have submitted, so it's safe to
+	// rebuild from scratch each frame — no need for the stickiness the
+	// closest-sun tracker has.
+	m_nStarCount = 0;
 }
 
 bool DisplayDevice::getSunCandidate( Vector3 & outWorldPos ) const
@@ -92,6 +131,25 @@ bool DisplayDevice::getSunCandidate( Vector3 & outWorldPos ) const
 		return false;
 	outWorldPos = m_vSunWorldPos;
 	return true;
+}
+
+bool DisplayDevice::getSunCandidate( Vector3 & outWorldPos, float & outRadius ) const
+{
+	if ( !m_bSunCandidateValid )
+		return false;
+	outWorldPos = m_vSunWorldPos;
+	outRadius   = m_fSunRadius;
+	return true;
+}
+
+int DisplayDevice::getStarCount() const
+{
+	return m_nStarCount;
+}
+
+const DisplayDevice::StarInfo & DisplayDevice::getStar( int idx ) const
+{
+	return m_Stars[ idx ];
 }
 
 //----------------------------------------------------------------------------

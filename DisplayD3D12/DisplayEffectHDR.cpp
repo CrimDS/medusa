@@ -30,10 +30,11 @@ struct CBPostProcess
 //---------------------------------------------------------------------------------------------------
 
 DisplayEffectHDRD3D12::DisplayEffectHDRD3D12() :
-	m_nMipCount( 6 ),			// 6 mips: widest halo is 1/64 of screen width — full-screen glow without a muddy wash
+	m_nMipCount( 6 ),			// initial value; overwritten from sm_nShaderDetail at initBloom time
 	m_fBloomScale( 0.6f ),
 	m_fBrightThreshold( 0.65f ),
 	m_LastSize( 0, 0 ),
+	m_LastShaderDetail( -1 ),
 	m_bInitialized( false ),
 	m_bBloomFailed( false )
 {
@@ -86,14 +87,26 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 		return false;
 
 	SizeInt currentSize( width, height );
-	if ( m_bInitialized && m_LastSize == currentSize )
-		return true;		// already initialized at this size
+	if ( m_bInitialized && m_LastSize == currentSize && m_LastShaderDetail == DisplayDevice::sm_nShaderDetail )
+		return true;		// already initialized at this size + tier
 
 	// Release old resources
 	release();
 	m_bBloomFailed = true;		// assume failure until we succeed
 
-	m_LastSize = currentSize;
+	m_LastSize         = currentSize;
+	m_LastShaderDetail = DisplayDevice::sm_nShaderDetail;
+
+	// Bloom mip-chain depth by shader-detail tier.  More mips = wider,
+	// smoother halo at ~25% additional bandwidth per extra mip.
+	switch ( DisplayDevice::sm_nShaderDetail )
+	{
+	case DisplayDevice::SHADER_DETAIL_LOW:		m_nMipCount = 4; break;
+	case DisplayDevice::SHADER_DETAIL_MEDIUM:	m_nMipCount = 5; break;
+	case DisplayDevice::SHADER_DETAIL_HIGH:		m_nMipCount = 6; break;
+	case DisplayDevice::SHADER_DETAIL_EXTREME:	m_nMipCount = 7; break;
+	default:									m_nMipCount = 6; break;
+	}
 
 	// Clamp mip count so the smallest mip is at least 4x4 px — below that the
 	// 13-tap downsample kernel's ±2-texel reach goes out of bounds and the

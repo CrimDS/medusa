@@ -150,6 +150,7 @@
     <ClCompile Include="DisplayDeviceD3D12.cpp" />
     <ClCompile Include="DisplayEffectBlur.cpp" />
     <ClCompile Include="DisplayEffectExposure.cpp" />
+    <ClCompile Include="DisplayEffectLensFlare.cpp" />
     <ClCompile Include="DisplayEffectLimbGlow.cpp" />
     <ClCompile Include="DisplayEffectHDR.cpp" />
     <ClCompile Include="DisplayEffectSSAO.cpp" />
@@ -172,6 +173,7 @@
     <ClInclude Include="DisplayDeviceD3D12.h" />
     <ClInclude Include="DisplayEffectBlur.h" />
     <ClInclude Include="DisplayEffectExposure.h" />
+    <ClInclude Include="DisplayEffectLensFlare.h" />
     <ClInclude Include="DisplayEffectLimbGlow.h" />
     <ClInclude Include="DisplayEffectHDR.h" />
     <ClInclude Include="DisplayEffectSSAO.h" />

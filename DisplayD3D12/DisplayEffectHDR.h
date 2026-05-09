@@ -60,6 +60,7 @@ private:
 	SizeInt					m_MipSizes[MAX_MIPS];
 
 	SizeInt					m_LastSize;
+	int						m_LastShaderDetail;
 	bool					m_bInitialized;
 	bool					m_bBloomFailed;
 };

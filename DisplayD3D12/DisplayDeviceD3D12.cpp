@@ -37,6 +37,7 @@
 #include "DisplayEffectHDR.h"
 #include "DisplayEffectBlur.h"
 #include "DisplayEffectSSAO.h"
+#include "DisplayEffectLensFlare.h"
 #include "DisplayEffectLimbGlow.h"
 #include "DisplayEffectExposure.h"
 
@@ -180,6 +181,7 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	registerEffect( "BLUR", DisplayEffectBlurD3D12::staticFactory() );
 	registerEffect( "SSAO", DisplayEffectSSAOD3D12::staticFactory() );
 	registerEffect( "LIMBGLOW", DisplayEffectLimbGlowD3D12::staticFactory() );
+	registerEffect( "LENSFLARE", DisplayEffectLensFlareD3D12::staticFactory() );
 	registerEffect( "EXPOSURE", DisplayEffectExposureD3D12::staticFactory() );
 }
 
@@ -2271,16 +2273,14 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 	for ( int i = occCount; i < 32; ++i )
 		m_CBPerFrame.vOccluders[i] = ShaderFloat4( 0, 0, 0, 0 );
 
-	// PCF tap count for the shadow cascade sampler in Default.hlsl.  Mapped
-	// from the global shaderDetail knob — biggest perf lever in the per-pixel
-	// lighting path because the loop runs for every shaded pixel near the
-	// shadow distance, doubled near cascade-blend boundaries.
+	// PCF tap count for sampleShadowCascade in Default.hlsl.  Each tier
+	// takes a prefix of the 32-point Poisson disk in ShadowSampling.hlsli.
 	switch ( DisplayDevice::sm_nShaderDetail )
 	{
 	case DisplayDevice::SHADER_DETAIL_LOW:		m_CBPerFrame.nShadowPCFTaps =  4; break;
 	case DisplayDevice::SHADER_DETAIL_MEDIUM:	m_CBPerFrame.nShadowPCFTaps =  8; break;
 	case DisplayDevice::SHADER_DETAIL_HIGH:		m_CBPerFrame.nShadowPCFTaps = 16; break;
-	case DisplayDevice::SHADER_DETAIL_EXTREME:	m_CBPerFrame.nShadowPCFTaps = 16; break;
+	case DisplayDevice::SHADER_DETAIL_EXTREME:	m_CBPerFrame.nShadowPCFTaps = 32; break;
 	default:									m_CBPerFrame.nShadowPCFTaps = 16; break;
 	}
 

@@ -216,6 +216,7 @@ public:
 	static int					sm_nMaxShadowLights;
 	static bool					sm_bEnableSSAO;
 	static bool					sm_bEnableLimbGlow;
+	static bool					sm_bEnableLensFlare;
 	static bool					sm_bEnableExposure;
 	static bool					sm_bGameView;					// per-frame flag — when true, view-specific effects like limb glow are pushed. Set by ViewTactical around its render call and cleared after. Other views (planet / navigation / observer / engineering) leave it false so their scenes get HDR/exposure but no rim glows.
 
@@ -543,6 +544,7 @@ protected:
 	DisplayEffect::Ref			m_pHDR;						// HDR effect
 	DisplayEffect::Ref			m_pSSAO;					// SSAO effect
 	DisplayEffect::Ref			m_pLimbGlow;				// cinematic limb glow at foreground silhouettes when sun is at/behind them
+	DisplayEffect::Ref			m_pLensFlare;				// anamorphic streak at the sun's screen UV when sun is visible (no foreground occluder)
 	DisplayEffect::Ref			m_pExposure;				// auto-exposure adapter (writes 1x1 R32F for FXAA t1)
 	WidgetMap					m_WidgetMap;				// generic widget storage
 

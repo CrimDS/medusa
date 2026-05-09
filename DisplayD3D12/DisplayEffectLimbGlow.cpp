@@ -15,15 +15,6 @@
 
 //---------------------------------------------------------------------------------------------------
 
-// Distance-from-camera fade band (world units).  Rim glow is at full
-// intensity below NEAR, linearly fades across the band, and is zeroed
-// beyond FAR.  Defaults are generous so the effect only fades at extreme
-// camera→sun distances — the in-game zoom range is up to 6000 units
-// from focus, and players routinely sit 5000-12000 units from the sun.
-// Tunable via Constants.ini.
-static Constant LIMBGLOW_FADE_NEAR( "LIMBGLOW_FADE_NEAR", 15000.0f );
-static Constant LIMBGLOW_FADE_FAR ( "LIMBGLOW_FADE_FAR",  30000.0f );
-
 using namespace DirectX;
 
 //---------------------------------------------------------------------------------------------------
@@ -73,6 +64,7 @@ DisplayEffectLimbGlowD3D12::DisplayEffectLimbGlowD3D12() :
 	m_nGlowSRVIndex( UINT(-1) ),
 	m_LastSize( 0, 0 ),
 	m_GlowSize( 0, 0 ),
+	m_LastShaderDetail( -1 ),
 	m_bInitialized( false ),
 	m_bFailed( false )
 {
@@ -119,21 +111,21 @@ bool DisplayEffectLimbGlowD3D12::initLimbGlow( DisplayDeviceD3D12 * pDevice )
 		return false;
 
 	SizeInt currentSize( width, height );
-	if ( m_bInitialized && m_LastSize == currentSize )
+	if ( m_bInitialized && m_LastSize == currentSize && m_LastShaderDetail == DisplayDevice::sm_nShaderDetail )
 		return true;
 
 	release();
 	m_bFailed = true;
 
-	m_LastSize = currentSize;
-	// Half-res rim-glow RT.  Full-res allocations stalled the main thread
-	// in NtGdiDdDDICreateAllocation at launch under VRAM fragmentation —
-	// memory climbed to ~4GB before the app became responsive.  Half-res
-	// is also fine quality-wise: PS_Composite re-tests depth at full-res
-	// to keep the silhouette tight, and the bilinear upscale gives the
-	// rim a slight natural smoothing that suits the cinematic look.
-	// Half-res = 2MB at 1080p, fits in fragmented VRAM cleanly.
-	m_GlowSize = SizeInt( Max<int>( (int)width / 2, 4 ), Max<int>( (int)height / 2, 4 ) );
+	m_LastSize         = currentSize;
+	m_LastShaderDetail = DisplayDevice::sm_nShaderDetail;
+
+	// LOW / MEDIUM use a half-res rim RT; HIGH / EXTREME use full-res.
+	const bool bFullRes = ( DisplayDevice::sm_nShaderDetail >= DisplayDevice::SHADER_DETAIL_HIGH );
+	const int  rtScale  = bFullRes ? 1 : 2;
+	m_GlowSize = SizeInt(
+		Max<int>( (int)width  / rtScale, 4 ),
+		Max<int>( (int)height / rtScale, 4 ) );
 
 	// --- Compile shaders ---
 	CharString sPath = DisplayDevice::sm_sShadersPath + "Shaders/LimbGlow.hlsl";
@@ -243,20 +235,36 @@ bool DisplayEffectLimbGlowD3D12::initLimbGlow( DisplayDeviceD3D12 * pDevice )
 	hr = pDevice->getDevice()->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
 		&rtDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clearValue,
 		IID_PPV_ARGS(&m_pGlowRT) );
-	if ( FAILED(hr) ) { TRACE( "LimbGlow: Failed glow RT creation %dx%d", m_GlowSize.width, m_GlowSize.height ); return false; }
+	if ( FAILED(hr) ) { TRACE( "LimbGlow: Failed glow RT creation %dx%d (hr=0x%08X)", m_GlowSize.width, m_GlowSize.height, hr ); return false; }
+	if ( !m_pGlowRT ) { TRACE( "LimbGlow: glow RT null after S_OK" ); return false; }
 
+	// Heap-exhaustion guard: GetCPUHandle(UINT(-1)) produces a wild
+	// pointer that crashes inside D3D12Core.  Match HDR / SSAO / Exposure.
 	if ( m_nGlowRTVIndex == UINT(-1) )
 		m_nGlowRTVIndex = pDevice->m_RTVHeap.Allocate();
+	if ( m_nGlowRTVIndex == UINT(-1) )
+	{
+		TRACE( "LimbGlow: Failed to allocate RTV (RTV heap allocated=%u)",
+			pDevice->m_RTVHeap.GetNumAllocated() );
+		return false;
+	}
 	pDevice->getDevice()->CreateRenderTargetView( m_pGlowRT.Get(), nullptr,
 		pDevice->m_RTVHeap.GetCPUHandle( m_nGlowRTVIndex ) );
 
 	if ( m_nGlowSRVIndex == UINT(-1) )
 		m_nGlowSRVIndex = pDevice->m_SRVStagingHeap.Allocate();
+	if ( m_nGlowSRVIndex == UINT(-1) )
+	{
+		TRACE( "LimbGlow: Failed to allocate SRV staging (heap allocated=%u)",
+			pDevice->m_SRVStagingHeap.GetNumAllocated() );
+		return false;
+	}
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	srvDesc.Format = DisplayDeviceD3D12::SCENE_RT_FORMAT;
 	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
 	srvDesc.Texture2D.MipLevels = 1;
 	pDevice->getDevice()->CreateShaderResourceView( m_pGlowRT.Get(), &srvDesc,
 		pDevice->m_SRVStagingHeap.GetCPUHandle( m_nGlowSRVIndex ) );
@@ -289,23 +297,18 @@ void DisplayEffectLimbGlowD3D12::drawFullscreenTriangle( DisplayDeviceD3D12 * pD
 //---------------------------------------------------------------------------------------------------
 // Project the current sun-candidate world position (submitted during the
 // scene render by NounStar::render → DisplayDevice::submitSunCandidate) to
-// a screen-space UV.  Returns true if a sun was submitted this frame.
-// sunVisible=1 when the projection lands in front of the camera and within
-// a generous screen margin; 0 when behind the camera or far off-screen
-// (the shader uses fSunVisible to short-circuit to black).
-//
-// sunViewX/Y/Z are the sun's view-space coords; the shader only consumes
-// .Z (for the foreground/sky depth classification), but X and Y are used
-// CPU-side in postRender to compute the camera→sun world distance for
-// the distance fade.
+// a screen-space UV + view-space Z.  Returns true if a sun was submitted
+// this frame.  sunVisible=1 when the projection lands in front of the
+// camera and within a generous screen margin; 0 when behind the camera or
+// far off-screen (the shader uses fSunVisible to short-circuit to black).
+// sunViewZ is the sun's camera-forward distance, used by the shader to
+// classify foreground/background occluders.
 //---------------------------------------------------------------------------------------------------
 
 static bool projectSunToScreen( DisplayDeviceD3D12 * pDevice,
-	float & sunU, float & sunV, float & sunVisible,
-	float & sunViewX, float & sunViewY, float & sunViewZ )
+	float & sunU, float & sunV, float & sunVisible, float & sunViewZ )
 {
-	sunU = 0.5f; sunV = 0.5f; sunVisible = 0.0f;
-	sunViewX = 0.0f; sunViewY = 0.0f; sunViewZ = 0.0f;
+	sunU = 0.5f; sunV = 0.5f; sunVisible = 0.0f; sunViewZ = 0.0f;
 
 	Vector3 sunWorld;
 	if ( !pDevice->getSunCandidate( sunWorld ) )
@@ -328,12 +331,9 @@ static bool projectSunToScreen( DisplayDeviceD3D12 * pDevice,
 	sunU =  ndcX * 0.5f + 0.5f;
 	sunV = -ndcY * 0.5f + 0.5f;
 
-	// Full view-space sun position.  The shader only reads .Z (for the
-	// foreground/sky depth classification); X and Y are returned for
-	// the CPU-side distance fade in postRender.
+	// View-space Z — used by the shader to classify occluders as
+	// foreground (vZ < sunViewZ) or background (vZ ≥ sunViewZ).
 	XMVECTOR sunView = XMVector4Transform( sunHomog, viewMat );
-	sunViewX = XMVectorGetX( sunView );
-	sunViewY = XMVectorGetY( sunView );
 	sunViewZ = XMVectorGetZ( sunView );
 
 	// Reject when the sun's projection is far off-screen.  The rim glow
@@ -369,99 +369,12 @@ bool DisplayEffectLimbGlowD3D12::postRender( DisplayDevice * pDevice )
 	if ( pDev->m_nDepthSRVIndex == UINT(-1) )
 		return true;
 
-	// Resolve the nearest submitted star's screen-space UV + view-space
-	// position.  No star → effect skipped; behind camera / far off-screen →
-	// shader short-circuits via fSunVisible=0.
-	float sunU, sunV, sunVis, sunViewX, sunViewY, sunViewZ;
-	if ( !projectSunToScreen( pDev, sunU, sunV, sunVis, sunViewX, sunViewY, sunViewZ ) )
+	// Resolve the nearest submitted star's screen-space UV + view-space Z.
+	// No star → effect skipped; behind camera / far off-screen → shader
+	// short-circuits via fSunVisible=0.
+	float sunU, sunV, sunVis, sunViewZ;
+	if ( !projectSunToScreen( pDev, sunU, sunV, sunVis, sunViewZ ) )
 		return true;	// no star submitted this frame, nothing to do
-
-	// Diagnostic.  Logs the sun candidate's world position, the camera's
-	// world position, and every submitted occluder every ~2 seconds (120
-	// frames at 60 fps) so we can reconstruct scene geometry when a
-	// player reports unexpected glow / no glow.
-	//
-	// For each occluder we print:
-	//   camDist     — camera-to-occluder distance in world units
-	//   sunOffsetD  — camera-to-sun-direction angular offset (DEGREES);
-	//                 ~0° means the occluder is along the same view ray
-	//                 as the sun (in front, behind, or at it).  Small
-	//                 sunOffset on a FRONT body is the cinematic case
-	//                 where rim glow should fire.
-	//   inFrontSun  — is this occluder closer to camera than the sun?
-	{
-		static int s_diagFrame = 0;
-		if ( (s_diagFrame++ % 120) == 0 )
-		{
-			Vector3 sunWorld;
-			pDev->getSunCandidate( sunWorld );
-
-			// Recover camera world position from the view matrix:
-			// view = T(-cam) * R(-orientation), so the camera's world pos
-			// is the inverse-view's 4th row translation.
-			XMVECTOR det;
-			XMMATRIX invView = XMMatrixInverse( &det, pDev->getViewMatrix() );
-			XMFLOAT4 camP;
-			XMStoreFloat4( &camP, invView.r[3] );
-			Vector3 camWorld( camP.x, camP.y, camP.z );
-
-			Vector3 toSun = sunWorld - camWorld;
-			float   sunCamDist = toSun.magnitude();
-			Vector3 sunDir = (sunCamDist > 1e-3f) ? toSun * (1.0f / sunCamDist) : Vector3(0,0,1);
-
-			TRACE( "LimbGlowDiag: cam=(%.0f,%.0f,%.0f) sun=(%.0f,%.0f,%.0f) cam→sun=%.0f sunUV=(%.2f,%.2f) sunVis=%.2f",
-				camWorld.x, camWorld.y, camWorld.z,
-				sunWorld.x, sunWorld.y, sunWorld.z,
-				sunCamDist, sunU, sunV, sunVis );
-
-			int nOcc = pDev->getOccluderCount();
-			TRACE( "LimbGlowDiag: %d occluders:", nOcc );
-			for ( int i = 0; i < nOcc; ++i )
-			{
-				const DisplayDevice::OccluderInfo & o = pDev->getOccluder( i );
-				const char * pName = o.pName ? o.pName : "<unnamed>";
-
-				Vector3 toOcc = o.worldPos - camWorld;
-				float occCamDist = toOcc.magnitude();
-				float angleDeg = 0.0f;
-				if ( occCamDist > 1e-3f && sunCamDist > 1e-3f )
-				{
-					float dot = (toOcc * (1.0f / occCamDist)) | sunDir;
-					if ( dot >  1.0f ) dot =  1.0f;
-					if ( dot < -1.0f ) dot = -1.0f;
-					angleDeg = acosf( dot ) * (180.0f / 3.14159265f);
-				}
-				const char * inFront = (occCamDist < sunCamDist) ? "FRONT" : "BEHIND";
-
-				TRACE( "  [%d] '%s' world=(%.0f,%.0f,%.0f) r=%.0f camDist=%.0f sunOffset=%.2f° %s sun",
-					i, pName, o.worldPos.x, o.worldPos.y, o.worldPos.z, o.radius,
-					occCamDist, angleDeg, inFront );
-			}
-		}
-	}
-
-	// Distance-from-camera fade.  At extreme camera→sun distances the
-	// sun's projected disc shrinks to a sub-pixel point and any rim glow
-	// from a foreground body coincidentally aligned with that direction
-	// reads as visually dubious — the player can't perceptibly tell where
-	// the sun is, so a halo "from" something near it looks attached to
-	// the wrong source.  Linear fade between NEAR and FAR; beyond FAR
-	// sunVis = 0 and the shader short-circuits to black.  Thresholds
-	// tunable via Constants.ini — defaults are deliberately generous
-	// (15k-30k) so the fade only applies at extreme zooms.  Guard against
-	// pathological config (FAR ≤ NEAR) to avoid div-by-zero.
-	{
-		float fadeNear  = (float)LIMBGLOW_FADE_NEAR;
-		float fadeFar   = (float)LIMBGLOW_FADE_FAR;
-		float fadeBand  = fadeFar - fadeNear;
-		if ( fadeBand < 1.0f ) fadeBand = 1.0f;
-		float distSq    = sunViewX*sunViewX + sunViewY*sunViewY + sunViewZ*sunViewZ;
-		float distToSun = sqrtf( distSq );
-		float fade      = (fadeFar - distToSun) / fadeBand;
-		if ( fade < 0.0f ) fade = 0.0f;
-		else if ( fade > 1.0f ) fade = 1.0f;
-		sunVis *= fade;
-	}
 
 	ID3D12GraphicsCommandList * cl = pDev->getCommandList();
 	ID3D12Device * dev = pDev->getDevice();
@@ -534,9 +447,18 @@ bool DisplayEffectLimbGlowD3D12::postRender( DisplayDevice * pDevice )
 	// Behind-camera occluders get sentinel (w == 0) so the shader skips
 	// them; foreground vs background filtering by view-Z is done in the
 	// shader (only 0 < w < fSunViewZ contributes to rim glow).
+	//
+	// Per-pixel occluder loop is the dominant cost; cap by shader tier.
 	XMMATRIX viewMat = pDev->getViewMatrix();
+	int occluderCap = 32;
+	switch ( DisplayDevice::sm_nShaderDetail )
+	{
+	case DisplayDevice::SHADER_DETAIL_LOW:		occluderCap = 8;  break;
+	case DisplayDevice::SHADER_DETAIL_MEDIUM:	occluderCap = 16; break;
+	default:									occluderCap = 32; break;
+	}
 	const int occCount = pDev->getOccluderCount();
-	cb.nNumOccluders = (occCount > 32) ? 32 : occCount;
+	cb.nNumOccluders = ( occCount < occluderCap ) ? occCount : occluderCap;
 	cb.fPad0 = 0.0f;
 
 	for ( int i = 0; i < cb.nNumOccluders; ++i )

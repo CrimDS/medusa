@@ -51,6 +51,7 @@ private:
 
 	SizeInt					m_LastSize;
 	SizeInt					m_GlowSize;
+	int						m_LastShaderDetail;
 	bool					m_bInitialized;
 	bool					m_bFailed;
 };
