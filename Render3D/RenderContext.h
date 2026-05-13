@@ -203,6 +203,13 @@ public:
 	InstanceData *		instanceData( const ClassKey & a_ClassKey );		// get the current instance data, creates the data if needed.
 	void				setAlpha( float fAlpha );
 	void				setDetail( float fDetail );
+	// Per-draw shader override — when non-empty, materials whose own
+	// m_sShader is empty (i.e. they'd otherwise use the device default
+	// shader) bind the named shader instead.  Set/reset around blocks
+	// that should render with a special shader (e.g. NounShip cloak).
+	// Empty string = no override.  See Material::createDevicePrimitives.
+	void				setShaderOverride( const char * pShader );
+	const char *		shaderOverride() const;
 
 	void				setFrame( const Matrix33 & frame );					// set camera frame/position in world space
 	void				setPosition( const Vector3 & position );
@@ -327,6 +334,7 @@ private:
 		qword				m_nInstanceKey;
 		float				m_fAlpha;
 		float				m_fDetail;
+		CharString			m_sShaderOverride;
 
 		RectInt				m_Window;							// projection data
 		PointInt			m_Offset;							// 2D offset
@@ -398,6 +406,11 @@ inline dword RenderContext::bits() const
 inline float RenderContext::alpha() const
 {
 	return m_State.m_fAlpha;
+}
+
+inline const char * RenderContext::shaderOverride() const
+{
+	return m_State.m_sShaderOverride;
 }
 
 inline float RenderContext::detail() const

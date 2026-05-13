@@ -176,6 +176,7 @@ protected:
 	// non-serialized
 	int				m_nLastFrame;			// current frame
 	float			m_fLastAlpha;			// last alpha value
+	CharString		m_sLastShaderOverride;	// last seen RenderContext::shaderOverride() — drives rebuild on change
 
 	PrimitiveMaterial::Ref
 					m_Material;

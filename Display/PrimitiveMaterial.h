@@ -71,6 +71,13 @@ public:
 	virtual void				setLightEnable( bool enable ) = 0;
 	virtual void				setFilterMode( FilterMode nMode ) = 0;
 	virtual void				setShader( const char * pShader ) = 0;
+	// Force depth-write on even when the blend mode is non-opaque.  Default
+	// (alpha-blend = no depth-write) is correct for additive particles and
+	// most translucent geometry.  But for the cloak shader specifically, we
+	// want the front silhouette to occlude the back side so the rim shimmer
+	// doesn't bleed through the body.  Default no-op for backends that
+	// don't implement it.
+	virtual void				setForceDepthWrite( bool bForce ) {}
 
 	virtual int					addSurface( PrimitiveSurface * pSurface, 
 									SurfaceType eType, int nIndex, int nUV, float * pParams ) = 0;

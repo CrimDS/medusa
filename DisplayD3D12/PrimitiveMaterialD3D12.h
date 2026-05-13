@@ -44,6 +44,7 @@ public:
 	virtual void			setLightEnable( bool enable );
 	virtual void			setFilterMode( FilterMode nMode );
 	virtual void			setShader( const char * pShader );
+	virtual void			setForceDepthWrite( bool bForce );
 
 	virtual int				addSurface( PrimitiveSurface * pSurface,
 								SurfaceType eType, int nIndex, int nUV, float * pParams );
@@ -83,6 +84,7 @@ public:
 	FilterMode				m_nFilterMode;
 
 	bool					m_bUpdateShaders;
+	bool					m_bForceDepthWrite;	// override blend-derived depth-write off (cloak)
 	CharString				m_sShader;
 	ShaderD3D12::Ref		m_pShader;
 

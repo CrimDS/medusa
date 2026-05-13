@@ -256,7 +256,7 @@ bool DisplayEffectLensFlareD3D12::postRender( DisplayDevice * pDevice )
 	if ( !pDev || !pDev->isCommandListOpen() )
 		return false;
 
-	if ( !pDev->m_bFXAAEnabled || !pDev->m_pSceneRT )
+	if ( !pDev->m_bSceneRTEnabled || !pDev->m_pSceneRT )
 		return true;
 	if ( DisplayDevice::sm_bUseFixedFunction )
 		return true;

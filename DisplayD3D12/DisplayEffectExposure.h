@@ -26,6 +26,7 @@ public:
 	virtual bool			preRender( DisplayDevice * pDevice );
 	virtual bool			postRender( DisplayDevice * pDevice );
 	virtual void			release();
+	virtual void			onDeviceShutdown();
 
 	// Tuning (match CBExposure layout in Exposure.hlsl)
 	float					m_fAdaptRate;		// per-second EMA rate — effect scales by dt to per-call
@@ -35,6 +36,7 @@ public:
 
 private:
 	bool					initExposure( DisplayDeviceD3D12 * pDevice );
+	void					freeOwnedDescriptors();		// returns RTV/SRV slots to the device's heaps
 
 	ComPtr<ID3DBlob>		m_pVSBlob;
 	ComPtr<ID3DBlob>		m_pPSAdapt;
@@ -52,6 +54,9 @@ private:
 	double					m_fLastTickSec;		// wall-clock of previous postRender (for dt)
 	bool					m_bInitialized;
 	bool					m_bFailed;
+
+	// Cached device for the destructor's freeOwnedDescriptors() — see HDR.h.
+	DisplayDeviceD3D12 *	m_pCachedDevice;
 };
 
 //---------------------------------------------------------------------------------------------------

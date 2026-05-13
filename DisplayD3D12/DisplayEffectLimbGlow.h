@@ -26,6 +26,7 @@ public:
 	virtual bool			preRender( DisplayDevice * pDevice );
 	virtual bool			postRender( DisplayDevice * pDevice );
 	virtual void			release();
+	virtual void			onDeviceShutdown();
 
 	// Tuning (matches CBLimbGlow layout in LimbGlow.hlsl).
 	float					m_fWeight;			// rim glow intensity scale (0.3 - 1.0 typical)
@@ -34,6 +35,7 @@ public:
 private:
 	bool					initLimbGlow( DisplayDeviceD3D12 * pDevice );
 	void					drawFullscreenTriangle( DisplayDeviceD3D12 * pDevice );
+	void					freeOwnedDescriptors();		// returns RTV/SRV slots to the device's heaps
 
 	// Compiled shader blobs (from LimbGlow.hlsl)
 	ComPtr<ID3DBlob>		m_pVSBlob;
@@ -54,6 +56,9 @@ private:
 	int						m_LastShaderDetail;
 	bool					m_bInitialized;
 	bool					m_bFailed;
+
+	// Cached device for the destructor's freeOwnedDescriptors() — see HDR.h.
+	DisplayDeviceD3D12 *	m_pCachedDevice;
 };
 
 //---------------------------------------------------------------------------------------------------

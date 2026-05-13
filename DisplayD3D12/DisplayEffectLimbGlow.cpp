@@ -66,12 +66,15 @@ DisplayEffectLimbGlowD3D12::DisplayEffectLimbGlowD3D12() :
 	m_GlowSize( 0, 0 ),
 	m_LastShaderDetail( -1 ),
 	m_bInitialized( false ),
-	m_bFailed( false )
+	m_bFailed( false ),
+	m_pCachedDevice( NULL )
 {
 }
 
 DisplayEffectLimbGlowD3D12::~DisplayEffectLimbGlowD3D12()
 {
+	// Return descriptor slots before release() drops the resources — see HDR.
+	freeOwnedDescriptors();
 	release();
 }
 
@@ -103,6 +106,9 @@ bool DisplayEffectLimbGlowD3D12::initLimbGlow( DisplayDeviceD3D12 * pDevice )
 {
 	if ( m_bFailed )
 		return false;
+
+	// Stash for destructor — see HDR.h.
+	m_pCachedDevice = pDevice;
 
 	RectInt rw = pDevice->renderWindow();
 	UINT width  = (UINT)rw.width();
@@ -356,7 +362,7 @@ bool DisplayEffectLimbGlowD3D12::postRender( DisplayDevice * pDevice )
 	if ( !pDev || !pDev->isCommandListOpen() )
 		return false;
 
-	if ( !pDev->m_bFXAAEnabled || !pDev->m_pSceneRT )
+	if ( !pDev->m_bSceneRTEnabled || !pDev->m_pSceneRT )
 		return true;
 	if ( DisplayDevice::sm_bUseFixedFunction )
 		return true;
@@ -563,10 +569,37 @@ void DisplayEffectLimbGlowD3D12::release()
 	m_pVSBlob.Reset();
 	m_pPSGlow.Reset();
 	m_pPSComposite.Reset();
-	// RTV / SRV staging indices left allocated — same resize recovery pattern
-	// as DisplayEffectHDR.
+	// RTV / SRV staging indices intentionally left allocated — same resize
+	// recovery pattern as DisplayEffectHDR.  Destructor frees them.
 	m_bInitialized = false;
 	m_bFailed = false;
+}
+
+//---------------------------------------------------------------------------------------------------
+// Return RTV/SRV slots to the device's heaps.  Destructor-only; see HDR.
+
+void DisplayEffectLimbGlowD3D12::freeOwnedDescriptors()
+{
+	if ( m_pCachedDevice == NULL )
+		return;
+
+	if ( m_nGlowRTVIndex != UINT(-1) )
+	{
+		m_pCachedDevice->m_RTVHeap.Free( m_nGlowRTVIndex );
+		m_nGlowRTVIndex = UINT(-1);
+	}
+	if ( m_nGlowSRVIndex != UINT(-1) )
+	{
+		m_pCachedDevice->m_SRVStagingHeap.Free( m_nGlowSRVIndex );
+		m_nGlowSRVIndex = UINT(-1);
+	}
+
+	m_pCachedDevice = NULL;
+}
+
+void DisplayEffectLimbGlowD3D12::onDeviceShutdown()
+{
+	freeOwnedDescriptors();
 }
 
 //---------------------------------------------------------------------------------------------------

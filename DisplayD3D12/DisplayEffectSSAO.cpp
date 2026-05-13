@@ -61,7 +61,8 @@ DisplayEffectSSAOD3D12::DisplayEffectSSAOD3D12() :
 	m_LastSize( 0, 0 ),
 	m_AOSize( 0, 0 ),
 	m_bInitialized( false ),
-	m_bFailed( false )
+	m_bFailed( false ),
+	m_pCachedDevice( NULL )
 {
 	memset( m_nAORTVIndex, 0xff, sizeof(m_nAORTVIndex) );
 	memset( m_nAOSRVIndex, 0xff, sizeof(m_nAOSRVIndex) );
@@ -69,6 +70,9 @@ DisplayEffectSSAOD3D12::DisplayEffectSSAOD3D12() :
 
 DisplayEffectSSAOD3D12::~DisplayEffectSSAOD3D12()
 {
+	// Return descriptor slots to the device's heaps before release() drops
+	// the resources — see DisplayEffectHDR for the leak this fixes.
+	freeOwnedDescriptors();
 	release();
 }
 
@@ -78,6 +82,9 @@ bool DisplayEffectSSAOD3D12::initSSAO( DisplayDeviceD3D12 * pDevice )
 {
 	if ( m_bFailed )
 		return false;
+
+	// Stash for destructor — see HDR.h's rationale.
+	m_pCachedDevice = pDevice;
 
 	RectInt rw = pDevice->renderWindow();
 	UINT width  = (UINT)rw.width();
@@ -316,7 +323,7 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	if ( !pDev || !pDev->isCommandListOpen() )
 		return false;
 
-	if ( !pDev->m_bFXAAEnabled || !pDev->m_pSceneRT )
+	if ( !pDev->m_bSceneRTEnabled || !pDev->m_pSceneRT )
 		return true;
 
 	if ( DisplayDevice::sm_bUseFixedFunction )
@@ -509,9 +516,40 @@ void DisplayEffectSSAOD3D12::release()
 	m_pPSSSAO.Reset();
 	m_pPSBlur.Reset();
 	m_pPSApply.Reset();
+	// RTV / SRV indices intentionally left allocated — destructor frees them.
 
 	m_bInitialized = false;
 	m_bFailed = false;
+}
+
+//---------------------------------------------------------------------------------------------------
+// Return RTV/SRV slots to the device's heaps.  Destructor-only; see HDR.
+
+void DisplayEffectSSAOD3D12::freeOwnedDescriptors()
+{
+	if ( m_pCachedDevice == NULL )
+		return;
+
+	for ( int i = 0; i < 2; ++i )
+	{
+		if ( m_nAORTVIndex[i] != UINT(-1) )
+		{
+			m_pCachedDevice->m_RTVHeap.Free( m_nAORTVIndex[i] );
+			m_nAORTVIndex[i] = UINT(-1);
+		}
+		if ( m_nAOSRVIndex[i] != UINT(-1) )
+		{
+			m_pCachedDevice->m_SRVStagingHeap.Free( m_nAOSRVIndex[i] );
+			m_nAOSRVIndex[i] = UINT(-1);
+		}
+	}
+
+	m_pCachedDevice = NULL;
+}
+
+void DisplayEffectSSAOD3D12::onDeviceShutdown()
+{
+	freeOwnedDescriptors();
 }
 
 //---------------------------------------------------------------------------------------------------

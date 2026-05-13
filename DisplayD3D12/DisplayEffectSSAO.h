@@ -23,6 +23,7 @@ public:
 	virtual bool			preRender( DisplayDevice * pDevice );
 	virtual bool			postRender( DisplayDevice * pDevice );
 	virtual void			release();
+	virtual void			onDeviceShutdown();
 
 	// Tuning parameters
 	float					m_fRadius;			// sample radius in view-space units
@@ -32,6 +33,7 @@ public:
 private:
 	bool					initSSAO( DisplayDeviceD3D12 * pDevice );
 	void					drawFullscreenTriangle( DisplayDeviceD3D12 * pDevice );
+	void					freeOwnedDescriptors();		// returns RTV/SRV slots to the device's heaps
 
 	// Shader blobs
 	ComPtr<ID3DBlob>		m_pVSBlob;
@@ -54,6 +56,10 @@ private:
 	SizeInt					m_AOSize;
 	bool					m_bInitialized;
 	bool					m_bFailed;
+
+	// Cached device for the destructor's freeOwnedDescriptors() — see HDR.h
+	// for the full rationale.  Set in initSSAO.
+	DisplayDeviceD3D12 *	m_pCachedDevice;
 };
 
 //---------------------------------------------------------------------------------------------------

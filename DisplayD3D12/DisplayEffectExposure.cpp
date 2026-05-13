@@ -43,7 +43,8 @@ DisplayEffectExposureD3D12::DisplayEffectExposureD3D12() :
 	m_nFrameIdx( 0 ),
 	m_fLastTickSec( 0.0 ),
 	m_bInitialized( false ),
-	m_bFailed( false )
+	m_bFailed( false ),
+	m_pCachedDevice( NULL )
 {
 	for ( int i = 0; i < 2; ++i )
 	{
@@ -54,6 +55,8 @@ DisplayEffectExposureD3D12::DisplayEffectExposureD3D12() :
 
 DisplayEffectExposureD3D12::~DisplayEffectExposureD3D12()
 {
+	// Return descriptor slots before release() drops the resources — see HDR.
+	freeOwnedDescriptors();
 	release();
 }
 
@@ -87,6 +90,9 @@ bool DisplayEffectExposureD3D12::initExposure( DisplayDeviceD3D12 * pDevice )
 		return false;
 	if ( m_bInitialized )
 		return true;
+
+	// Stash for destructor — see HDR.h.
+	m_pCachedDevice = pDevice;
 
 	release();
 	m_bFailed = true;
@@ -248,7 +254,7 @@ bool DisplayEffectExposureD3D12::postRender( DisplayDevice * pDevice )
 	DisplayDeviceD3D12 * pDev = (DisplayDeviceD3D12 *)pDevice;
 	if ( !pDev || !pDev->isCommandListOpen() )
 		return false;
-	if ( !pDev->m_bFXAAEnabled || !pDev->m_pSceneRT )
+	if ( !pDev->m_bSceneRTEnabled || !pDev->m_pSceneRT )
 		return true;
 	if ( DisplayDevice::sm_bUseFixedFunction )
 		return true;
@@ -372,8 +378,39 @@ void DisplayEffectExposureD3D12::release()
 	m_pRootSig.Reset();
 	m_pVSBlob.Reset();
 	m_pPSAdapt.Reset();
+	// RTV / SRV indices intentionally left allocated — destructor frees them.
 	m_bInitialized = false;
 	m_bFailed = false;
+}
+
+//---------------------------------------------------------------------------------------------------
+// Return RTV/SRV slots to the device's heaps.  Destructor-only; see HDR.
+
+void DisplayEffectExposureD3D12::freeOwnedDescriptors()
+{
+	if ( m_pCachedDevice == NULL )
+		return;
+
+	for ( int i = 0; i < 2; ++i )
+	{
+		if ( m_nExposureRTVIndex[i] != UINT(-1) )
+		{
+			m_pCachedDevice->m_RTVHeap.Free( m_nExposureRTVIndex[i] );
+			m_nExposureRTVIndex[i] = UINT(-1);
+		}
+		if ( m_nExposureSRVIndex[i] != UINT(-1) )
+		{
+			m_pCachedDevice->m_SRVStagingHeap.Free( m_nExposureSRVIndex[i] );
+			m_nExposureSRVIndex[i] = UINT(-1);
+		}
+	}
+
+	m_pCachedDevice = NULL;
+}
+
+void DisplayEffectExposureD3D12::onDeviceShutdown()
+{
+	freeOwnedDescriptors();
 }
 
 //---------------------------------------------------------------------------------------------------

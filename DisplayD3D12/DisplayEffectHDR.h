@@ -29,15 +29,24 @@ public:
 	virtual bool			preRender( DisplayDevice * pDevice );
 	virtual bool			postRender( DisplayDevice * pDevice );
 	virtual void			release();
+	virtual void			onDeviceShutdown();
 
 	// Tuning parameters
 	int						m_nMipCount;			// active bloom mip count (clamped to MAX_MIPS)
 	float					m_fBloomScale;			// final composite intensity (re-read from settings per frame)
 	float					m_fBrightThreshold;		// luminance threshold for bright pass
+	// When true, mip[0] is at scene-RT resolution.  Eliminates the visible
+	// half-res "plateau" pixelation around bright sources — bloom edges no
+	// longer have 2x2 pixel-block transitions because the tightest bloom
+	// contribution now matches the scene's Nyquist limit.  Wired to
+	// sm_nShaderDetail at initBloom: HIGH/EXTREME → full-res; LOW/MEDIUM
+	// stay at half-res for fillrate / VRAM budget on lower-end hardware.
+	bool					m_bFullResMip0;
 
 private:
 	bool					initBloom( DisplayDeviceD3D12 * pDevice );
 	void					drawFullscreenTriangle( DisplayDeviceD3D12 * pDevice );
+	void					freeOwnedDescriptors();		// returns RTV/SRV slots to the device's heaps
 
 	// Compiled shader blobs (from PostProcess.hlsl with different entry points)
 	ComPtr<ID3DBlob>		m_pVSBlob;
@@ -63,6 +72,17 @@ private:
 	int						m_LastShaderDetail;
 	bool					m_bInitialized;
 	bool					m_bBloomFailed;
+
+	// Cached pointer to the device that owns the descriptor heaps backing our
+	// RTV/SRV slots.  Set in initBloom() (the first device touching this
+	// effect), used by the destructor to return slots before the effect dies.
+	// release() deliberately does NOT free slots — the resize-recovery path
+	// reuses them.  If the device is destroyed before the effect, freeD3D12
+	// already calls release() (which doesn't touch slots) and then the heap
+	// dies; the destructor's freeOwnedDescriptors() would access a dead heap
+	// in that pathological case.  In practice the device outlives every
+	// effect it owns, so we don't guard for it explicitly.
+	DisplayDeviceD3D12 *	m_pCachedDevice;
 };
 
 //---------------------------------------------------------------------------------------------------

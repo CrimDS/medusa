@@ -65,6 +65,15 @@ bool PrimitiveSurfaceD3D12::execute()
 		if ( m_SRVIndex == UINT(-1) )
 			m_SRVIndex = pDevice->allocateSRV();
 
+		// Defensive: if the staging heap is genuinely exhausted (Allocate
+		// returns UINT(-1)), GetCPUHandle below would compute an
+		// out-of-bounds descriptor pointer and CreateShaderResourceView
+		// would corrupt memory.  Skip this surface for the frame instead;
+		// the next call site will try again and may succeed if other
+		// surfaces have released slots.
+		if ( m_SRVIndex == UINT(-1) )
+			return false;
+
 		// Texture has no uploaded data (e.g. DXT codec failure) — still in COPY_DEST.
 		// Must transition to PSR before the shader can sample it, otherwise GPU hangs.
 		// Defer SRV creation until we have a command list to issue the barrier.
@@ -184,6 +193,25 @@ void PrimitiveSurfaceD3D12::release()
 	for ( int i = 0; i < (int)m_PendingMips.size(); ++i )
 		delete[] m_PendingMips[i].pData;
 	m_PendingMips.release();
+
+	// Return the SRV staging-heap slot to the free list before clearing
+	// the index, otherwise the slot is leaked permanently.  Over a long
+	// session — especially with material rebuilds churning surfaces —
+	// this exhausts the heap until Allocate() returns UINT(-1), at which
+	// point GetCPUHandle(-1) computes a wildly out-of-bounds descriptor
+	// pointer (heapBase + 0xFFFFFFFF * descSize).  CreateShaderResourceView
+	// then corrupts memory at that address and the next draw using that
+	// SRV crashes inside the driver.  Staging descriptors aren't
+	// GPU-lifetime-tracked (only the underlying ID3D12Resource is, and
+	// that's already deferred above), and the staging slot is only
+	// CopyDescriptorsSimple'd into shader-visible slots — those copies
+	// have already happened by the time we reach release(), so freeing
+	// the index here is safe.
+	if ( m_SRVIndex != UINT(-1) && m_pDevice )
+	{
+		DisplayDeviceD3D12 * pDev = (DisplayDeviceD3D12 *)m_pDevice;
+		pDev->m_SRVStagingHeap.Free( m_SRVIndex );
+	}
 
 	m_bSRVCreated = false;
 	m_bUploaded = false;

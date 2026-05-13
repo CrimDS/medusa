@@ -234,7 +234,19 @@ DevicePrimitive * Material::material( RenderContext & context )
 	AutoLock lock( &RenderContext::sm_StateLock );
 
 	// check for the primitives being initialized
-	if (! m_Material.valid() || m_fLastAlpha != context.alpha() || !m_bSurfaceReady )
+	// Rebuild also when the context's shader-override string flips, so a
+	// material that's shared between (e.g.) a cloaking ship and a
+	// non-cloaking one re-binds the right shader for each consumer.
+	// Restricted to opaque (NONE-blend) materials — the cloak override is
+	// designed for solid hull geometry, not for ALPHA/ADDITIVE particles,
+	// engine plumes, weapon billboards, or hit effects parented under the
+	// ship.  Without this gate the override leaks onto every effect with
+	// an empty m_sShader, producing the bright squares / checkered ghosts.
+	const char * pCtxOverride = context.shaderOverride();
+	const bool bOverrideChanged = ( m_sShader.length() == 0 )
+		&& ( m_Blending == PrimitiveMaterial::NONE )
+		&& ( m_sLastShaderOverride != ( pCtxOverride != NULL ? pCtxOverride : "" ) );
+	if (! m_Material.valid() || m_fLastAlpha != context.alpha() || bOverrideChanged || !m_bSurfaceReady )
 		createDevicePrimitives( context );
 
 	// handle animating surfaces
@@ -528,6 +540,7 @@ void Material::initialize()
 	m_MipMap = false;							// MipMap enable flag
 
 	m_fLastAlpha = 1.0f;
+	m_sLastShaderOverride = "";
 	m_nLastFrame = -1;
 	m_bSurfaceReady = false;
 }
@@ -560,8 +573,22 @@ void Material::createDevicePrimitives( RenderContext & context )
 
 	m_Material->setLightEnable( m_LightEnable );
 	m_Material->setDoubleSided( m_DoubleSided );
+	// Explicit per-material shader takes precedence; otherwise fall through
+	// to the RenderContext shader override (e.g. cloak), and if that's
+	// empty the material binds the device default shader.  The override
+	// only applies to opaque (NONE-blend) materials so non-hull primitives
+	// parented under a cloaking ship — engine plumes, weapon billboards,
+	// hit effects, etc. — keep their normal shader.
 	if ( m_sShader.length() > 0 )
 		m_Material->setShader( m_sShader );
+	else if ( context.shaderOverride() != NULL && CharString( context.shaderOverride() ).length() > 0
+			  && m_Blending == PrimitiveMaterial::NONE )
+		m_Material->setShader( context.shaderOverride() );
+	// (setForceDepthWrite was tried for cloak self-occlusion but the depth
+	// write also occluded sun lens flares, planet rings, atmosphere/limbal
+	// glow, and any transparent effect rendered after the ship at the same
+	// screen position.  Cloak back-side ghosting is the lesser evil; proper
+	// fix needs stencil-based per-ship self-occlusion in a separate pass.)
 
 	if (! m_bSurfaceReady )
 		createDeviceSurfaces( context.display() );
@@ -585,6 +612,7 @@ void Material::createDevicePrimitives( RenderContext & context )
 
 	m_nLastFrame = 0;
 	m_fLastAlpha = context.alpha();
+	m_sLastShaderOverride = ( context.shaderOverride() != NULL ) ? context.shaderOverride() : "";
 }
 
 void Material::createDeviceSurfaces( DisplayDevice * pDevice )

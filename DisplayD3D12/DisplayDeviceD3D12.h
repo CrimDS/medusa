@@ -632,6 +632,7 @@ public:
 	int								m_nTextureStage;
 	UINT							m_nCurrentBlend;		// set by setupBlending(): 0=none,1=alpha,2=alpha_inv,3=additive,4=additive_inv
 	bool							m_bCurrentDoubleSided;	// set by setupBlending()
+	bool							m_bCurrentForceDepthWrite;	// set by setupBlending(): override blend-derived depth-write off (cloak silhouette occlusion)
 	bool							m_bRenderingShadowMap;	// true during shadow map geometry rendering
 	bool							m_bShadowMapInRTState;	// true when shadow map resource is in RENDER_TARGET state
 
@@ -644,16 +645,59 @@ public:
 	HANDLE							m_hUploadFenceEvent;
 	CriticalSection					m_UploadCS;
 
-	// FXAA post-process
-	ComPtr<ID3D12Resource>			m_pSceneRT;				// intermediate render target for FXAA
+	// Post-process pipeline + anti-aliasing.  Two independent flags:
+	//   m_bSceneRTEnabled — scene RT exists and the HDR post-process pipeline
+	//     is alive.  HDR, SSAO, Exposure, LimbGlow, LensFlare all gate on this
+	//     (they read m_pSceneRT).  Distinct from "which AA runs" so that e.g.
+	//     AA-off + HDR-on is a valid configuration.
+	//   m_eAAMode — selects the AA path executed at present-time:
+	//     AA_NONE = tonemap-only copy scene RT → backbuffer
+	//     AA_FXAA = current FXAA path (default; matches pre-split behavior)
+	//     AA_SMAA = 3-pass SMAA (edge → blend weights → neighborhood blend)
+	//   These started as a single m_bFXAAEnabled flag that overloaded both
+	//   meanings; the split lets the FSAA config setting drive AA selection
+	//   without taking the whole post-process pipeline down with it.
+	enum AAMode { AA_NONE, AA_FXAA, AA_SMAA };
+
+	ComPtr<ID3D12Resource>			m_pSceneRT;				// HDR scene RT (R11G11B10_FLOAT) shared by all post-process effects
 	UINT							m_nSceneRTVIndex;		// RTV index in m_RTVHeap
 	UINT							m_nSceneSRVIndex;		// SRV index in m_SRVStagingHeap
 	ShaderD3D12::Ref				m_pFXAAShader;
 	ComPtr<ID3D12PipelineState>		m_pFXAAPSO;
 	ComPtr<ID3D12RootSignature>		m_pFXAARootSig;
-	bool							m_bFXAAEnabled;
+	// Tonemap-only resolve PSO — used by the AA_NONE path.  Shares m_pFXAARootSig
+	// (identical root signature: CBV b0, SRV table {scene t0, exposure t1},
+	// sampler s0) so all that differs is the bound pixel shader bytecode.
+	ShaderD3D12::Ref				m_pTonemapShader;
+	ComPtr<ID3D12PipelineState>		m_pTonemapPSO;
+
+	// SMAA 3-pass post-process.  SMAA.hlsl is a multi-entry shader (PS_Edge,
+	// PS_Weights, PS_Blend with shared vs_main) compiled inline via
+	// D3DCompileFromFile — same pattern DisplayEffectSSAO uses.  Three PSOs
+	// share one root signature.  Two intermediate RTs at scene-RT size:
+	// edge mask (R8G8_UNORM, ~2 bpp) and blend weights (R8G8B8A8_UNORM, 4 bpp).
+	// Not canonical Iryoku SMAA — see top of SMAA.hlsl for the algorithm and
+	// trade-offs.
+	ComPtr<ID3DBlob>				m_pSMAAVSBlob;
+	ComPtr<ID3DBlob>				m_pSMAAPSEdgeBlob;
+	ComPtr<ID3DBlob>				m_pSMAAPSWeightsBlob;
+	ComPtr<ID3DBlob>				m_pSMAAPSBlendBlob;
+	ComPtr<ID3D12RootSignature>		m_pSMAARootSig;
+	ComPtr<ID3D12PipelineState>		m_pSMAAEdgePSO;
+	ComPtr<ID3D12PipelineState>		m_pSMAAWeightsPSO;
+	ComPtr<ID3D12PipelineState>		m_pSMAABlendPSO;
+	ComPtr<ID3D12Resource>			m_pSMAAEdgeRT;
+	ComPtr<ID3D12Resource>			m_pSMAAWeightsRT;
+	UINT							m_nSMAAEdgeRTVIndex;
+	UINT							m_nSMAAEdgeSRVIndex;
+	UINT							m_nSMAAWeightsRTVIndex;
+	UINT							m_nSMAAWeightsSRVIndex;
+	SizeInt							m_LastSMAASize;		// for resize detection — recreate RTs only when scene size changes
+	bool							m_bSMAAAvailable;	// false if any of the createSMAA() steps failed
+	bool							m_bSceneRTEnabled;		// scene RT pipeline alive (HDR/SSAO/Exposure/LimbGlow/LensFlare gate here)
+	AAMode							m_eAAMode;				// AA path selected at present()
 	bool							m_bSceneRTisRT;			// true when m_pSceneRT is in RENDER_TARGET state
-	bool							m_bRenderingPostFXAA;	// true after applyFXAA() bound the swap chain — UI/OVERLAY draws use R8G8B8A8 PSOs
+	bool							m_bRenderingPostAA;		// true after the AA pass bound the swap chain — UI/OVERLAY draws use R8G8B8A8 PSOs
 
 	// Auto-exposure plumbing.  DisplayEffectExposure (when active) writes a 1x1
 	// R32F texture each frame with the EMA-smoothed exposure multiplier, and
@@ -687,6 +731,9 @@ public:
 	bool							readyShadowMap();
 	bool							createFXAA();
 	void							applyFXAA();
+	void							applyTonemap();		// AA_NONE: tonemap scene RT → backbuffer
+	bool							createSMAA();		// allocates SMAA RTs + PSOs (called from createFXAA)
+	void							applySMAA();		// AA_SMAA: 3-pass MLAA-style edge AA
 
 	void							waitForGPU();
 	void							moveToNextFrame();

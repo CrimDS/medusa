@@ -122,6 +122,7 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_bUsingFixedFunction( false ),
 	m_nCurrentBlend( 0 ),
 	m_bCurrentDoubleSided( false ),
+	m_bCurrentForceDepthWrite( false ),
 	m_bRenderingShadowMap( false ),
 	m_bShadowMapInRTState( false ),
 	m_bFirstShadowPass( true ),
@@ -130,9 +131,16 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_szShadowMap( DEFAULT_SHADOW_MAP_SIZE, DEFAULT_SHADOW_MAP_SIZE ),
 	m_nSceneRTVIndex( UINT(-1) ),
 	m_nSceneSRVIndex( UINT(-1) ),
-	m_bFXAAEnabled( true ),
+	m_bSceneRTEnabled( true ),
+	m_eAAMode( AA_FXAA ),
 	m_bSceneRTisRT( false ),
-	m_bRenderingPostFXAA( false ),
+	m_bRenderingPostAA( false ),
+	m_nSMAAEdgeRTVIndex( UINT(-1) ),
+	m_nSMAAEdgeSRVIndex( UINT(-1) ),
+	m_nSMAAWeightsRTVIndex( UINT(-1) ),
+	m_nSMAAWeightsSRVIndex( UINT(-1) ),
+	m_LastSMAASize( 0, 0 ),
+	m_bSMAAAvailable( false ),
 	m_nDefaultExposureSRVIndex( UINT(-1) ),
 	m_nDefaultExposureRTVIndex( UINT(-1) ),
 	m_bDefaultExposureInitialized( false ),
@@ -309,6 +317,23 @@ bool DisplayDeviceD3D12::initialize( void * hWnd, const Mode * pMode, bool bWind
 	m_HWND = static_cast<HWND>( hWnd );
 	m_bHardware = bHardware;
 	m_eFSAA = eFSAA;
+
+	// Translate FSAA enum → AA mode for the post-process AA dispatch.  FSAA
+	// historically picked hardware MSAA sample count (D3D9); under D3D12 the
+	// same setting now selects the post-process AA path:
+	//   FSAA_NONE        → AA_NONE (tonemap only)
+	//   FSAA_NONMASKABLE → AA_FXAA (single-pass FXAA)
+	//   FSAA_2..16       → AA_SMAA (3-pass MLAA-style edge AA; quality preset
+	//                      comes from sm_nShaderDetail, applied at PSO compile
+	//                      time inside createSMAA)
+	// Unknown values default to AA_FXAA so a config that pre-dates the AA
+	// mapping behaves identically to before.
+	if ( eFSAA == FSAA_NONE )
+		m_eAAMode = AA_NONE;
+	else if ( eFSAA == FSAA_NONMASKABLE )
+		m_eAAMode = AA_FXAA;
+	else
+		m_eAAMode = AA_SMAA;
 
 	if ( pMode != NULL )
 	{
@@ -496,9 +521,10 @@ bool DisplayDeviceD3D12::setMode( const Mode * pMode, bool bWindowed )
 	createRenderTargets();
 	createDepthStencil();
 
-	// FXAA scene RT is sized to the client; recreate alongside the backbuffers
-	// or the next frame will sample a wrong-dimension scene RT.
-	if ( m_bFXAAEnabled )
+	// Scene RT is sized to the client; recreate alongside the backbuffers
+	// or the next frame will sample a wrong-dimension scene RT.  (createFXAA
+	// allocates the shared scene RT in addition to the FXAA-specific PSO.)
+	if ( m_bSceneRTEnabled )
 		createFXAA();
 
 	updateClientArea( false );
@@ -695,7 +721,7 @@ bool DisplayDeviceD3D12::beginScene()
 	// Frame starts pre-FXAA: material draws target the scene RT (HDR float).
 	// applyFXAA() flips this true after binding the swap chain so OVERLAY/UI draws
 	// pick up the R8G8B8A8 PSO variant.
-	m_bRenderingPostFXAA = false;
+	m_bRenderingPostAA = false;
 
 	// Clear the per-frame exposure pointer so a disabled/removed exposure
 	// effect doesn't leak a stale SRV into applyFXAA.  If the effect runs,
@@ -725,8 +751,8 @@ bool DisplayDeviceD3D12::beginScene()
 			float black[4] = { 0, 0, 0, 1 };
 			m_pCommandList->ClearRenderTargetView( rtv, black, 0, nullptr );
 
-			// Also clear the FXAA scene RT if enabled
-			if ( m_bFXAAEnabled && m_pSceneRT )
+			// Also clear the offscreen scene RT if the post-process pipeline is enabled
+			if ( m_bSceneRTEnabled && m_pSceneRT )
 			{
 				if ( !m_bSceneRTisRT )
 				{
@@ -826,10 +852,11 @@ bool DisplayDeviceD3D12::beginScene()
 	}
 	// else: sub-render call — command list is already open, reuse it
 
-	// Set render targets (must be set for each sub-render as shadow passes change them)
-	// When FXAA is enabled, render to the intermediate scene RT instead of the swap chain
+	// Set render targets (must be set for each sub-render as shadow passes change them).
+	// When the offscreen scene RT pipeline is enabled, render to the intermediate scene RT
+	// instead of the swap chain — the AA pass at present() resolves it to the backbuffer.
 	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
-	if ( m_bFXAAEnabled && m_pSceneRT )
+	if ( m_bSceneRTEnabled && m_pSceneRT )
 	{
 		rtvHandle = m_RTVHeap.GetCPUHandle( m_nSceneRTVIndex );
 	}
@@ -1073,7 +1100,7 @@ bool DisplayDeviceD3D12::endShadowPass()
 	if ( m_bCommandListOpen )
 	{
 		D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
-		if ( m_bFXAAEnabled && m_pSceneRT )
+		if ( m_bSceneRTEnabled && m_pSceneRT )
 			rtvHandle = m_RTVHeap.GetCPUHandle( m_nSceneRTVIndex );
 		else
 			rtvHandle = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
@@ -1244,31 +1271,61 @@ void DisplayDeviceD3D12::present()
 
 	if ( m_bCommandListOpen )
 	{
-		// Apply FXAA: resolve scene RT → swap chain back buffer.
-		// applyFXAA() also binds the back buffer as the current RTV and leaves the
-		// scene RT in the PIXEL_SHADER_RESOURCE state.
-		if ( m_bFXAAEnabled && m_pSceneRT )
+		// Apply the AA pass: resolve scene RT → swap chain back buffer.
+		// Each apply* function binds the back buffer as the current RTV, leaves
+		// the scene RT in the PIXEL_SHADER_RESOURCE state, and sets
+		// m_bRenderingPostAA=true so subsequent OVERLAY draws know to rebind
+		// the main root signature.  AA_SMAA is wired in a later phase.
+		if ( m_bSceneRTEnabled && m_pSceneRT )
 		{
-			PROFILE_START( "present:applyFXAA" );
-			applyFXAA();
-			PROFILE_END();
+			switch ( m_eAAMode )
+			{
+			case AA_NONE:
+				PROFILE_START( "present:applyTonemap" );
+				applyTonemap();
+				PROFILE_END();
+				break;
+			case AA_FXAA:
+				PROFILE_START( "present:applyFXAA" );
+				applyFXAA();
+				PROFILE_END();
+				break;
+			case AA_SMAA:
+				if ( m_bSMAAAvailable )
+				{
+					PROFILE_START( "present:applySMAA" );
+					applySMAA();
+					PROFILE_END();
+				}
+				else
+				{
+					// SMAA failed to init (shader compile, RT alloc, PSO).
+					// Fall back to FXAA so the frame still resolves to the
+					// backbuffer instead of producing a black screen.
+					PROFILE_START( "present:applyFXAA(smaa-fallback)" );
+					applyFXAA();
+					PROFILE_END();
+				}
+				break;
+			}
 		}
 
 		// Render the OVERLAY pass on top of the post-processed image, so UI stays crisp.
-		// When FXAA is enabled, applyFXAA() already bound the back buffer as the RTV;
-		// when disabled, the back buffer is still bound from beginScene.
+		// When an AA pass ran, it bound the back buffer as the RTV and swapped to
+		// its own narrow root signature; when no AA pass ran (m_bRenderingPostAA
+		// stays false), the back buffer is still bound from beginScene and the
+		// main root sig is still in effect.
 		//
-		// applyFXAA() swaps the root signature to m_pFXAARootSig, which only has
-		// 3 parameters — materials assume the main root signature (6 parameters)
-		// and would crash on SetGraphicsRootDescriptorTable(4, ...) otherwise.
-		// Only rebind when FXAA actually ran; if disabled, beginScene's bindings
-		// are still in effect.
+		// applyFXAA() (and later applySMAA / applyTonemap) swaps to m_pFXAARootSig,
+		// which only has 3 parameters — materials assume the main root signature
+		// (6 parameters) and would crash on SetGraphicsRootDescriptorTable(4, ...)
+		// otherwise.  Only rebind when an AA pass actually ran.
 		{
 			PROFILE_START( "present:OVERLAY_execute" );
 			Array< PrimitiveMaterial::Ref > & materials = m_Stack[ OVERLAY ];
 			const int nOverlayCount = materials.size();	// captured before release() for the profiler message below
 
-			if ( nOverlayCount > 0 && m_bFXAAEnabled && m_pSceneRT )
+			if ( nOverlayCount > 0 && m_bRenderingPostAA )
 				bindMainRootDefaults();
 
 			{
@@ -1693,11 +1750,12 @@ void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::T
 	key.wireframe = (m_eFillMode == FILL_WIREFRAME);
 	key.sampleCount = 1;
 	// PSO RTV format must match the bound RTV exactly (D3D12 validation enforces this).
-	// Three cases: shadow pass writes a depth-as-color R32F target; FXAA-enabled pre-FXAA
-	// material draws go to the HDR float scene RT; everything else (FXAA disabled, OVERLAY/UI
-	// after applyFXAA bound the swap chain) writes the R8G8B8A8 backbuffer.
+	// Three cases: shadow pass writes a depth-as-color R32F target; scene-RT-enabled
+	// pre-AA material draws go to the HDR float scene RT; everything else (scene RT
+	// disabled, or OVERLAY/UI after the AA pass bound the swap chain) writes the
+	// R8G8B8A8 backbuffer.
 	key.rtvFormat = m_bRenderingShadowMap ? DXGI_FORMAT_R32_FLOAT
-		: ( m_bFXAAEnabled && m_pSceneRT && !m_bRenderingPostFXAA ) ? SCENE_RT_FORMAT
+		: ( m_bSceneRTEnabled && m_pSceneRT && !m_bRenderingPostAA ) ? SCENE_RT_FORMAT
 		: DXGI_FORMAT_R8G8B8A8_UNORM;
 
 	// Resolve the effective shader for this draw so the PSO cache key
@@ -1743,7 +1801,12 @@ void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::T
 		else
 		{
 			key.depthEnable = true;
-			key.depthWrite = (m_nCurrentBlend == 0);
+			// Depth-write defaults to on for opaque (NONE blend) and off for
+			// any blended geometry — but cloaked ship hulls override this so
+			// the front silhouette occludes the back side and the rim shimmer
+			// doesn't bleed through the body.  setForceDepthWrite() on the
+			// material drives m_bCurrentForceDepthWrite via setupBlending().
+			key.depthWrite = (m_nCurrentBlend == 0) || m_bCurrentForceDepthWrite;
 			key.dsvFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 		}
 		pShader = m_pMatShader.valid() ? m_pMatShader.pointer() : nullptr;
@@ -2874,8 +2937,8 @@ bool DisplayDeviceD3D12::initializeD3D12()
 	// Create dedicated upload queue for loading thread texture uploads
 	initUploadQueue();
 
-	// Create FXAA post-process resources (needs valid window size)
-	if ( m_bFXAAEnabled )
+	// Create post-process resources (scene RT + FXAA PSO; needs valid window size)
+	if ( m_bSceneRTEnabled )
 		createFXAA();
 
 	return true;
@@ -3141,13 +3204,21 @@ void DisplayDeviceD3D12::freeD3D12()
 {
 	waitForGPU();
 
-	// Release effects
+	// Release effects.  Two-step: onDeviceShutdown() returns RTV/SRV slots
+	// back to our heaps while they're still alive (preventing the slot leak
+	// across scene reloads when effects are re-instantiated; also defending
+	// against effects that outlive the device — their destructors would
+	// otherwise Free() into freed memory).  Then release() drops the
+	// effect's D3D resources.
 	for ( WeakEffectList::iterator iEffect = m_CreatedEffects.begin();
 		iEffect != m_CreatedEffects.end(); ++iEffect )
 	{
 		DisplayEffect * pEffect = *iEffect;
 		if ( pEffect != NULL )
+		{
+			pEffect->onDeviceShutdown();
 			pEffect->release();
+		}
 	}
 	m_CreatedEffects.clear();
 
@@ -3782,7 +3853,9 @@ bool DisplayDeviceD3D12::createFXAA()
 		TRACE( "createFXAA: CreateCommittedResource failed hr=0x%08x removed=0x%08x  %ux%u fmt=%d  RTVslot=%u SRVslot=%u",
 			hr, removed, width, height, (int)SCENE_RT_FORMAT,
 			m_nSceneRTVIndex, m_nSceneSRVIndex );
-		m_bFXAAEnabled = false;
+		// Scene RT itself failed — disable the whole post-process pipeline.
+		m_bSceneRTEnabled = false;
+		m_eAAMode = AA_NONE;
 		return false;
 	}
 
@@ -3813,7 +3886,11 @@ bool DisplayDeviceD3D12::createFXAA()
 	if ( !m_pFXAAShader.valid() || !m_pFXAAShader->valid() )
 	{
 		TRACE( "createFXAA: Failed to compile FXAA shader!" );
-		m_bFXAAEnabled = false;
+		// FXAA shader unavailable — disable the post-process pipeline.  When the
+		// tonemap-only AA_NONE path lands (Phase 2), this can fall back to AA_NONE
+		// while keeping the scene RT pipeline alive instead.
+		m_bSceneRTEnabled = false;
+		m_eAAMode = AA_NONE;
 		return false;
 	}
 
@@ -3862,7 +3939,8 @@ bool DisplayDeviceD3D12::createFXAA()
 	if ( FAILED(hr) )
 	{
 		if ( err ) TRACE( (const char *)err->GetBufferPointer() );
-		m_bFXAAEnabled = false;
+		m_bSceneRTEnabled = false;
+		m_eAAMode = AA_NONE;
 		return false;
 	}
 
@@ -3870,7 +3948,8 @@ bool DisplayDeviceD3D12::createFXAA()
 		IID_PPV_ARGS(&m_pFXAARootSig) );
 	if ( FAILED(hr) )
 	{
-		m_bFXAAEnabled = false;
+		m_bSceneRTEnabled = false;
+		m_eAAMode = AA_NONE;
 		return false;
 	}
 
@@ -3894,17 +3973,46 @@ bool DisplayDeviceD3D12::createFXAA()
 	if ( FAILED(hr) )
 	{
 		TRACE( "createFXAA: Failed to create FXAA PSO!" );
-		m_bFXAAEnabled = false;
+		m_bSceneRTEnabled = false;
+		m_eAAMode = AA_NONE;
 		return false;
 	}
 
+	// Tonemap-only PSO — same root sig and PSO desc as FXAA, only PS bytecode
+	// differs.  Used when m_eAAMode == AA_NONE (FSAA=FSAA_NONE in config) to
+	// resolve the HDR scene RT to the LDR backbuffer with no AA applied.  A
+	// failure here is non-fatal — FXAA still works, AA_NONE just falls back
+	// to "no resolve" (whatever the AA_NONE selector lands on, applyTonemap()
+	// will early-out if the PSO is null).
+	m_pTonemapShader = getShader( "Shaders/Tonemap.hlsl" );
+	if ( m_pTonemapShader.valid() && m_pTonemapShader->valid() )
+	{
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC tmDesc = psoDesc;
+		tmDesc.VS = m_pTonemapShader->vertexShaderBytecode();
+		tmDesc.PS = m_pTonemapShader->pixelShaderBytecode();
+		hr = m_pDevice->CreateGraphicsPipelineState( &tmDesc, IID_PPV_ARGS(&m_pTonemapPSO) );
+		if ( FAILED(hr) )
+			TRACE( "createFXAA: Failed to create Tonemap PSO (AA_NONE path will be unavailable)" );
+	}
+	else
+	{
+		TRACE( "createFXAA: Tonemap.hlsl missing or failed to compile (AA_NONE path will be unavailable)" );
+	}
+
 	TRACE( "FXAA initialized (%dx%d)", width, height );
+
+	// SMAA shares the scene RT lifecycle — its intermediate RTs are sized to
+	// the same dimensions, so we (re)create them here.  Failure is non-fatal:
+	// if SMAA can't init, AA_SMAA falls back to AA_FXAA in present()'s switch
+	// via the m_bSMAAAvailable flag.
+	createSMAA();
+
 	return true;
 }
 
 void DisplayDeviceD3D12::applyFXAA()
 {
-	if ( !m_bFXAAEnabled || !m_pSceneRT || !m_pFXAAPSO || !m_bCommandListOpen )
+	if ( m_eAAMode != AA_FXAA || !m_bSceneRTEnabled || !m_pSceneRT || !m_pFXAAPSO || !m_bCommandListOpen )
 		return;
 
 	// Lazy-init the 1x1 R32F=1.0 fallback exposure texture.  Done here rather
@@ -4049,9 +4157,589 @@ void DisplayDeviceD3D12::applyFXAA()
 
 	// Subsequent draws (OVERLAY/UI) target the swap chain backbuffer (R8G8B8A8),
 	// not the scene RT — flag this so material PSOs key off the right format.
-	m_bRenderingPostFXAA = true;
+	m_bRenderingPostAA = true;
 
 	// Leave scene RT in PSR state — beginScene will transition PSR → RT
+}
+
+//---------------------------------------------------------------------------------------------------
+// applyTonemap — AA_NONE path.  Resolves the HDR scene RT to the LDR
+// backbuffer with exposure + ACES filmic tonemap and no anti-aliasing.
+// Mirrors applyFXAA's resource binding (shared root sig, same SRV + CB
+// layout) — only the bound PSO differs.  The duplication with applyFXAA
+// will collapse once Phase 4 lands SMAA: at that point a shared runAAPass()
+// helper makes sense.  For now, leaving the FXAA path bit-identical to
+// pre-split behavior is more valuable than the dedupe.
+
+void DisplayDeviceD3D12::applyTonemap()
+{
+	if ( m_eAAMode != AA_NONE || !m_bSceneRTEnabled || !m_pSceneRT || !m_pTonemapPSO || !m_bCommandListOpen )
+		return;
+
+	// Lazy default-exposure init — same rationale as in applyFXAA: needs an
+	// open command list to clear-and-transition the 1x1 R32F=1.0 fallback,
+	// which createFXAA() doesn't have during init/resize flushes.
+	if ( !m_bDefaultExposureInitialized )
+	{
+		D3D12_RESOURCE_DESC expDesc = {};
+		expDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		expDesc.Width  = 1;
+		expDesc.Height = 1;
+		expDesc.DepthOrArraySize = 1;
+		expDesc.MipLevels = 1;
+		expDesc.Format = DXGI_FORMAT_R32_FLOAT;
+		expDesc.SampleDesc.Count = 1;
+		expDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+		D3D12_HEAP_PROPERTIES heapProps = {};
+		heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+		D3D12_CLEAR_VALUE cv = {};
+		cv.Format = DXGI_FORMAT_R32_FLOAT;
+		cv.Color[0] = 1.0f;
+
+		HRESULT hrExp = m_pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
+			&expDesc, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
+			IID_PPV_ARGS(&m_pDefaultExposureTex) );
+		if ( SUCCEEDED(hrExp) )
+		{
+			if ( m_nDefaultExposureRTVIndex == UINT(-1) )
+				m_nDefaultExposureRTVIndex = m_RTVHeap.Allocate();
+			m_pDevice->CreateRenderTargetView( m_pDefaultExposureTex.Get(), nullptr,
+				m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ) );
+
+			if ( m_nDefaultExposureSRVIndex == UINT(-1) )
+				m_nDefaultExposureSRVIndex = m_SRVStagingHeap.Allocate();
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDesc.Texture2D.MipLevels = 1;
+			m_pDevice->CreateShaderResourceView( m_pDefaultExposureTex.Get(), &srvDesc,
+				m_SRVStagingHeap.GetCPUHandle( m_nDefaultExposureSRVIndex ) );
+
+			float white[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+			m_pCommandList->ClearRenderTargetView(
+				m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ), white, 0, nullptr );
+			TransitionResource( m_pCommandList.Get(), m_pDefaultExposureTex.Get(),
+				D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+			m_bDefaultExposureInitialized = true;
+		}
+	}
+
+	RectInt rw = renderWindow();
+	float width  = (float)rw.width();
+	float height = (float)rw.height();
+
+	if ( m_bSceneRTisRT )
+	{
+		TransitionResource( m_pCommandList.Get(), m_pSceneRT.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+		m_bSceneRTisRT = false;
+	}
+
+	D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
+	m_pCommandList->OMSetRenderTargets( 1, &rtv, FALSE, nullptr );
+
+	D3D12_VIEWPORT vp = { 0, 0, width, height, 0, 1 };
+	m_pCommandList->RSSetViewports( 1, &vp );
+	D3D12_RECT scissor = { 0, 0, (LONG)width, (LONG)height };
+	m_pCommandList->RSSetScissorRects( 1, &scissor );
+
+	invalidateBoundSRVTable();
+	m_pCommandList->SetGraphicsRootSignature( m_pFXAARootSig.Get() );
+	m_pCommandList->SetPipelineState( m_pTonemapPSO.Get() );
+
+	ID3D12DescriptorHeap * heaps[] = { m_SRVHeap.Get(), m_SamplerHeap.Get() };
+	m_pCommandList->SetDescriptorHeaps( _countof(heaps), heaps );
+
+	// Same CB layout as FXAA — Tonemap.hlsl only reads rcpFrame; the other
+	// fields are present so the shared root sig stays compatible.
+	struct TonemapCBuffer {
+		float rcpFrameX, rcpFrameY;
+		float fSubpix;
+		float fEdgeThreshold;
+		float fEdgeThresholdMin;
+		float pad[3];
+	};
+	TonemapCBuffer cb;
+	cb.rcpFrameX = 1.0f / width;
+	cb.rcpFrameY = 1.0f / height;
+	cb.fSubpix = 0.0f;
+	cb.fEdgeThreshold = 0.0f;
+	cb.fEdgeThresholdMin = 0.0f;
+
+	UploadRingBuffer::Allocation cbAlloc = allocateCB( sizeof(TonemapCBuffer) );
+	memcpy( cbAlloc.cpuAddress, &cb, sizeof(cb) );
+	m_pCommandList->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
+
+	UINT srvSlot = allocSRVSlots( 2 );
+	m_pDevice->CopyDescriptorsSimple( 1,
+		m_SRVHeap.GetCPUHandle( srvSlot ),
+		m_SRVStagingHeap.GetCPUHandle( m_nSceneSRVIndex ),
+		D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+
+	UINT exposureSrc = ( m_nCurrentExposureSRVIndex != UINT(-1) )
+		? m_nCurrentExposureSRVIndex
+		: m_nDefaultExposureSRVIndex;
+	if ( exposureSrc != UINT(-1) )
+	{
+		m_pDevice->CopyDescriptorsSimple( 1,
+			m_SRVHeap.GetCPUHandle( srvSlot + 1 ),
+			m_SRVStagingHeap.GetCPUHandle( exposureSrc ),
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+	}
+
+	m_pCommandList->SetGraphicsRootDescriptorTable( 1, m_SRVHeap.GetGPUHandle( srvSlot ) );
+	m_pCommandList->SetGraphicsRootDescriptorTable( 2, m_SamplerHeap.GetGPUHandle( 0 ) );
+
+	m_pCommandList->IASetPrimitiveTopology( D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
+	m_pCommandList->IASetVertexBuffers( 0, 0, nullptr );
+	m_pCommandList->DrawInstanced( 3, 1, 0, 0 );
+
+	m_bRenderingPostAA = true;
+}
+
+//---------------------------------------------------------------------------------------------------
+// SMAA — 3-pass MLAA-style edge AA.  Called from createFXAA() so it shares
+// the scene RT lifecycle (allocated on init, recreated on resize).  Failure
+// here is non-fatal — the AA_SMAA path silently falls back to AA_FXAA via
+// the m_bSMAAAvailable flag.
+//---------------------------------------------------------------------------------------------------
+
+static bool _smaaCompileEntry( const wchar_t * pPath, const char * pEntry, const char * pTarget,
+	const D3D_SHADER_MACRO * pMacros, ComPtr<ID3DBlob> & blobOut )
+{
+	UINT flags = 0;
+#if defined(_DEBUG)
+	flags |= D3DCOMPILE_DEBUG;
+#endif
+	ComPtr<ID3DBlob> errors;
+	HRESULT hr = D3DCompileFromFile( pPath, pMacros, D3D_COMPILE_STANDARD_FILE_INCLUDE,
+		pEntry, pTarget, flags, 0, &blobOut, &errors );
+	if ( FAILED(hr) )
+	{
+		// Brace each branch — the TRACE macro embeds its own trailing
+		// semicolon, so an unbraced `if (x) TRACE(...); else TRACE(...);`
+		// expands to `if (x) Logging::report(...) ;; else …` (the second
+		// semicolon becomes a null statement outside the if, orphaning
+		// the else — C2181).
+		if ( errors )
+		{
+			TRACE( "SMAA shader compile error (%s): %s", pEntry, (const char *)errors->GetBufferPointer() );
+		}
+		else
+		{
+			TRACE( "SMAA shader compile error (%s): hr=0x%08x", pEntry, hr );
+		}
+		return false;
+	}
+	return true;
+}
+
+bool DisplayDeviceD3D12::createSMAA()
+{
+	// Bail early if the scene RT pipeline isn't up — SMAA needs the same RT
+	// the other AA paths read.
+	if ( !m_bSceneRTEnabled || !m_pSceneRT )
+	{
+		m_bSMAAAvailable = false;
+		return false;
+	}
+
+	RectInt rw = renderWindow();
+	UINT width  = (UINT)rw.width();
+	UINT height = (UINT)rw.height();
+	if ( width == 0 || height == 0 )
+	{
+		m_bSMAAAvailable = false;
+		return false;
+	}
+
+	SizeInt currentSize( (int)width, (int)height );
+
+	// Compile + root sig + PSOs are one-time setup; only the intermediate RTs
+	// get recreated on resize (sized to the new scene RT).
+	const bool bFirstInit = !m_pSMAAEdgePSO || !m_pSMAARootSig;
+	const bool bSizeChanged = m_LastSMAASize != currentSize;
+
+	if ( bFirstInit )
+	{
+		// Map sm_nShaderDetail to the SMAA_PRESET define.  Both enums happen
+		// to use 0/1/2/3 (LOW/MEDIUM/HIGH/EXTREME) so the cast is direct, but
+		// stringify here so the preprocessor sees a literal.
+		const char * pPresetStr = "1";
+		switch ( DisplayDevice::sm_nShaderDetail )
+		{
+		case DisplayDevice::SHADER_DETAIL_LOW:     pPresetStr = "0"; break;
+		case DisplayDevice::SHADER_DETAIL_MEDIUM:  pPresetStr = "1"; break;
+		case DisplayDevice::SHADER_DETAIL_HIGH:    pPresetStr = "2"; break;
+		case DisplayDevice::SHADER_DETAIL_EXTREME: pPresetStr = "3"; break;
+		}
+		D3D_SHADER_MACRO macros[] = {
+			{ "SMAA_PRESET", pPresetStr },
+			{ nullptr, nullptr }
+		};
+
+		CharString sPath = DisplayDevice::sm_sShadersPath + "Shaders/SMAA.hlsl";
+		wchar_t wszPath[MAX_PATH];
+		MultiByteToWideChar( CP_ACP, 0, sPath, -1, wszPath, MAX_PATH );
+
+		if ( !_smaaCompileEntry( wszPath, "vs_main", "vs_5_1", macros, m_pSMAAVSBlob ) ||
+		     !_smaaCompileEntry( wszPath, "PS_Edge", "ps_5_1", macros, m_pSMAAPSEdgeBlob ) ||
+		     !_smaaCompileEntry( wszPath, "PS_Weights", "ps_5_1", macros, m_pSMAAPSWeightsBlob ) ||
+		     !_smaaCompileEntry( wszPath, "PS_Blend", "ps_5_1", macros, m_pSMAAPSBlendBlob ) )
+		{
+			TRACE( "createSMAA: shader compile failed — AA_SMAA will fall back to AA_FXAA" );
+			m_bSMAAAvailable = false;
+			return false;
+		}
+
+		// Root signature:
+		//   [0] CBV b0 (rcpFrame)
+		//   [1] SRV table (t0=scene, t1=edges-or-weights, t2=exposure)
+		//   [2] Sampler table (s0=linear)
+		D3D12_ROOT_PARAMETER params[3] = {};
+
+		params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+		params[0].Descriptor.ShaderRegister = 0;
+		params[0].Descriptor.RegisterSpace = 0;
+		params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+		D3D12_DESCRIPTOR_RANGE srvRange = {};
+		srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+		srvRange.NumDescriptors = 3;
+		srvRange.BaseShaderRegister = 0;
+		srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+		params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+		params[1].DescriptorTable.NumDescriptorRanges = 1;
+		params[1].DescriptorTable.pDescriptorRanges = &srvRange;
+		params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+		D3D12_DESCRIPTOR_RANGE samplerRange = {};
+		samplerRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+		samplerRange.NumDescriptors = 1;
+		samplerRange.BaseShaderRegister = 0;
+		samplerRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+		params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+		params[2].DescriptorTable.NumDescriptorRanges = 1;
+		params[2].DescriptorTable.pDescriptorRanges = &samplerRange;
+		params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+		D3D12_ROOT_SIGNATURE_DESC rsDesc = {};
+		rsDesc.NumParameters = 3;
+		rsDesc.pParameters = params;
+		rsDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+		ComPtr<ID3DBlob> sig, err;
+		HRESULT hr = D3D12SerializeRootSignature( &rsDesc, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err );
+		if ( FAILED(hr) )
+		{
+			if ( err ) TRACE( "createSMAA root sig error: %s", (const char *)err->GetBufferPointer() );
+			m_bSMAAAvailable = false;
+			return false;
+		}
+		hr = m_pDevice->CreateRootSignature( 0, sig->GetBufferPointer(), sig->GetBufferSize(),
+			IID_PPV_ARGS(&m_pSMAARootSig) );
+		if ( FAILED(hr) ) { m_bSMAAAvailable = false; return false; }
+
+		// Base PSO desc — fullscreen triangle, no input layout, no depth.
+		D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
+		psoDesc.pRootSignature = m_pSMAARootSig.Get();
+		psoDesc.VS = { m_pSMAAVSBlob->GetBufferPointer(), m_pSMAAVSBlob->GetBufferSize() };
+		psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+		psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+		psoDesc.RasterizerState.DepthClipEnable = FALSE;
+		psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+		psoDesc.DepthStencilState.DepthEnable = FALSE;
+		psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		psoDesc.NumRenderTargets = 1;
+		psoDesc.SampleDesc.Count = 1;
+		psoDesc.SampleMask = UINT_MAX;
+
+		// Pass 1 — Edge detection.  Output: R8G8_UNORM edge mask.
+		psoDesc.PS = { m_pSMAAPSEdgeBlob->GetBufferPointer(), m_pSMAAPSEdgeBlob->GetBufferSize() };
+		psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8_UNORM;
+		hr = m_pDevice->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pSMAAEdgePSO) );
+		if ( FAILED(hr) ) { TRACE( "createSMAA: PS_Edge PSO failed" ); m_bSMAAAvailable = false; return false; }
+
+		// Pass 2 — Weight calculation.  Output: R8G8B8A8_UNORM blend weights.
+		psoDesc.PS = { m_pSMAAPSWeightsBlob->GetBufferPointer(), m_pSMAAPSWeightsBlob->GetBufferSize() };
+		psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+		hr = m_pDevice->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pSMAAWeightsPSO) );
+		if ( FAILED(hr) ) { TRACE( "createSMAA: PS_Weights PSO failed" ); m_bSMAAAvailable = false; return false; }
+
+		// Pass 3 — Neighborhood blend.  Output: R8G8B8A8_UNORM backbuffer.
+		psoDesc.PS = { m_pSMAAPSBlendBlob->GetBufferPointer(), m_pSMAAPSBlendBlob->GetBufferSize() };
+		psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+		hr = m_pDevice->CreateGraphicsPipelineState( &psoDesc, IID_PPV_ARGS(&m_pSMAABlendPSO) );
+		if ( FAILED(hr) ) { TRACE( "createSMAA: PS_Blend PSO failed" ); m_bSMAAAvailable = false; return false; }
+	}
+
+	if ( bFirstInit || bSizeChanged )
+	{
+		// (Re)allocate intermediate RTs at scene-RT size.  Edge mask is R8G8
+		// (2 bytes/pixel ≈ 4 MB at 1080p, 16 MB at 4K).  Weights are RGBA8 (4
+		// bytes/pixel ≈ 8 MB at 1080p, 32 MB at 4K).  Both well within the
+		// shared-heap budget.
+		m_pSMAAEdgeRT.Reset();
+		m_pSMAAWeightsRT.Reset();
+
+		D3D12_HEAP_PROPERTIES heapProps = {};
+		heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+		D3D12_RESOURCE_DESC rtDesc = {};
+		rtDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		rtDesc.Width = width;
+		rtDesc.Height = height;
+		rtDesc.DepthOrArraySize = 1;
+		rtDesc.MipLevels = 1;
+		rtDesc.SampleDesc.Count = 1;
+		rtDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+		// Edge RT
+		rtDesc.Format = DXGI_FORMAT_R8G8_UNORM;
+		D3D12_CLEAR_VALUE cvEdge = {};
+		cvEdge.Format = DXGI_FORMAT_R8G8_UNORM;
+		HRESULT hr = m_pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
+			&rtDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cvEdge,
+			IID_PPV_ARGS(&m_pSMAAEdgeRT) );
+		if ( FAILED(hr) ) { TRACE( "createSMAA: Edge RT alloc failed" ); m_bSMAAAvailable = false; return false; }
+
+		// Weights RT
+		rtDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		D3D12_CLEAR_VALUE cvW = {};
+		cvW.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		hr = m_pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
+			&rtDesc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &cvW,
+			IID_PPV_ARGS(&m_pSMAAWeightsRT) );
+		if ( FAILED(hr) ) { TRACE( "createSMAA: Weights RT alloc failed" ); m_bSMAAAvailable = false; return false; }
+
+		// (Re)create RTV + SRV descriptors.  Allocate slots on first init; on
+		// resize we reuse the existing slot indices and just overwrite the view.
+		if ( m_nSMAAEdgeRTVIndex == UINT(-1) )    m_nSMAAEdgeRTVIndex    = m_RTVHeap.Allocate();
+		if ( m_nSMAAEdgeSRVIndex == UINT(-1) )    m_nSMAAEdgeSRVIndex    = m_SRVStagingHeap.Allocate();
+		if ( m_nSMAAWeightsRTVIndex == UINT(-1) ) m_nSMAAWeightsRTVIndex = m_RTVHeap.Allocate();
+		if ( m_nSMAAWeightsSRVIndex == UINT(-1) ) m_nSMAAWeightsSRVIndex = m_SRVStagingHeap.Allocate();
+
+		m_pDevice->CreateRenderTargetView( m_pSMAAEdgeRT.Get(), nullptr,
+			m_RTVHeap.GetCPUHandle( m_nSMAAEdgeRTVIndex ) );
+		m_pDevice->CreateRenderTargetView( m_pSMAAWeightsRT.Get(), nullptr,
+			m_RTVHeap.GetCPUHandle( m_nSMAAWeightsRTVIndex ) );
+
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Texture2D.MipLevels = 1;
+
+		srvDesc.Format = DXGI_FORMAT_R8G8_UNORM;
+		m_pDevice->CreateShaderResourceView( m_pSMAAEdgeRT.Get(), &srvDesc,
+			m_SRVStagingHeap.GetCPUHandle( m_nSMAAEdgeSRVIndex ) );
+
+		srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+		m_pDevice->CreateShaderResourceView( m_pSMAAWeightsRT.Get(), &srvDesc,
+			m_SRVStagingHeap.GetCPUHandle( m_nSMAAWeightsSRVIndex ) );
+
+		m_LastSMAASize = currentSize;
+	}
+
+	m_bSMAAAvailable = true;
+	TRACE( "SMAA initialized (%dx%d, preset=%d)", width, height, DisplayDevice::sm_nShaderDetail );
+	return true;
+}
+
+//---------------------------------------------------------------------------------------------------
+
+void DisplayDeviceD3D12::applySMAA()
+{
+	if ( m_eAAMode != AA_SMAA || !m_bSMAAAvailable || !m_bSceneRTEnabled || !m_pSceneRT
+		|| !m_pSMAAEdgePSO || !m_pSMAAWeightsPSO || !m_pSMAABlendPSO
+		|| !m_pSMAAEdgeRT || !m_pSMAAWeightsRT || !m_bCommandListOpen )
+		return;
+
+	// Lazy-init the default exposure texture if no AA pass has run yet this
+	// session.  Same rationale as in applyFXAA / applyTonemap — needs an open
+	// CL to clear+transition the 1x1 fallback, which createSMAA() doesn't
+	// have during init.
+	if ( !m_bDefaultExposureInitialized )
+	{
+		D3D12_RESOURCE_DESC expDesc = {};
+		expDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		expDesc.Width  = 1;
+		expDesc.Height = 1;
+		expDesc.DepthOrArraySize = 1;
+		expDesc.MipLevels = 1;
+		expDesc.Format = DXGI_FORMAT_R32_FLOAT;
+		expDesc.SampleDesc.Count = 1;
+		expDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+		D3D12_HEAP_PROPERTIES heapProps = {};
+		heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+		D3D12_CLEAR_VALUE cv = {};
+		cv.Format = DXGI_FORMAT_R32_FLOAT;
+		cv.Color[0] = 1.0f;
+
+		HRESULT hrExp = m_pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
+			&expDesc, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
+			IID_PPV_ARGS(&m_pDefaultExposureTex) );
+		if ( SUCCEEDED(hrExp) )
+		{
+			if ( m_nDefaultExposureRTVIndex == UINT(-1) )
+				m_nDefaultExposureRTVIndex = m_RTVHeap.Allocate();
+			m_pDevice->CreateRenderTargetView( m_pDefaultExposureTex.Get(), nullptr,
+				m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ) );
+			if ( m_nDefaultExposureSRVIndex == UINT(-1) )
+				m_nDefaultExposureSRVIndex = m_SRVStagingHeap.Allocate();
+			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srvDesc.Texture2D.MipLevels = 1;
+			m_pDevice->CreateShaderResourceView( m_pDefaultExposureTex.Get(), &srvDesc,
+				m_SRVStagingHeap.GetCPUHandle( m_nDefaultExposureSRVIndex ) );
+			float white[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+			m_pCommandList->ClearRenderTargetView(
+				m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ), white, 0, nullptr );
+			TransitionResource( m_pCommandList.Get(), m_pDefaultExposureTex.Get(),
+				D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+			m_bDefaultExposureInitialized = true;
+		}
+	}
+
+	RectInt rw = renderWindow();
+	float width  = (float)rw.width();
+	float height = (float)rw.height();
+
+	// Scene RT to PSR (so the edge pass can sample it).  All 3 passes leave
+	// scene RT in PSR.
+	if ( m_bSceneRTisRT )
+	{
+		TransitionResource( m_pCommandList.Get(), m_pSceneRT.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+		m_bSceneRTisRT = false;
+	}
+
+	// Common viewport / scissor / topology for all 3 passes.
+	D3D12_VIEWPORT vp = { 0, 0, width, height, 0, 1 };
+	D3D12_RECT scissor = { 0, 0, (LONG)width, (LONG)height };
+
+	// SMAA CB — just rcpFrame for now.
+	struct SMAACB {
+		float rcpFrameX, rcpFrameY;
+		float pad[2];
+	};
+	SMAACB cb;
+	cb.rcpFrameX = 1.0f / width;
+	cb.rcpFrameY = 1.0f / height;
+	cb.pad[0] = cb.pad[1] = 0;
+	UploadRingBuffer::Allocation cbAlloc = allocateCB( sizeof(SMAACB) );
+	memcpy( cbAlloc.cpuAddress, &cb, sizeof(cb) );
+
+	// Root sig + descriptor heap bound once for the 3 passes; PSO + SRV table
+	// swap per pass.
+	invalidateBoundSRVTable();
+	m_pCommandList->SetGraphicsRootSignature( m_pSMAARootSig.Get() );
+	ID3D12DescriptorHeap * heaps[] = { m_SRVHeap.Get(), m_SamplerHeap.Get() };
+	m_pCommandList->SetDescriptorHeaps( _countof(heaps), heaps );
+	m_pCommandList->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
+	m_pCommandList->SetGraphicsRootDescriptorTable( 2, m_SamplerHeap.GetGPUHandle( 0 ) );
+	m_pCommandList->RSSetViewports( 1, &vp );
+	m_pCommandList->RSSetScissorRects( 1, &scissor );
+	m_pCommandList->IASetPrimitiveTopology( D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
+	m_pCommandList->IASetVertexBuffers( 0, 0, nullptr );
+
+	// Pass 1 — Edge detection.  Input: scene RT (t0).  Output: edge RT.
+	{
+		TransitionResource( m_pCommandList.Get(), m_pSMAAEdgeRT.Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+		D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_RTVHeap.GetCPUHandle( m_nSMAAEdgeRTVIndex );
+		m_pCommandList->OMSetRenderTargets( 1, &rtv, FALSE, nullptr );
+		float black[4] = { 0, 0, 0, 0 };
+		m_pCommandList->ClearRenderTargetView( rtv, black, 0, nullptr );
+
+		UINT srvSlot = allocSRVSlots( 3 );
+		m_pDevice->CopyDescriptorsSimple( 1,
+			m_SRVHeap.GetCPUHandle( srvSlot ),
+			m_SRVStagingHeap.GetCPUHandle( m_nSceneSRVIndex ),
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+		// t1 and t2 unused this pass — leave as whatever's in those slots; the
+		// edge shader only reads t0 (scene) and t2 (exposure).  Wire exposure
+		// at t2 in case the shader ever references it.
+		UINT exposureSrc = ( m_nCurrentExposureSRVIndex != UINT(-1) )
+			? m_nCurrentExposureSRVIndex : m_nDefaultExposureSRVIndex;
+		if ( exposureSrc != UINT(-1) )
+		{
+			m_pDevice->CopyDescriptorsSimple( 1,
+				m_SRVHeap.GetCPUHandle( srvSlot + 2 ),
+				m_SRVStagingHeap.GetCPUHandle( exposureSrc ),
+				D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+		}
+		m_pCommandList->SetGraphicsRootDescriptorTable( 1, m_SRVHeap.GetGPUHandle( srvSlot ) );
+		m_pCommandList->SetPipelineState( m_pSMAAEdgePSO.Get() );
+		m_pCommandList->DrawInstanced( 3, 1, 0, 0 );
+
+		// Edge RT → PSR for Pass 2 to sample.
+		TransitionResource( m_pCommandList.Get(), m_pSMAAEdgeRT.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+	}
+
+	// Pass 2 — Blend weights.  Input: edge RT (t1).  Output: weights RT.
+	{
+		TransitionResource( m_pCommandList.Get(), m_pSMAAWeightsRT.Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
+		D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_RTVHeap.GetCPUHandle( m_nSMAAWeightsRTVIndex );
+		m_pCommandList->OMSetRenderTargets( 1, &rtv, FALSE, nullptr );
+		float black[4] = { 0, 0, 0, 0 };
+		m_pCommandList->ClearRenderTargetView( rtv, black, 0, nullptr );
+
+		UINT srvSlot = allocSRVSlots( 3 );
+		// t0 unused; t1 = edge RT.
+		m_pDevice->CopyDescriptorsSimple( 1,
+			m_SRVHeap.GetCPUHandle( srvSlot + 1 ),
+			m_SRVStagingHeap.GetCPUHandle( m_nSMAAEdgeSRVIndex ),
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+		m_pCommandList->SetGraphicsRootDescriptorTable( 1, m_SRVHeap.GetGPUHandle( srvSlot ) );
+		m_pCommandList->SetPipelineState( m_pSMAAWeightsPSO.Get() );
+		m_pCommandList->DrawInstanced( 3, 1, 0, 0 );
+
+		// Weights RT → PSR for Pass 3 to sample.
+		TransitionResource( m_pCommandList.Get(), m_pSMAAWeightsRT.Get(),
+			D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+	}
+
+	// Pass 3 — Neighborhood blend.  Input: scene RT (t0) + weights RT (t1) +
+	// exposure (t2).  Output: swap chain backbuffer.
+	{
+		D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_RTVHeap.GetCPUHandle( m_nFrameIndex );
+		m_pCommandList->OMSetRenderTargets( 1, &rtv, FALSE, nullptr );
+
+		UINT srvSlot = allocSRVSlots( 3 );
+		m_pDevice->CopyDescriptorsSimple( 1,
+			m_SRVHeap.GetCPUHandle( srvSlot ),
+			m_SRVStagingHeap.GetCPUHandle( m_nSceneSRVIndex ),
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+		m_pDevice->CopyDescriptorsSimple( 1,
+			m_SRVHeap.GetCPUHandle( srvSlot + 1 ),
+			m_SRVStagingHeap.GetCPUHandle( m_nSMAAWeightsSRVIndex ),
+			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+		UINT exposureSrc = ( m_nCurrentExposureSRVIndex != UINT(-1) )
+			? m_nCurrentExposureSRVIndex : m_nDefaultExposureSRVIndex;
+		if ( exposureSrc != UINT(-1) )
+		{
+			m_pDevice->CopyDescriptorsSimple( 1,
+				m_SRVHeap.GetCPUHandle( srvSlot + 2 ),
+				m_SRVStagingHeap.GetCPUHandle( exposureSrc ),
+				D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+		}
+		m_pCommandList->SetGraphicsRootDescriptorTable( 1, m_SRVHeap.GetGPUHandle( srvSlot ) );
+		m_pCommandList->SetPipelineState( m_pSMAABlendPSO.Get() );
+		m_pCommandList->DrawInstanced( 3, 1, 0, 0 );
+	}
+
+	m_bRenderingPostAA = true;
 }
 
 //---------------------------------------------------------------------------------------------------
@@ -4194,8 +4882,8 @@ bool DisplayDeviceD3D12::updateClientArea( bool a_bAllowReset )
 				if ( !createDepthStencil() )
 					TRACE( "updateClientArea: createDepthStencil failed after resize to %ux%u", w, h );
 
-				// Recreate FXAA scene RT (needed by FXAA, HDR, SSAO effects)
-				if ( m_bFXAAEnabled )
+				// Recreate scene RT + AA PSO (needed by FXAA, HDR, SSAO effects)
+				if ( m_bSceneRTEnabled )
 				{
 					if ( !createFXAA() )
 						TRACE( "updateClientArea: createFXAA failed after resize to %ux%u", w, h );

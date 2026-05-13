@@ -33,10 +33,12 @@ DisplayEffectHDRD3D12::DisplayEffectHDRD3D12() :
 	m_nMipCount( 6 ),			// initial value; overwritten from sm_nShaderDetail at initBloom time
 	m_fBloomScale( 0.6f ),
 	m_fBrightThreshold( 0.65f ),
+	m_bFullResMip0( false ),	// overwritten from sm_nShaderDetail at initBloom time
 	m_LastSize( 0, 0 ),
 	m_LastShaderDetail( -1 ),
 	m_bInitialized( false ),
-	m_bBloomFailed( false )
+	m_bBloomFailed( false ),
+	m_pCachedDevice( NULL )
 {
 	for ( int i = 0; i < MAX_MIPS; ++i )
 	{
@@ -48,6 +50,13 @@ DisplayEffectHDRD3D12::DisplayEffectHDRD3D12() :
 
 DisplayEffectHDRD3D12::~DisplayEffectHDRD3D12()
 {
+	// Return descriptor slots to the device's heaps BEFORE release() drops
+	// the D3D resources.  Without this the slots leak across effect
+	// re-instantiation (e.g. scene reload on faction switch / shipyard) —
+	// roughly +6 RTV + +6 SRV per reload at EXTREME, exhausting the heap
+	// after a few cycles.  release() itself intentionally does not touch
+	// slot indices so the resize-recovery path can reuse them.
+	freeOwnedDescriptors();
 	release();
 }
 
@@ -80,6 +89,12 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	if ( m_bBloomFailed )
 		return false;
 
+	// Stash the device for the destructor's freeOwnedDescriptors() — see ~Effect
+	// comment.  Set here rather than in the ctor because the effect is created
+	// via the factory without knowing its device, and initBloom is the first
+	// call that has a device pointer.
+	m_pCachedDevice = pDevice;
+
 	RectInt rw = pDevice->renderWindow();
 	UINT width  = (UINT)rw.width();
 	UINT height = (UINT)rw.height();
@@ -97,25 +112,57 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	m_LastSize         = currentSize;
 	m_LastShaderDetail = DisplayDevice::sm_nShaderDetail;
 
-	// Bloom mip-chain depth by shader-detail tier.  More mips = wider,
-	// smoother halo at ~25% additional bandwidth per extra mip.
+	// Bloom mip-chain depth + mip[0] resolution by shader-detail tier.
+	// More mips = wider, smoother halo at ~25% additional bandwidth per extra mip.
+	// m_bFullResMip0 = true pulls mip[0] from half-res to scene-RT resolution,
+	// killing the visible "plateau" pixelation around bright sources.
+	//
+	// NOTE: HIGH/EXTREME currently use half-res mip[0] (m_bFullResMip0=false).
+	// Full-res was tried at HIGH/EXTREME but exposed sprite-billboard quad
+	// boundaries on explosion fireball sprites: the half-res chain implicitly
+	// smeared the texture-quad corners enough to hide them, full-res preserves
+	// the squared quad geometry through the bloom additive composite.  Until
+	// the underlying sprite textures are re-authored with proper radial alpha
+	// falloff (per reference_wob_texture_repair memory), keep the chain at
+	// half-res mip[0].  The full-res code path remains live for future use.
 	switch ( DisplayDevice::sm_nShaderDetail )
 	{
-	case DisplayDevice::SHADER_DETAIL_LOW:		m_nMipCount = 4; break;
-	case DisplayDevice::SHADER_DETAIL_MEDIUM:	m_nMipCount = 5; break;
-	case DisplayDevice::SHADER_DETAIL_HIGH:		m_nMipCount = 6; break;
-	case DisplayDevice::SHADER_DETAIL_EXTREME:	m_nMipCount = 7; break;
-	default:									m_nMipCount = 6; break;
+	case DisplayDevice::SHADER_DETAIL_LOW:
+		m_nMipCount    = 4;
+		m_bFullResMip0 = false;		// fillrate/VRAM budget for low-end GPUs
+		break;
+	case DisplayDevice::SHADER_DETAIL_MEDIUM:
+		m_nMipCount    = 5;
+		m_bFullResMip0 = false;
+		break;
+	case DisplayDevice::SHADER_DETAIL_HIGH:
+		m_nMipCount    = 6;
+		m_bFullResMip0 = false;		// reverted from full-res — see note above
+		break;
+	case DisplayDevice::SHADER_DETAIL_EXTREME:
+		m_nMipCount    = 7;
+		m_bFullResMip0 = false;		// reverted from full-res — see note above
+		break;
+	default:
+		m_nMipCount    = 6;
+		m_bFullResMip0 = false;
+		break;
 	}
 
 	// Clamp mip count so the smallest mip is at least 4x4 px — below that the
 	// 13-tap downsample kernel's ±2-texel reach goes out of bounds and the
 	// Karis filter loses its anti-firefly property.
+	// mipShift offsets index→shift: mip[i] = src >> (i + mipShift), so the
+	// smallest mip is src >> (nActiveMips-1 + mipShift).  When mip[0] is
+	// full-res (mipShift=0) this reaches the same physical floor a tier
+	// deeper than the half-res chain — exactly the +1 mip the switch above
+	// allocates for HIGH/EXTREME.
+	const int mipShift = m_bFullResMip0 ? 0 : 1;
 	int nActiveMips = Clamp<int>( m_nMipCount, 2, MAX_MIPS );
 	while ( nActiveMips > 2 )
 	{
-		int wMin = (int)width  >> nActiveMips;
-		int hMin = (int)height >> nActiveMips;
+		int wMin = (int)width  >> ( nActiveMips - 1 + mipShift );
+		int hMin = (int)height >> ( nActiveMips - 1 + mipShift );
 		if ( wMin >= 4 && hMin >= 4 )
 			break;
 		--nActiveMips;
@@ -246,9 +293,14 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	if ( FAILED(hr) ) { TRACE( "Bloom: Failed to create Additive PSO" ); return false; }
 
 	// --- Create bloom mip chain ---
-	// mip[0] is half-res (first downsample of scene in bright-pass), mip[i]
-	// is mip[i-1] downsampled by 2.  Each mip gets its own committed resource,
-	// RTV, and SRV staging slot — independent so we can ping between any pair.
+	// mip[0] resolution depends on tier: half-res (mipShift=1, LOW/MEDIUM) or
+	// full-res (mipShift=0, HIGH/EXTREME).  Full-res mip[0] eliminates the
+	// visible 2x2-pixel plateaus that the half-res variant produces around
+	// bright sources, because the tightest bloom contribution now matches
+	// the scene RT's Nyquist limit instead of operating at half pixel density.
+	// mip[i] = scene >> (i + mipShift); each mip gets its own committed
+	// resource, RTV, and SRV staging slot — independent so we can ping
+	// between any pair.
 	D3D12_RESOURCE_DESC rtDesc = {};
 	rtDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	rtDesc.DepthOrArraySize = 1;
@@ -265,8 +317,8 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 
 	for ( int i = 0; i < m_nMipCount; ++i )
 	{
-		int mipW = (int)width  >> (i + 1);
-		int mipH = (int)height >> (i + 1);
+		int mipW = (int)width  >> ( i + mipShift );
+		int mipH = (int)height >> ( i + mipShift );
 		if ( mipW < 1 ) mipW = 1;
 		if ( mipH < 1 ) mipH = 1;
 		m_MipSizes[i] = SizeInt( mipW, mipH );
@@ -315,9 +367,10 @@ bool DisplayEffectHDRD3D12::initBloom( DisplayDeviceD3D12 * pDevice )
 	m_bInitialized = true;
 	m_bBloomFailed = false;
 
-	TRACE( "Bloom (Karis mip chain) initialized: screen=%dx%d, mips=%d (mip0=%dx%d ... mip%d=%dx%d), scale=%.2f, threshold=%.2f",
+	TRACE( "Bloom (Karis mip chain) initialized: screen=%dx%d, mips=%d (mip0=%dx%d %s, mip%d=%dx%d), scale=%.2f, threshold=%.2f",
 		width, height, m_nMipCount,
 		m_MipSizes[0].width, m_MipSizes[0].height,
+		m_bFullResMip0 ? "FULL-RES" : "half-res",
 		m_nMipCount - 1, m_MipSizes[m_nMipCount - 1].width, m_MipSizes[m_nMipCount - 1].height,
 		m_fBloomScale, m_fBrightThreshold );
 
@@ -350,8 +403,10 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	if ( !pDev || !pDev->isCommandListOpen() )
 		return false;
 
-	// Bloom requires m_pSceneRT (created by FXAA)
-	if ( !pDev->m_bFXAAEnabled || !pDev->m_pSceneRT )
+	// Bloom requires the HDR scene RT (allocated by createFXAA).  Gates on the
+	// scene-RT flag, not the AA mode — bloom is valid regardless of which AA
+	// path runs at present (or none at all).
+	if ( !pDev->m_bSceneRTEnabled || !pDev->m_pSceneRT )
 		return true;		// silently skip — no error
 
 	if ( DisplayDevice::sm_bUseFixedFunction )
@@ -549,9 +604,10 @@ void DisplayEffectHDRD3D12::release()
 	{
 		m_pMipRTs[i].Reset();
 		m_MipSizes[i] = SizeInt( 0, 0 );
-		// RTV / SRV staging indices are intentionally NOT freed — the staging
-		// heap has no free-list and reusing the same slot across resize is
-		// part of how createFXAA / DisplayEffectHDR resize recovers cleanly.
+		// RTV / SRV indices intentionally left allocated — the resize-recovery
+		// path calls release() → re-init and expects to reuse the same slots.
+		// The destructor's freeOwnedDescriptors() returns slots to the heap
+		// when the effect is being destroyed for real (e.g. scene reload).
 	}
 
 	m_pBrightPassPSO.Reset();
@@ -567,6 +623,42 @@ void DisplayEffectHDRD3D12::release()
 
 	m_bInitialized = false;
 	m_bBloomFailed = false;
+}
+
+//---------------------------------------------------------------------------------------------------
+// Return RTV/SRV slots to the device's heaps and mark them unallocated.
+// Called from the destructor only — see ~Effect comment.  Safe to call with
+// m_pCachedDevice null (no-op).  Idempotent: a second call sees all indices
+// at UINT(-1) and does nothing.
+
+void DisplayEffectHDRD3D12::freeOwnedDescriptors()
+{
+	if ( m_pCachedDevice == NULL )
+		return;
+
+	for ( int i = 0; i < MAX_MIPS; ++i )
+	{
+		if ( m_nMipRTVIndex[i] != UINT(-1) )
+		{
+			m_pCachedDevice->m_RTVHeap.Free( m_nMipRTVIndex[i] );
+			m_nMipRTVIndex[i] = UINT(-1);
+		}
+		if ( m_nMipSRVIndex[i] != UINT(-1) )
+		{
+			m_pCachedDevice->m_SRVStagingHeap.Free( m_nMipSRVIndex[i] );
+			m_nMipSRVIndex[i] = UINT(-1);
+		}
+	}
+
+	m_pCachedDevice = NULL;
+}
+
+void DisplayEffectHDRD3D12::onDeviceShutdown()
+{
+	// Device is about to destroy its descriptor heaps — drop our slots back
+	// to it now while the heap is still valid.  freeOwnedDescriptors() nulls
+	// out m_pCachedDevice as its last step, so a later destructor no-ops.
+	freeOwnedDescriptors();
 }
 
 //---------------------------------------------------------------------------------------------------

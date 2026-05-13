@@ -315,6 +315,7 @@ void PrimitiveMaterialD3D12::release()
 	m_LightEnable = true;
 	m_nFilterMode = FILTER_ON;
 	m_bUpdateShaders = false;
+	m_bForceDepthWrite = false;
 	m_pShader = NULL;
 	m_sShader = "";
 
@@ -359,6 +360,11 @@ void PrimitiveMaterialD3D12::setShader( const char * pShader )
 {
 	m_sShader = pShader != NULL ? pShader : "";
 	m_bUpdateShaders = true;
+}
+
+void PrimitiveMaterialD3D12::setForceDepthWrite( bool bForce )
+{
+	m_bForceDepthWrite = bForce;
 }
 
 int PrimitiveMaterialD3D12::addSurface( PrimitiveSurface * pSurface,
@@ -487,6 +493,7 @@ void PrimitiveMaterialD3D12::setupBlending()
 	// Blending enum values match PSOKey blendMode: NONE=0, ALPHA=1, ALPHA_INV=2, ADDITIVE=3, ADDITIVE_INV=4
 	pDevice->m_nCurrentBlend = (UINT)m_Blending;
 	pDevice->m_bCurrentDoubleSided = m_DoubleSided;
+	pDevice->m_bCurrentForceDepthWrite = m_bForceDepthWrite;
 }
 
 bool PrimitiveMaterialD3D12::setupTextures()

@@ -287,6 +287,11 @@ void RenderContext::setDetail(float fDetail)
 	m_State.m_fDetail = Clamp(fDetail, 0.0f, 1.0f);
 }
 
+void RenderContext::setShaderOverride(const char * pShader)
+{
+	m_State.m_sShaderOverride = pShader != NULL ? pShader : "";
+}
+
 void RenderContext::setFrame(const Matrix33 & frame)
 {
 	m_State.m_Frame = frame;
