@@ -60,6 +60,9 @@
 #define IDC_EDIT6                       7055
 #define IDC_EDIT7                       7056
 #define IDC_PIXEL_SHADER                7056
+#define IDC_ROUGHNESS                   7057
+#define IDC_METALLIC                    7058
+#define IDC_AO                          7059
 #define ID_VIEW_OPTIONS                 32772
 #define ID_EDIT_RENAME                  32785
 #define ID_VIEW_REFRESH                 32787
@@ -71,7 +74,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        7004
 #define _APS_NEXT_COMMAND_VALUE         43001
-#define _APS_NEXT_CONTROL_VALUE         7056
+#define _APS_NEXT_CONTROL_VALUE         7060
 #define _APS_NEXT_SYMED_VALUE           7000
 #endif
 #endif

@@ -79,6 +79,14 @@ public:
 	// don't implement it.
 	virtual void				setForceDepthWrite( bool bForce ) {}
 
+	// Metal-rough PBR scalars.  Top-level material values; per-texel
+	// ORM map (if present) multiplies these.  Defaults are tuned so a
+	// material with no PBR maps and no authored overrides looks like
+	// "matte grey plastic" — exactly what unauthored fallback should be.
+	// Default no-op for backends that don't implement PBR; the D3D12
+	// backend overrides this and feeds CBPerMaterial.
+	virtual void				setPBRMaterial( float roughness, float metallic, float ao ) {}
+
 	virtual int					addSurface( PrimitiveSurface * pSurface, 
 									SurfaceType eType, int nIndex, int nUV, float * pParams ) = 0;
 	virtual void				removeSurface( int n ) = 0;

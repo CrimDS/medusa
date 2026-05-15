@@ -87,6 +87,15 @@ public:
 	Blending					m_Blending;
 	bool						m_DoubleSided;
 
+	// PBR (metal-rough) scalars.  Top-level material values; if an ORM
+	// texture is added to m_Textures the auto-detect in createResource()
+	// binds PBR.hlsl and these scalars get consumed in the shader.  Per-
+	// texel ORM map multiplies these.  Defaults (0.5/0/1) are a matte
+	// grey-plastic fallback so unauthored PBR materials look reasonable.
+	float						m_Roughness;
+	float						m_Metallic;
+	float						m_AO;
+
 	float						m_Fps;
 	int							m_Frames;
 

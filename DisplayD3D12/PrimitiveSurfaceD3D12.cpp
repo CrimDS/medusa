@@ -126,17 +126,36 @@ bool PrimitiveSurfaceD3D12::execute()
 			pDevice->m_CurrentMatCB.fBumpDepth = ( m_fParams[0] > 0.0f ) ? m_fParams[0] * 1.5f : 1.5f;
 		}
 		break;
+	case ORMMAP:
+		pDevice->m_CurrentMatCB.bEnableORMMap = 1;
+		break;
+	case NORMALMAP:
+		pDevice->m_CurrentMatCB.bEnableNormalMap = 1;
+		// Per-texture Y-axis convention.  m_fParams[0] == 0 (default) is
+		// OpenGL/Substance-default (+Y up); != 0 flips Y for DirectX
+		// convention.  Artists can set this in the MaterialPort texture
+		// dialog without re-exporting from their authoring tool.
+		pDevice->m_CurrentMatCB.bFlipNormalY = ( m_fParams[0] != 0.0f ) ? 1 : 0;
+		break;
 	default:
 		break;
 	}
 
-	// Determine texture slot based on type
+	// Determine texture slot based on type.
+	// Slots t3 (ORM) and t4 (NORMAL) are consumed by PBR.hlsl; Default.hlsl
+	// ignores them (root sig binds the descriptor table regardless, the
+	// shader just doesn't reference those texture objects).  Unknown types
+	// fall through to slot 0 — collides with DIFFUSE, same legacy behaviour
+	// the old switch had.  -1 means "don't bind" (used for surfaces whose
+	// type has no slot mapping yet).
 	int nTextureSlot = 0;
 	switch ( m_eType )
 	{
 	case DIFFUSE:	nTextureSlot = 0; break;
 	case LIGHTMAP:	nTextureSlot = 1; break;
 	case BUMPMAP:	nTextureSlot = 2; break;
+	case ORMMAP:	nTextureSlot = 3; break;
+	case NORMALMAP:	nTextureSlot = 4; break;
 	default:		nTextureSlot = 0; break;
 	}
 
@@ -206,10 +225,31 @@ void PrimitiveSurfaceD3D12::release()
 	// CopyDescriptorsSimple'd into shader-visible slots — those copies
 	// have already happened by the time we reach release(), so freeing
 	// the index here is safe.
+	//
+	// BUT: m_pDevice is a raw pointer that survives the device's
+	// destructor.  In MFC the property view (CPropertyView) closes AFTER
+	// the 3D scene MDI child, so by the time NodeComplexMesh2-owned
+	// surfaces release from the document teardown, m_pDevice is
+	// dangling.  Consult sm_DeviceList — same pattern as
+	// safeDeferReleaseResource — to verify the device is still live
+	// before touching m_SRVStagingHeap.  If it isn't, the heap is about
+	// to be destroyed anyway and the slot leak is irrelevant.
 	if ( m_SRVIndex != UINT(-1) && m_pDevice )
 	{
-		DisplayDeviceD3D12 * pDev = (DisplayDeviceD3D12 *)m_pDevice;
-		pDev->m_SRVStagingHeap.Free( m_SRVIndex );
+		bool bDeviceAlive = false;
+		for ( int i = 0; i < DisplayDeviceD3D12::sm_DeviceList.size(); ++i )
+		{
+			if ( DisplayDeviceD3D12::sm_DeviceList[i] == m_pDevice )
+			{
+				bDeviceAlive = true;
+				break;
+			}
+		}
+		if ( bDeviceAlive )
+		{
+			DisplayDeviceD3D12 * pDev = (DisplayDeviceD3D12 *)m_pDevice;
+			pDev->m_SRVStagingHeap.Free( m_SRVIndex );
+		}
 	}
 
 	m_bSRVCreated = false;

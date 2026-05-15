@@ -85,6 +85,14 @@ public:
 	float			specularPower() const;
 	bool			lightEnable() const;
 
+	// PBR (metal-rough).  Defaults (0.5 / 0 / 1) match an unauthored matte
+	// grey-plastic fallback so a Material with no PBR maps and no authored
+	// overrides looks reasonable when bound to the PBR shader.  Legacy
+	// materials (m_sShader empty → Default.hlsl) ignore these.
+	float			roughness() const;
+	float			metallic() const;
+	float			ao() const;
+
 	Blending		blending() const;
 	bool			doubleSided() const;
 	float			fps() const;
@@ -102,10 +110,12 @@ public:
 						float strength, float friction,
 						float width, float height );
 	void			setPass( int nPass );
-	void			setLighting( Color diffuse, Color ambient, 
-							Color emissive, Color specular, 
+	void			setLighting( Color diffuse, Color ambient,
+							Color emissive, Color specular,
 							float specularPower );
 	void			setLightEnable( bool enable );
+
+	void			setPBR( float roughness, float metallic, float ao );
 
 	void			setBlending( Blending blending );
 	void			setDoubleSided( bool doubleSided );
@@ -158,6 +168,11 @@ protected:
 	Color			m_Specular;
 	float			m_SpecularPower;
 	bool			m_LightEnable;
+
+	// PBR (metal-rough) scalars; ignored unless bound shader is PBR.hlsl.
+	float			m_Roughness;
+	float			m_Metallic;
+	float			m_AO;
 
 	Blending		m_Blending;
 	bool			m_DoubleSided;
@@ -306,6 +321,21 @@ inline float Material::specularPower() const
 inline bool Material::lightEnable() const
 {
 	return( m_LightEnable );
+}
+
+inline float Material::roughness() const
+{
+	return m_Roughness;
+}
+
+inline float Material::metallic() const
+{
+	return m_Metallic;
+}
+
+inline float Material::ao() const
+{
+	return m_AO;
 }
 
 inline Material::Blending Material::blending() const

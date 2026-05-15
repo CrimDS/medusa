@@ -93,6 +93,9 @@ public:
 	CListCtrl	m_cTextureList;
 	CString m_sShader;
 	BOOL	m_bFixedFunction;
+	float	m_Roughness;
+	float	m_Metallic;
+	float	m_AO;
 	//}}AFX_DATA
 
 // Attributes

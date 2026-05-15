@@ -45,6 +45,7 @@ public:
 	virtual void			setFilterMode( FilterMode nMode );
 	virtual void			setShader( const char * pShader );
 	virtual void			setForceDepthWrite( bool bForce );
+	virtual void			setPBRMaterial( float roughness, float metallic, float ao );
 
 	virtual int				addSurface( PrimitiveSurface * pSurface,
 								SurfaceType eType, int nIndex, int nUV, float * pParams );
@@ -79,6 +80,13 @@ public:
 	Color					m_Emissive;
 	Color					m_Specular;
 	float					m_SpecularPower;
+
+	// PBR scalars; populated by Material::createDevicePrimitives via
+	// setPBRMaterial.  Pushed into CBPerMaterial in execute() when the
+	// bound shader is recognised as PBR.
+	float					m_Roughness;
+	float					m_Metallic;
+	float					m_AO;
 	bool					m_DoubleSided;
 	bool					m_LightEnable;
 	FilterMode				m_nFilterMode;

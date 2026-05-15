@@ -49,6 +49,12 @@ BEGIN_PROPERTY_LIST( Material, Resource )
 	ADD_PROPERTY( m_Frames );
 	ADD_PROPERTY( m_sShader );
 	ADD_PROPERTY( m_Textures );
+	// PBR (metal-rough) scalars — property reflection tolerates missing
+	// keys, so legacy .prt files without these load with the defaults set
+	// in initialize() (0.5/0/1 = matte grey plastic fallback).
+	ADD_PROPERTY( m_Roughness );
+	ADD_PROPERTY( m_Metallic );
+	ADD_PROPERTY( m_AO );
 	// deprecated properties
 	ADD_PROPERTY( m_DiffuseTexture );
 	ADD_PROPERTY( m_LightMap );
@@ -126,6 +132,24 @@ bool Material::read( const InStream & input )
 		m_LightMap = NULL;
 	}
 
+	// Auto-promote to PBR shader when PBR-only maps are present and no
+	// shader was explicitly authored.  Mirrors the same heuristic in
+	// MaterialPort::createResource() so packed-asset loads and editor
+	// loads behave identically.  Reversible: remove the ORM/NORMAL maps
+	// and the material reverts to Default.hlsl on next load.
+	if ( m_sShader.length() == 0 )
+	{
+		for ( int i = 0; i < m_Textures.size(); ++i )
+		{
+			PrimitiveSurface::Type t = m_Textures[i].m_eType;
+			if ( t == PrimitiveSurface::ORMMAP || t == PrimitiveSurface::NORMALMAP )
+			{
+				m_sShader = "Shaders/PBR.hlsl";
+				break;
+			}
+		}
+	}
+
 	// Eager device-surface creation here is an optimization — it avoids a
 	// first-render hitch when many materials need surfaces created at once.
 	// BUT: when this Material::read is running on the Broker loading thread,
@@ -174,6 +198,14 @@ void Material::setLighting( Color diffuse, Color ambient, Color emissive, Color 
 void Material::setLightEnable( bool enable )
 {
 	m_LightEnable = enable;
+	m_Material = NULL;
+}
+
+void Material::setPBR( float roughness, float metallic, float ao )
+{
+	m_Roughness = roughness;
+	m_Metallic = metallic;
+	m_AO = ao;
 	m_Material = NULL;
 }
 
@@ -533,6 +565,11 @@ void Material::initialize()
 	m_SpecularPower = 0.0f;
 	m_LightEnable = true;
 
+	// PBR (metal-rough) defaults — matte grey plastic.
+	m_Roughness = 0.5f;
+	m_Metallic = 0.0f;
+	m_AO = 1.0f;
+
 	m_Fps = 15.0f;
 	m_Frames = 1;
 	m_Blending = PrimitiveMaterial::NONE;
@@ -573,6 +610,7 @@ void Material::createDevicePrimitives( RenderContext & context )
 
 	m_Material->setLightEnable( m_LightEnable );
 	m_Material->setDoubleSided( m_DoubleSided );
+	m_Material->setPBRMaterial( m_Roughness, m_Metallic, m_AO );
 	// Explicit per-material shader takes precedence; otherwise fall through
 	// to the RenderContext shader override (e.g. cloak), and if that's
 	// empty the material binds the device default shader.  The override

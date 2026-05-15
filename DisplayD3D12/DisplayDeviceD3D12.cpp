@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#include <DirectXPackedVector.h>	// XMConvertFloatToHalf for PBR IBL bake
 #include "PrimitiveFactory.h"
 #include "PrimitiveSurfaceD3D12.h"
 #include "PrimitiveMaterialD3D12.h"
@@ -147,6 +148,10 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_nCurrentExposureSRVIndex( UINT(-1) ),
 	m_nShadowMapDSVIndex( UINT(-1) ),
 	m_nShadowMapSRVStagingIndex( UINT(-1) ),
+	m_nBRDFLUTSRVStagingIndex( UINT(-1) ),
+	m_nEnvCubeSRVStagingIndex( UINT(-1) ),
+	m_bPBRIBLReady( false ),
+	m_nLastBakeTick( 0 ),
 	m_nDepthSRVIndex( UINT(-1) ),
 	m_nUploadFenceValue( 0 ),
 	m_hUploadFenceEvent( NULL ),
@@ -181,6 +186,9 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 
 	memset( m_nFenceValues, 0, sizeof(m_nFenceValues) );
 	memset( m_nAllocatorFence, 0, sizeof(m_nAllocatorFence) );
+	memset( m_vLastBakeSunDir, 0, sizeof(m_vLastBakeSunDir) );
+	memset( m_vLastBakeSunRGB, 0, sizeof(m_vLastBakeSunRGB) );
+	memset( m_vLastBakeSkyRGB, 0, sizeof(m_vLastBakeSkyRGB) );
 
 	m_mView = XMMatrixIdentity();
 	m_mProj = XMMatrixIdentity();
@@ -2306,6 +2314,13 @@ void DisplayDeviceD3D12::bindPerFrameCB()
 	// Chunk 4 — diffuse SH coefficients for IBL ambient.
 	computeDiffuseSH( m_CBPerFrame.vSHCoefs );
 
+	// PBR specular IBL — the prefiltered env cube is baked from the same
+	// procedural sky+sun model as the SH above.  Check for drift since the
+	// last bake (zone change, sun-position shift, ambient-tint change) and
+	// re-bake the cube only if needed.  LUT is environment-independent and
+	// never re-bakes.
+	maybeRebakeEnvCube();
+
 	// Chunk 5 — primary directional sun, exposed for shaders that need
 	// the raw sun (Planet.hlsl atmosphere/day-night, anything else that
 	// wants a vector and not the SH-baked irradiance).  Convention matches
@@ -2996,6 +3011,12 @@ bool DisplayDeviceD3D12::initializeD3D12()
 	// Create dedicated upload queue for loading thread texture uploads
 	initUploadQueue();
 
+	// PBR IBL bake — needs the upload queue, so run after initUploadQueue.
+	// Failure is non-fatal (PBR materials degrade to direct+diffuse-IBL
+	// only when m_bPBRIBLReady is false).
+	if ( !bakePBRIBL() )
+		TRACE( "initialize: bakePBRIBL failed — PBR materials will render without specular IBL" );
+
 	// Create post-process resources (scene RT + FXAA PSO; needs valid window size)
 	if ( m_bSceneRTEnabled )
 		createFXAA();
@@ -3259,7 +3280,896 @@ bool DisplayDeviceD3D12::createDefaultShaders()
 	m_pPassThroughLShader = getShader( "Shaders/PassThroughL.hlsl" );
 	m_pPostProcessShader = getShader( "Shaders/PostProcess.hlsl" );
 
+	// NOTE: bakePBRIBL() is NOT called here — it depends on the upload
+	// queue which is created later in initialize() (initUploadQueue).
+	// Driven from there instead.
+
 	return true;
+}
+
+//---------------------------------------------------------------------------------------------------
+// PBR IBL bake.  Generates the split-sum BRDF integration LUT (Karis 2013)
+// and the prefiltered specular environment cube from the same procedural
+// sky+sun model that drives computeDiffuseSH.
+//
+// Both textures are CPU-baked once at device init.  The env cube freezes
+// the sun position at bake time; updating the cube to track the sun as
+// the player moves between zones is a followup (would require either a
+// GPU compute path or a background-thread re-bake on zone change).  For
+// v1, "static cube" is good enough for an artist to evaluate PBR
+// authoring against — sharp sun reflections in mirror metals will track
+// the bake-time sun position, not the current scene sun.
+//
+// Costs:  BRDF LUT  = 256² R16G16_FLOAT × 1024 Hammersley samples
+//         Env cube  = 256² × 6 faces × 5 mips RGBA16F, mip k uses 2^(6+k) samples
+// Single-threaded CPU eval; expect ~150-300ms on a typical machine.
+//---------------------------------------------------------------------------------------------------
+
+namespace
+{
+	// --- Hammersley / GGX importance sampling (Karis 2013) ---
+	inline float vanDerCorpus( uint32_t bits )
+	{
+		bits = ( bits << 16u ) | ( bits >> 16u );
+		bits = ( ( bits & 0x55555555u ) << 1u ) | ( ( bits & 0xAAAAAAAAu ) >> 1u );
+		bits = ( ( bits & 0x33333333u ) << 2u ) | ( ( bits & 0xCCCCCCCCu ) >> 2u );
+		bits = ( ( bits & 0x0F0F0F0Fu ) << 4u ) | ( ( bits & 0xF0F0F0F0u ) >> 4u );
+		bits = ( ( bits & 0x00FF00FFu ) << 8u ) | ( ( bits & 0xFF00FF00u ) >> 8u );
+		return float( bits ) * 2.3283064365386963e-10f;	// / 2^32
+	}
+
+	inline void hammersley( uint32_t i, uint32_t N, float & outX, float & outY )
+	{
+		outX = float( i ) / float( N );
+		outY = vanDerCorpus( i );
+	}
+
+	// Tangent-frame GGX importance sample for normal N (assumed +Z in
+	// tangent space).  Returns the half-vector H in tangent space; caller
+	// rotates to world space if needed.
+	inline void importanceSampleGGX_tangent( float u, float v, float alpha,
+		float & Hx, float & Hy, float & Hz )
+	{
+		const float TWO_PI = 6.28318530718f;
+		float a2 = alpha * alpha;
+		float phi = TWO_PI * u;
+		float cosTheta = sqrtf( ( 1.0f - v ) / ( 1.0f + ( a2 - 1.0f ) * v ) );
+		float sinTheta = sqrtf( 1.0f - cosTheta * cosTheta );
+		Hx = sinTheta * cosf( phi );
+		Hy = sinTheta * sinf( phi );
+		Hz = cosTheta;
+	}
+
+	inline float smithG_GGX( float NdotV, float alpha )
+	{
+		float a2 = alpha * alpha;
+		float k  = a2 * 0.5f;
+		return NdotV / ( NdotV * ( 1.0f - k ) + k );
+	}
+
+	// --- Procedural environment colour for direction d (linear RGB).
+	// Same shape as computeDiffuseSH's per-sample colour: sky tint + sun fill.
+	// Captured by closure over the device's m_cAmbientLight + the current
+	// directional sun (if any).
+	struct EnvSampler
+	{
+		float skyR, skyG, skyB;
+		float sunR, sunG, sunB;
+		float sunDirX, sunDirY, sunDirZ;
+		float sunFill;
+
+		void sample( float dx, float dy, float dz, float & rOut, float & gOut, float & bOut ) const
+		{
+			float skyT = dy * 0.5f + 0.5f;		// 0=down, 1=up
+			float skyMul = 0.3f + 0.7f * skyT;
+			rOut = skyR * skyMul;
+			gOut = skyG * skyMul;
+			bOut = skyB * skyMul;
+			// Sun fill — direction toward sun is -sunDir.
+			float sunDot = dx * ( -sunDirX ) + dy * ( -sunDirY ) + dz * ( -sunDirZ );
+			if ( sunDot > 0.0f )
+			{
+				float w = sunDot * sunDot * sunFill;
+				rOut += sunR * w;
+				gOut += sunG * w;
+				bOut += sunB * w;
+			}
+		}
+	};
+
+	// Direction generation for cube face (x, y in [-1,1]).  +X / -X / +Y / -Y / +Z / -Z.
+	inline void faceDirection( int face, float u, float v, float & dx, float & dy, float & dz )
+	{
+		switch ( face )
+		{
+		case 0: dx =  1.0f; dy = -v;   dz = -u;   break;	// +X
+		case 1: dx = -1.0f; dy = -v;   dz =  u;   break;	// -X
+		case 2: dx =  u;    dy =  1.0f; dz =  v;  break;	// +Y
+		case 3: dx =  u;    dy = -1.0f; dz = -v;  break;	// -Y
+		case 4: dx =  u;    dy = -v;   dz =  1.0f; break;	// +Z
+		default:dx = -u;    dy = -v;   dz = -1.0f; break;	// -Z
+		}
+		float invLen = 1.0f / sqrtf( dx * dx + dy * dy + dz * dz );
+		dx *= invLen; dy *= invLen; dz *= invLen;
+	}
+}
+
+bool DisplayDeviceD3D12::bakePBRIBL()
+{
+	m_bPBRIBLReady = false;
+
+	if ( !m_pDevice || !m_pUploadCommandList || !m_pUploadAllocator )
+	{
+		TRACE( "bakePBRIBL: device or upload command list not ready" );
+		return false;
+	}
+
+	using DirectX::PackedVector::XMConvertFloatToHalf;
+
+	const UINT LUT_SIZE = 256;
+	const UINT CUBE_FACE_SIZE = 256;
+	const UINT CUBE_MIP_COUNT = 5;
+	const UINT BRDF_LUT_SAMPLES = 1024;
+
+	//-------------------------------------------------------------------------
+	// 1) CPU-bake BRDF LUT (Karis split-sum).  Output = R16G16_FLOAT, X = NdotV,
+	//    Y = roughness.  Each pixel is (A, B) where the final IBL response is
+	//    F0 * A + B.
+	//-------------------------------------------------------------------------
+	std::vector< uint16_t > brdfData( LUT_SIZE * LUT_SIZE * 2 );
+	for ( UINT py = 0; py < LUT_SIZE; ++py )
+	{
+		float roughness = (float)( py + 0.5f ) / (float)LUT_SIZE;
+		float alpha = roughness * roughness;
+		for ( UINT px = 0; px < LUT_SIZE; ++px )
+		{
+			float NdotV = (float)( px + 0.5f ) / (float)LUT_SIZE;
+			NdotV = Max( NdotV, 1e-3f );
+
+			// View vector in tangent space (Z-up)
+			float Vx = sqrtf( 1.0f - NdotV * NdotV );
+			float Vy = 0.0f;
+			float Vz = NdotV;
+
+			float A = 0.0f, B = 0.0f;
+			for ( UINT i = 0; i < BRDF_LUT_SAMPLES; ++i )
+			{
+				float u, v;
+				hammersley( i, BRDF_LUT_SAMPLES, u, v );
+
+				float Hx, Hy, Hz;
+				importanceSampleGGX_tangent( u, v, alpha, Hx, Hy, Hz );
+
+				float VdotH = Vx * Hx + Vy * Hy + Vz * Hz;
+				// L = 2(V·H)H - V
+				float Lx = 2.0f * VdotH * Hx - Vx;
+				float Ly = 2.0f * VdotH * Hy - Vy;
+				float Lz = 2.0f * VdotH * Hz - Vz;
+
+				float NdotL = Max( Lz, 0.0f );
+				float NdotH = Max( Hz, 0.0f );
+				float VdotHc = Max( VdotH, 0.0f );
+
+				if ( NdotL > 0.0f )
+				{
+					float G = smithG_GGX( NdotV, alpha ) * smithG_GGX( NdotL, alpha );
+					float Gvis = G * VdotHc / Max( NdotH * NdotV, 1e-6f );
+					float Fc = powf( 1.0f - VdotHc, 5.0f );
+					A += ( 1.0f - Fc ) * Gvis;
+					B += Fc * Gvis;
+				}
+			}
+			A /= (float)BRDF_LUT_SAMPLES;
+			B /= (float)BRDF_LUT_SAMPLES;
+
+			UINT idx = ( py * LUT_SIZE + px ) * 2;
+			brdfData[ idx + 0 ] = XMConvertFloatToHalf( A );
+			brdfData[ idx + 1 ] = XMConvertFloatToHalf( B );
+		}
+	}
+
+	//-------------------------------------------------------------------------
+	// 2) CPU-bake prefiltered env cube.  Sun direction frozen at bake time —
+	//    grab the first directional light if present, else +Y-down default.
+	//-------------------------------------------------------------------------
+	EnvSampler env = {};
+	{
+		float inv = 1.0f / 255.0f;
+		env.skyR = srgbToLinear( m_cAmbientLight.m_R * inv );
+		env.skyG = srgbToLinear( m_cAmbientLight.m_G * inv );
+		env.skyB = srgbToLinear( m_cAmbientLight.m_B * inv );
+
+		env.sunDirX = 0.0f; env.sunDirY = -1.0f; env.sunDirZ = 0.0f;
+		env.sunR = 0.0f; env.sunG = 0.0f; env.sunB = 0.0f;
+		for ( auto it = m_Lights.begin(); it != m_Lights.end(); ++it )
+		{
+			const LightInfo & l = it->second;
+			if ( l.type == 3 /*directional*/ )
+			{
+				env.sunDirX = l.dirX; env.sunDirY = l.dirY; env.sunDirZ = l.dirZ;
+				env.sunR = srgbToLinear( l.r );
+				env.sunG = srgbToLinear( l.g );
+				env.sunB = srgbToLinear( l.b );
+				break;
+			}
+		}
+		env.sunFill = 1.0f;	// stronger here than diffuse SH so sun shows up in spec
+	}
+
+	// Per-face, per-mip CPU data.  Tightly packed R G B A (half) per pixel.
+	struct CubeMipData
+	{
+		UINT size;
+		std::vector< uint16_t > pixels;	// size*size*4 halves
+	};
+	struct CubeFaceData
+	{
+		CubeMipData mips[ CUBE_MIP_COUNT ];
+	};
+	CubeFaceData faces[ 6 ];
+
+	for ( int face = 0; face < 6; ++face )
+	{
+		for ( UINT mip = 0; mip < CUBE_MIP_COUNT; ++mip )
+		{
+			UINT mipSize = CUBE_FACE_SIZE >> mip;
+			if ( mipSize < 1 ) mipSize = 1;
+			faces[ face ].mips[ mip ].size = mipSize;
+			faces[ face ].mips[ mip ].pixels.resize( (size_t)mipSize * mipSize * 4 );
+
+			float roughness = (float)mip / (float)( CUBE_MIP_COUNT - 1 );
+			float alpha = roughness * roughness;
+
+			// Sample count grows with mip — mirror level needs few, rough levels more
+			UINT sampleCount;
+			if ( mip == 0 )       sampleCount = 1;
+			else if ( mip == 1 )  sampleCount = 32;
+			else if ( mip == 2 )  sampleCount = 64;
+			else if ( mip == 3 )  sampleCount = 128;
+			else                  sampleCount = 256;
+
+			for ( UINT py = 0; py < mipSize; ++py )
+			{
+				for ( UINT px = 0; px < mipSize; ++px )
+				{
+					float u = ( ( (float)px + 0.5f ) / (float)mipSize ) * 2.0f - 1.0f;
+					float v = ( ( (float)py + 0.5f ) / (float)mipSize ) * 2.0f - 1.0f;
+
+					float Nx, Ny, Nz;
+					faceDirection( face, u, v, Nx, Ny, Nz );
+
+					float colR = 0.0f, colG = 0.0f, colB = 0.0f;
+
+					if ( mip == 0 )
+					{
+						// Mirror level: just sample the environment in direction N.
+						env.sample( Nx, Ny, Nz, colR, colG, colB );
+					}
+					else
+					{
+						// Build a tangent basis around N to rotate tangent-space
+						// half-vectors into world space.
+						float upX = ( fabsf( Nz ) < 0.999f ) ? 0.0f : 1.0f;
+						float upY = ( fabsf( Nz ) < 0.999f ) ? 0.0f : 0.0f;
+						float upZ = ( fabsf( Nz ) < 0.999f ) ? 1.0f : 0.0f;
+						// tangent T = normalize(cross(up, N))
+						float Tx = upY * Nz - upZ * Ny;
+						float Ty = upZ * Nx - upX * Nz;
+						float Tz = upX * Ny - upY * Nx;
+						float tLen = 1.0f / sqrtf( Tx * Tx + Ty * Ty + Tz * Tz );
+						Tx *= tLen; Ty *= tLen; Tz *= tLen;
+						// bitangent B = cross(N, T)
+						float Bx = Ny * Tz - Nz * Ty;
+						float By = Nz * Tx - Nx * Tz;
+						float Bz = Nx * Ty - Ny * Tx;
+
+						float totalWeight = 0.0f;
+						for ( UINT s = 0; s < sampleCount; ++s )
+						{
+							float xi_u, xi_v;
+							hammersley( s, sampleCount, xi_u, xi_v );
+
+							float Hx_t, Hy_t, Hz_t;
+							importanceSampleGGX_tangent( xi_u, xi_v, alpha, Hx_t, Hy_t, Hz_t );
+
+							// Rotate H into world space using TBN basis
+							float Hx = Hx_t * Tx + Hy_t * Bx + Hz_t * Nx;
+							float Hy = Hx_t * Ty + Hy_t * By + Hz_t * Ny;
+							float Hz = Hx_t * Tz + Hy_t * Bz + Hz_t * Nz;
+
+							// Assume V = N: L = 2(N·H)H - N
+							float NdotH = Nx * Hx + Ny * Hy + Nz * Hz;
+							float Lx = 2.0f * NdotH * Hx - Nx;
+							float Ly = 2.0f * NdotH * Hy - Ny;
+							float Lz = 2.0f * NdotH * Hz - Nz;
+
+							float NdotL = Nx * Lx + Ny * Ly + Nz * Lz;
+							if ( NdotL > 0.0f )
+							{
+								float r, g, b;
+								env.sample( Lx, Ly, Lz, r, g, b );
+								colR += r * NdotL;
+								colG += g * NdotL;
+								colB += b * NdotL;
+								totalWeight += NdotL;
+							}
+						}
+						if ( totalWeight > 0.0f )
+						{
+							colR /= totalWeight;
+							colG /= totalWeight;
+							colB /= totalWeight;
+						}
+					}
+
+					UINT idx = ( py * mipSize + px ) * 4;
+					faces[ face ].mips[ mip ].pixels[ idx + 0 ] = XMConvertFloatToHalf( colR );
+					faces[ face ].mips[ mip ].pixels[ idx + 1 ] = XMConvertFloatToHalf( colG );
+					faces[ face ].mips[ mip ].pixels[ idx + 2 ] = XMConvertFloatToHalf( colB );
+					faces[ face ].mips[ mip ].pixels[ idx + 3 ] = XMConvertFloatToHalf( 1.0f );
+				}
+			}
+		}
+	}
+
+	//-------------------------------------------------------------------------
+	// 3) Create the GPU resources and upload.  Pattern mirrors
+	//    immediateTextureUpload but bundled into one CL submission for
+	//    BRDF LUT + 6 cube faces × 5 mips = 31 subresources.
+	//-------------------------------------------------------------------------
+
+	D3D12_HEAP_PROPERTIES defaultHeap = {};
+	defaultHeap.Type = D3D12_HEAP_TYPE_DEFAULT;
+	D3D12_HEAP_PROPERTIES uploadHeap = {};
+	uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+	// LUT texture.
+	D3D12_RESOURCE_DESC lutDesc = {};
+	lutDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	lutDesc.Width = LUT_SIZE;
+	lutDesc.Height = LUT_SIZE;
+	lutDesc.DepthOrArraySize = 1;
+	lutDesc.MipLevels = 1;
+	lutDesc.Format = DXGI_FORMAT_R16G16_FLOAT;
+	lutDesc.SampleDesc.Count = 1;
+	if ( FAILED( m_pDevice->CreateCommittedResource( &defaultHeap, D3D12_HEAP_FLAG_NONE,
+		&lutDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_pBRDFLUT) ) ) )
+	{
+		TRACE( "bakePBRIBL: failed to create BRDF LUT texture" );
+		return false;
+	}
+
+	// Cube texture (6 array slices, mip chain).
+	D3D12_RESOURCE_DESC cubeDesc = {};
+	cubeDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	cubeDesc.Width = CUBE_FACE_SIZE;
+	cubeDesc.Height = CUBE_FACE_SIZE;
+	cubeDesc.DepthOrArraySize = 6;
+	cubeDesc.MipLevels = (UINT16)CUBE_MIP_COUNT;
+	cubeDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+	cubeDesc.SampleDesc.Count = 1;
+	if ( FAILED( m_pDevice->CreateCommittedResource( &defaultHeap, D3D12_HEAP_FLAG_NONE,
+		&cubeDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_pEnvCube) ) ) )
+	{
+		TRACE( "bakePBRIBL: failed to create env cube texture" );
+		m_pBRDFLUT.Reset();
+		return false;
+	}
+
+	// Calculate total upload buffer size — sum of all subresource footprints,
+	// each aligned up to D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT.
+	UINT64 totalUpload = 0;
+	{
+		UINT64 sz = 0;
+		m_pDevice->GetCopyableFootprints( &lutDesc, 0, 1, 0, nullptr, nullptr, nullptr, &sz );
+		totalUpload += ( sz + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1 )
+			& ~(UINT64)( D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1 );
+
+		for ( UINT face = 0; face < 6; ++face )
+		{
+			for ( UINT mip = 0; mip < CUBE_MIP_COUNT; ++mip )
+			{
+				UINT sub = face * CUBE_MIP_COUNT + mip;
+				m_pDevice->GetCopyableFootprints( &cubeDesc, sub, 1, 0, nullptr, nullptr, nullptr, &sz );
+				totalUpload += ( sz + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1 )
+					& ~(UINT64)( D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1 );
+			}
+		}
+	}
+
+	D3D12_RESOURCE_DESC bufDesc = {};
+	bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	bufDesc.Width = totalUpload;
+	bufDesc.Height = 1;
+	bufDesc.DepthOrArraySize = 1;
+	bufDesc.MipLevels = 1;
+	bufDesc.SampleDesc.Count = 1;
+	bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+	ComPtr<ID3D12Resource> uploadBuf;
+	if ( FAILED( m_pDevice->CreateCommittedResource( &uploadHeap, D3D12_HEAP_FLAG_NONE,
+		&bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuf) ) ) )
+	{
+		TRACE( "bakePBRIBL: failed to create upload buffer" );
+		m_pBRDFLUT.Reset();
+		m_pEnvCube.Reset();
+		return false;
+	}
+
+	byte * pUploadBase = nullptr;
+	uploadBuf->Map( 0, nullptr, (void **)&pUploadBase );
+
+	AutoLock uploadLock( &m_UploadCS );
+	if ( m_pUploadFence->GetCompletedValue() < m_nUploadFenceValue )
+	{
+		m_pUploadFence->SetEventOnCompletion( m_nUploadFenceValue, m_hUploadFenceEvent );
+		WaitForSingleObject( m_hUploadFenceEvent, 10000 );
+	}
+	m_pUploadAllocator->Reset();
+	m_pUploadCommandList->Reset( m_pUploadAllocator.Get(), nullptr );
+
+	UINT64 offset = 0;
+
+	// Helper: place a subresource's pixel data into the upload buffer
+	// (respecting row pitch padding) and emit a CopyTextureRegion command.
+	auto placeAndCopy = [ & ](
+		ID3D12Resource * pTexture,
+		const D3D12_RESOURCE_DESC & texDesc,
+		UINT subresourceIndex,
+		const byte * pSrcData,
+		UINT srcRowPitch ) -> bool
+	{
+		offset = ( offset + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1 )
+			& ~(UINT64)( D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1 );
+
+		D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+		UINT numRows = 0;
+		UINT64 rowSizeInBytes = 0;
+		UINT64 subSize = 0;
+		m_pDevice->GetCopyableFootprints( &texDesc, subresourceIndex, 1, offset,
+			&footprint, &numRows, &rowSizeInBytes, &subSize );
+
+		byte * pDst = pUploadBase + footprint.Offset;
+		for ( UINT row = 0; row < numRows; ++row )
+		{
+			UINT copyBytes = (UINT)rowSizeInBytes < srcRowPitch ? (UINT)rowSizeInBytes : srcRowPitch;
+			memcpy( pDst + row * footprint.Footprint.RowPitch,
+				pSrcData + row * srcRowPitch, copyBytes );
+		}
+
+		D3D12_TEXTURE_COPY_LOCATION dst = {};
+		dst.pResource = pTexture;
+		dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+		dst.SubresourceIndex = subresourceIndex;
+
+		D3D12_TEXTURE_COPY_LOCATION src = {};
+		src.pResource = uploadBuf.Get();
+		src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+		src.PlacedFootprint = footprint;
+
+		m_pUploadCommandList->CopyTextureRegion( &dst, 0, 0, 0, &src, nullptr );
+
+		offset = footprint.Offset + subSize;
+		return true;
+	};
+
+	// LUT
+	placeAndCopy( m_pBRDFLUT.Get(), lutDesc, 0,
+		reinterpret_cast<const byte *>( brdfData.data() ),
+		LUT_SIZE * 2 * sizeof( uint16_t ) );
+
+	// Env cube — D3D12 array layout: subresource = mip + slice * mipCount
+	// (Mips contiguous within an array slice).
+	for ( UINT face = 0; face < 6; ++face )
+	{
+		for ( UINT mip = 0; mip < CUBE_MIP_COUNT; ++mip )
+		{
+			UINT mipSize = faces[ face ].mips[ mip ].size;
+			UINT subresourceIndex = mip + face * CUBE_MIP_COUNT;
+			placeAndCopy( m_pEnvCube.Get(), cubeDesc, subresourceIndex,
+				reinterpret_cast<const byte *>( faces[ face ].mips[ mip ].pixels.data() ),
+				mipSize * 4 * sizeof( uint16_t ) );
+		}
+	}
+
+	uploadBuf->Unmap( 0, nullptr );
+
+	// COPY queues can't issue barriers; resources decay to COMMON, which
+	// promotes to PSR on first sample.  Same pattern as immediateTextureUpload.
+	m_pUploadCommandList->Close();
+	ID3D12CommandList * ppLists[] = { m_pUploadCommandList.Get() };
+	m_pUploadQueue->ExecuteCommandLists( 1, ppLists );
+
+	m_nUploadFenceValue++;
+	m_pUploadQueue->Signal( m_pUploadFence.Get(), m_nUploadFenceValue );
+	if ( m_pUploadFence->GetCompletedValue() < m_nUploadFenceValue )
+	{
+		m_pUploadFence->SetEventOnCompletion( m_nUploadFenceValue, m_hUploadFenceEvent );
+		WaitForSingleObject( m_hUploadFenceEvent, 10000 );
+	}
+
+	//-------------------------------------------------------------------------
+	// 4) Create SRVs in the staging heap.
+	//-------------------------------------------------------------------------
+	m_nBRDFLUTSRVStagingIndex = m_SRVStagingHeap.Allocate();
+	m_nEnvCubeSRVStagingIndex = m_SRVStagingHeap.Allocate();
+	if ( m_nBRDFLUTSRVStagingIndex == UINT(-1) || m_nEnvCubeSRVStagingIndex == UINT(-1) )
+	{
+		TRACE( "bakePBRIBL: failed to allocate SRV staging slots" );
+		if ( m_nBRDFLUTSRVStagingIndex != UINT(-1) ) m_SRVStagingHeap.Free( m_nBRDFLUTSRVStagingIndex );
+		if ( m_nEnvCubeSRVStagingIndex != UINT(-1) ) m_SRVStagingHeap.Free( m_nEnvCubeSRVStagingIndex );
+		m_nBRDFLUTSRVStagingIndex = UINT(-1);
+		m_nEnvCubeSRVStagingIndex = UINT(-1);
+		m_pBRDFLUT.Reset();
+		m_pEnvCube.Reset();
+		return false;
+	}
+
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Format = DXGI_FORMAT_R16G16_FLOAT;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.Texture2D.MipLevels = 1;
+		m_pDevice->CreateShaderResourceView( m_pBRDFLUT.Get(), &srvDesc,
+			m_SRVStagingHeap.GetCPUHandle( m_nBRDFLUTSRVStagingIndex ) );
+	}
+	{
+		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+		srvDesc.TextureCube.MipLevels = CUBE_MIP_COUNT;
+		m_pDevice->CreateShaderResourceView( m_pEnvCube.Get(), &srvDesc,
+			m_SRVStagingHeap.GetCPUHandle( m_nEnvCubeSRVStagingIndex ) );
+	}
+
+	// Remember what we baked so maybeRebakeEnvCube can detect drift later.
+	m_vLastBakeSunDir[0] = env.sunDirX;
+	m_vLastBakeSunDir[1] = env.sunDirY;
+	m_vLastBakeSunDir[2] = env.sunDirZ;
+	m_vLastBakeSunRGB[0] = env.sunR;
+	m_vLastBakeSunRGB[1] = env.sunG;
+	m_vLastBakeSunRGB[2] = env.sunB;
+	m_vLastBakeSkyRGB[0] = env.skyR;
+	m_vLastBakeSkyRGB[1] = env.skyG;
+	m_vLastBakeSkyRGB[2] = env.skyB;
+	m_nLastBakeTick = GetTickCount();
+
+	m_bPBRIBLReady = true;
+	TRACE( "bakePBRIBL: baked %ux%u BRDF LUT + %ux%ux6 RGBA16F env cube (%u mips)",
+		LUT_SIZE, LUT_SIZE, CUBE_FACE_SIZE, CUBE_FACE_SIZE, CUBE_MIP_COUNT );
+	return true;
+}
+
+//---------------------------------------------------------------------------------------------------
+// Re-bake just the prefiltered env cube (LUT is environment-independent
+// and never re-bakes).  Triggered from maybeRebakeEnvCube() when the sun
+// direction or sky colour has drifted past threshold since the last bake
+// — typically on zone changes, but also covers time-of-day / nebula-tint
+// shifts within a zone.
+//
+// Reuses the existing m_pEnvCube resource: bakes new CPU data, re-uploads
+// to the same texture, waits for GPU idle before the upload to avoid
+// overwriting pixel data that an in-flight frame is sampling.  No SRV
+// descriptor churn — slot t6 in any material's slab still points at the
+// same resource, the resource's pixel contents just changed.
+//
+// Cost: ~150-300ms CPU (single-threaded sample loop) + GPU upload.  Runs
+// synchronously from beginScene — visible as a one-frame hitch on the
+// zone-change frame.  Backgrounding the CPU bake on a worker is the right
+// followup if the hitch is noticeable in practice.
+//---------------------------------------------------------------------------------------------------
+bool DisplayDeviceD3D12::rebakeEnvCubeOnly()
+{
+	if ( !m_bPBRIBLReady || !m_pEnvCube || !m_pUploadCommandList || !m_pUploadAllocator )
+		return false;
+
+	using DirectX::PackedVector::XMConvertFloatToHalf;
+
+	const UINT CUBE_FACE_SIZE = 256;
+	const UINT CUBE_MIP_COUNT = 5;
+
+	// Snapshot the live environment from the current m_Lights + m_cAmbientLight.
+	EnvSampler env = {};
+	{
+		float inv = 1.0f / 255.0f;
+		env.skyR = srgbToLinear( m_cAmbientLight.m_R * inv );
+		env.skyG = srgbToLinear( m_cAmbientLight.m_G * inv );
+		env.skyB = srgbToLinear( m_cAmbientLight.m_B * inv );
+
+		env.sunDirX = 0.0f; env.sunDirY = -1.0f; env.sunDirZ = 0.0f;
+		env.sunR = 0.0f; env.sunG = 0.0f; env.sunB = 0.0f;
+		for ( auto it = m_Lights.begin(); it != m_Lights.end(); ++it )
+		{
+			const LightInfo & l = it->second;
+			if ( l.type == 3 /*directional*/ )
+			{
+				env.sunDirX = l.dirX; env.sunDirY = l.dirY; env.sunDirZ = l.dirZ;
+				env.sunR = srgbToLinear( l.r );
+				env.sunG = srgbToLinear( l.g );
+				env.sunB = srgbToLinear( l.b );
+				break;
+			}
+		}
+		env.sunFill = 1.0f;
+	}
+
+	// CPU bake the cube.  Same loop as in bakePBRIBL.
+	struct CubeMipData { UINT size; std::vector< uint16_t > pixels; };
+	struct CubeFaceData { CubeMipData mips[5]; };
+	CubeFaceData faces[6];
+	for ( int face = 0; face < 6; ++face )
+	{
+		for ( UINT mip = 0; mip < CUBE_MIP_COUNT; ++mip )
+		{
+			UINT mipSize = CUBE_FACE_SIZE >> mip;
+			if ( mipSize < 1 ) mipSize = 1;
+			faces[ face ].mips[ mip ].size = mipSize;
+			faces[ face ].mips[ mip ].pixels.resize( (size_t)mipSize * mipSize * 4 );
+
+			float roughness = (float)mip / (float)( CUBE_MIP_COUNT - 1 );
+			float alpha = roughness * roughness;
+			UINT sampleCount = ( mip == 0 ) ? 1u : ( mip == 1 ? 32u : ( mip == 2 ? 64u : ( mip == 3 ? 128u : 256u ) ) );
+
+			for ( UINT py = 0; py < mipSize; ++py )
+			{
+				for ( UINT px = 0; px < mipSize; ++px )
+				{
+					float u = ( ( (float)px + 0.5f ) / (float)mipSize ) * 2.0f - 1.0f;
+					float v = ( ( (float)py + 0.5f ) / (float)mipSize ) * 2.0f - 1.0f;
+
+					float Nx, Ny, Nz;
+					faceDirection( face, u, v, Nx, Ny, Nz );
+
+					float colR = 0.0f, colG = 0.0f, colB = 0.0f;
+					if ( mip == 0 )
+					{
+						env.sample( Nx, Ny, Nz, colR, colG, colB );
+					}
+					else
+					{
+						float upX = ( fabsf( Nz ) < 0.999f ) ? 0.0f : 1.0f;
+						float upY = 0.0f;
+						float upZ = ( fabsf( Nz ) < 0.999f ) ? 1.0f : 0.0f;
+						float Tx = upY * Nz - upZ * Ny;
+						float Ty = upZ * Nx - upX * Nz;
+						float Tz = upX * Ny - upY * Nx;
+						float tLen = 1.0f / sqrtf( Tx * Tx + Ty * Ty + Tz * Tz );
+						Tx *= tLen; Ty *= tLen; Tz *= tLen;
+						float Bx = Ny * Tz - Nz * Ty;
+						float By = Nz * Tx - Nx * Tz;
+						float Bz = Nx * Ty - Ny * Tx;
+
+						float totalWeight = 0.0f;
+						for ( UINT s = 0; s < sampleCount; ++s )
+						{
+							float xi_u, xi_v;
+							hammersley( s, sampleCount, xi_u, xi_v );
+
+							float Hx_t, Hy_t, Hz_t;
+							importanceSampleGGX_tangent( xi_u, xi_v, alpha, Hx_t, Hy_t, Hz_t );
+
+							float Hx = Hx_t * Tx + Hy_t * Bx + Hz_t * Nx;
+							float Hy = Hx_t * Ty + Hy_t * By + Hz_t * Ny;
+							float Hz = Hx_t * Tz + Hy_t * Bz + Hz_t * Nz;
+
+							float NdotH = Nx * Hx + Ny * Hy + Nz * Hz;
+							float Lx = 2.0f * NdotH * Hx - Nx;
+							float Ly = 2.0f * NdotH * Hy - Ny;
+							float Lz = 2.0f * NdotH * Hz - Nz;
+
+							float NdotL = Nx * Lx + Ny * Ly + Nz * Lz;
+							if ( NdotL > 0.0f )
+							{
+								float r, g, b;
+								env.sample( Lx, Ly, Lz, r, g, b );
+								colR += r * NdotL;
+								colG += g * NdotL;
+								colB += b * NdotL;
+								totalWeight += NdotL;
+							}
+						}
+						if ( totalWeight > 0.0f )
+						{
+							colR /= totalWeight;
+							colG /= totalWeight;
+							colB /= totalWeight;
+						}
+					}
+
+					UINT idx = ( py * mipSize + px ) * 4;
+					faces[ face ].mips[ mip ].pixels[ idx + 0 ] = XMConvertFloatToHalf( colR );
+					faces[ face ].mips[ mip ].pixels[ idx + 1 ] = XMConvertFloatToHalf( colG );
+					faces[ face ].mips[ mip ].pixels[ idx + 2 ] = XMConvertFloatToHalf( colB );
+					faces[ face ].mips[ mip ].pixels[ idx + 3 ] = XMConvertFloatToHalf( 1.0f );
+				}
+			}
+		}
+	}
+
+	// Wait for any in-flight render frame to finish using the existing
+	// cube before we overwrite its pixel data.  Without this the GPU may
+	// be mid-sample on the old cube when the COPY queue writes the new
+	// one — visible as torn reflections for one frame.
+	waitForGPU();
+
+	// Build an upload buffer sized for all 30 subresources (6 faces × 5 mips).
+	D3D12_RESOURCE_DESC cubeDesc = m_pEnvCube->GetDesc();
+
+	UINT64 totalUpload = 0;
+	for ( UINT face = 0; face < 6; ++face )
+	{
+		for ( UINT mip = 0; mip < CUBE_MIP_COUNT; ++mip )
+		{
+			UINT sub = mip + face * CUBE_MIP_COUNT;
+			UINT64 sz = 0;
+			m_pDevice->GetCopyableFootprints( &cubeDesc, sub, 1, 0, nullptr, nullptr, nullptr, &sz );
+			totalUpload += ( sz + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1 )
+				& ~(UINT64)( D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1 );
+		}
+	}
+
+	D3D12_HEAP_PROPERTIES uploadHeap = {};
+	uploadHeap.Type = D3D12_HEAP_TYPE_UPLOAD;
+	D3D12_RESOURCE_DESC bufDesc = {};
+	bufDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	bufDesc.Width = totalUpload;
+	bufDesc.Height = 1;
+	bufDesc.DepthOrArraySize = 1;
+	bufDesc.MipLevels = 1;
+	bufDesc.SampleDesc.Count = 1;
+	bufDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+	ComPtr<ID3D12Resource> uploadBuf;
+	if ( FAILED( m_pDevice->CreateCommittedResource( &uploadHeap, D3D12_HEAP_FLAG_NONE,
+		&bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuf) ) ) )
+	{
+		TRACE( "rebakeEnvCubeOnly: failed to create upload buffer" );
+		return false;
+	}
+
+	byte * pUploadBase = nullptr;
+	uploadBuf->Map( 0, nullptr, (void **)&pUploadBase );
+
+	AutoLock uploadLock( &m_UploadCS );
+	if ( m_pUploadFence->GetCompletedValue() < m_nUploadFenceValue )
+	{
+		m_pUploadFence->SetEventOnCompletion( m_nUploadFenceValue, m_hUploadFenceEvent );
+		WaitForSingleObject( m_hUploadFenceEvent, 10000 );
+	}
+	m_pUploadAllocator->Reset();
+	m_pUploadCommandList->Reset( m_pUploadAllocator.Get(), nullptr );
+
+	UINT64 offset = 0;
+	for ( UINT face = 0; face < 6; ++face )
+	{
+		for ( UINT mip = 0; mip < CUBE_MIP_COUNT; ++mip )
+		{
+			UINT mipSize = faces[ face ].mips[ mip ].size;
+			UINT sub = mip + face * CUBE_MIP_COUNT;
+
+			offset = ( offset + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1 )
+				& ~(UINT64)( D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1 );
+
+			D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+			UINT numRows = 0;
+			UINT64 rowSizeInBytes = 0;
+			UINT64 subSize = 0;
+			m_pDevice->GetCopyableFootprints( &cubeDesc, sub, 1, offset,
+				&footprint, &numRows, &rowSizeInBytes, &subSize );
+
+			const byte * pSrcData = reinterpret_cast<const byte *>( faces[ face ].mips[ mip ].pixels.data() );
+			UINT srcRowPitch = mipSize * 4 * sizeof( uint16_t );
+			byte * pDst = pUploadBase + footprint.Offset;
+			for ( UINT row = 0; row < numRows; ++row )
+			{
+				UINT copyBytes = (UINT)rowSizeInBytes < srcRowPitch ? (UINT)rowSizeInBytes : srcRowPitch;
+				memcpy( pDst + row * footprint.Footprint.RowPitch,
+					pSrcData + row * srcRowPitch, copyBytes );
+			}
+
+			D3D12_TEXTURE_COPY_LOCATION dst = {};
+			dst.pResource = m_pEnvCube.Get();
+			dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+			dst.SubresourceIndex = sub;
+
+			D3D12_TEXTURE_COPY_LOCATION src = {};
+			src.pResource = uploadBuf.Get();
+			src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+			src.PlacedFootprint = footprint;
+
+			m_pUploadCommandList->CopyTextureRegion( &dst, 0, 0, 0, &src, nullptr );
+
+			offset = footprint.Offset + subSize;
+		}
+	}
+
+	uploadBuf->Unmap( 0, nullptr );
+
+	m_pUploadCommandList->Close();
+	ID3D12CommandList * ppLists[] = { m_pUploadCommandList.Get() };
+	m_pUploadQueue->ExecuteCommandLists( 1, ppLists );
+
+	m_nUploadFenceValue++;
+	m_pUploadQueue->Signal( m_pUploadFence.Get(), m_nUploadFenceValue );
+	if ( m_pUploadFence->GetCompletedValue() < m_nUploadFenceValue )
+	{
+		m_pUploadFence->SetEventOnCompletion( m_nUploadFenceValue, m_hUploadFenceEvent );
+		WaitForSingleObject( m_hUploadFenceEvent, 10000 );
+	}
+
+	// Update bake state — drift comparisons key off these.
+	m_vLastBakeSunDir[0] = env.sunDirX;
+	m_vLastBakeSunDir[1] = env.sunDirY;
+	m_vLastBakeSunDir[2] = env.sunDirZ;
+	m_vLastBakeSunRGB[0] = env.sunR;
+	m_vLastBakeSunRGB[1] = env.sunG;
+	m_vLastBakeSunRGB[2] = env.sunB;
+	m_vLastBakeSkyRGB[0] = env.skyR;
+	m_vLastBakeSkyRGB[1] = env.skyG;
+	m_vLastBakeSkyRGB[2] = env.skyB;
+	m_nLastBakeTick = GetTickCount();
+
+	return true;
+}
+
+//---------------------------------------------------------------------------------------------------
+// Called from beginScene right after computeDiffuseSH.  Decides whether
+// the env cube has drifted enough from the last bake to warrant a re-bake,
+// and throttles re-bake frequency so transitions don't trigger one per
+// frame.
+//
+// Drift threshold: sun direction dot product < 0.95 (~18°) OR sun colour /
+// sky colour delta > 0.1 per channel.  Both are conservative — small
+// drifts produce indistinguishable env cubes and aren't worth the hitch.
+// Throttle: at least 2 seconds between rebakes.
+//---------------------------------------------------------------------------------------------------
+void DisplayDeviceD3D12::maybeRebakeEnvCube()
+{
+	if ( !m_bPBRIBLReady )
+		return;
+	if ( GetTickCount() - m_nLastBakeTick < 2000 )
+		return;     // throttle
+
+	// Compute current sun + sky.  Same procedural-env interpretation as
+	// bakePBRIBL / rebakeEnvCubeOnly — keep these three in sync.
+	float curSunDirX = 0.0f, curSunDirY = -1.0f, curSunDirZ = 0.0f;
+	float curSunR = 0.0f, curSunG = 0.0f, curSunB = 0.0f;
+	for ( auto it = m_Lights.begin(); it != m_Lights.end(); ++it )
+	{
+		const LightInfo & l = it->second;
+		if ( l.type == 3 /*directional*/ )
+		{
+			curSunDirX = l.dirX; curSunDirY = l.dirY; curSunDirZ = l.dirZ;
+			curSunR = srgbToLinear( l.r ); curSunG = srgbToLinear( l.g ); curSunB = srgbToLinear( l.b );
+			break;
+		}
+	}
+	const float inv = 1.0f / 255.0f;
+	float curSkyR = srgbToLinear( m_cAmbientLight.m_R * inv );
+	float curSkyG = srgbToLinear( m_cAmbientLight.m_G * inv );
+	float curSkyB = srgbToLinear( m_cAmbientLight.m_B * inv );
+
+	// Direction drift: dot product of unit vectors.  <0.95 = ~18° apart.
+	float sunDot = curSunDirX * m_vLastBakeSunDir[0]
+				 + curSunDirY * m_vLastBakeSunDir[1]
+				 + curSunDirZ * m_vLastBakeSunDir[2];
+
+	// Colour drift: max-channel absolute delta.
+	float sunDelta = Max( Max( fabsf( curSunR - m_vLastBakeSunRGB[0] ),
+								fabsf( curSunG - m_vLastBakeSunRGB[1] ) ),
+								fabsf( curSunB - m_vLastBakeSunRGB[2] ) );
+	float skyDelta = Max( Max( fabsf( curSkyR - m_vLastBakeSkyRGB[0] ),
+								fabsf( curSkyG - m_vLastBakeSkyRGB[1] ) ),
+								fabsf( curSkyB - m_vLastBakeSkyRGB[2] ) );
+
+	if ( sunDot >= 0.95f && sunDelta < 0.1f && skyDelta < 0.1f )
+		return;     // close enough — skip rebake
+
+	TRACE( "maybeRebakeEnvCube: env drift detected (sunDot=%.3f sunDelta=%.3f skyDelta=%.3f) — rebaking",
+		sunDot, sunDelta, skyDelta );
+	rebakeEnvCubeOnly();
 }
 
 void DisplayDeviceD3D12::freeD3D12()
@@ -3294,6 +4204,11 @@ void DisplayDeviceD3D12::freeD3D12()
 	m_SRVStagingHeap.Free( m_nDefaultExposureSRVIndex );   m_nDefaultExposureSRVIndex   = UINT(-1);
 	m_SRVStagingHeap.Free( m_nDepthSRVIndex );             m_nDepthSRVIndex             = UINT(-1);
 	m_SRVStagingHeap.Free( m_nShadowMapSRVStagingIndex );  m_nShadowMapSRVStagingIndex  = UINT(-1);
+	m_SRVStagingHeap.Free( m_nBRDFLUTSRVStagingIndex );    m_nBRDFLUTSRVStagingIndex    = UINT(-1);
+	m_SRVStagingHeap.Free( m_nEnvCubeSRVStagingIndex );    m_nEnvCubeSRVStagingIndex    = UINT(-1);
+	m_pBRDFLUT.Reset();
+	m_pEnvCube.Reset();
+	m_bPBRIBLReady = false;
 
 	releaseShaders();
 

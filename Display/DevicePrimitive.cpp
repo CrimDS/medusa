@@ -69,7 +69,7 @@ void DevicePrimitive::push( DisplayDevice * pDevice, DevicePrimitive * pPrimitiv
 
 const char * PrimitiveSurface::typeText( Type eType )
 {
-	static const char * TYPE_TEXT[] = 
+	static const char * TYPE_TEXT[] =
 	{
 		"DIFFUSE",			// diffuse texture
 		"LIGHTMAP",			// lightmap surface
@@ -80,7 +80,8 @@ const char * PrimitiveSurface::typeText( Type eType )
 		"NORMALMAP",
 		"PARALLAXMAP",
 		"DECALMAP",
-		"SHADERMAP"
+		"SHADERMAP",
+		"ORMMAP"
 	};
 
 	return TYPE_TEXT[ eType ];

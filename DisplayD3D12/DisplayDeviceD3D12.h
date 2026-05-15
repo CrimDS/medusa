@@ -606,6 +606,29 @@ public:
 	UINT							m_nShadowMapSRVStagingIndex;	// SRV index in m_SRVStagingHeap
 	UINT							m_nDepthSRVIndex;			// SRV index for depth buffer (SSAO)
 
+	// PBR IBL — device-owned textures sampled by PBR.hlsl.  Bake-once-and-
+	// reuse: BRDF LUT is environment-independent (always the same); env cube
+	// is procedural from the same sky+sun model as computeDiffuseSH but
+	// frozen at bake time for v1 (won't track sun-position changes between
+	// zones — followup work).  Both bound to PBR materials' t5/t6 slots via
+	// the same per-slab copy pattern used for the shadow map at t7.
+	ComPtr<ID3D12Resource>			m_pBRDFLUT;					// R16G16_FLOAT 256x256, 1 mip
+	UINT							m_nBRDFLUTSRVStagingIndex;	// SRV in m_SRVStagingHeap
+	ComPtr<ID3D12Resource>			m_pEnvCube;					// RGBA16F cubemap 256x256, 5 mips
+	UINT							m_nEnvCubeSRVStagingIndex;	// SRV in m_SRVStagingHeap
+	bool							m_bPBRIBLReady;				// false until bakePBRIBL() succeeds
+
+	// Sun + sky state at the last cube bake.  Compared in
+	// maybeRebakeEnvCube() against the live sun direction in m_Lights and
+	// m_cAmbientLight to detect when the procedural environment has
+	// drifted far enough to warrant a re-bake (zone change, time-of-day
+	// shift, nebula tint change).  Cube only — the BRDF LUT is
+	// environment-independent and never re-bakes.
+	float							m_vLastBakeSunDir[3];
+	float							m_vLastBakeSunRGB[3];
+	float							m_vLastBakeSkyRGB[3];
+	dword							m_nLastBakeTick;	// throttle: min ticks between rebakes
+
 	// Command list open state — true between resetCommandList() and flushCommandList()
 	bool							m_bCommandListOpen;
 
@@ -802,6 +825,9 @@ public:
 	bool							createDefaultShaders();
 	void							freeD3D12();
 	bool							readyShadowMap();
+	bool							bakePBRIBL();		// CPU-bake BRDF LUT + prefiltered env cube; one-time at init
+	bool							rebakeEnvCubeOnly();	// CPU re-bake of just the env cube; reuses existing GPU resource
+	void							maybeRebakeEnvCube();	// called from beginScene — checks drift, rebakes if needed
 	bool							createFXAA();
 	void							applyFXAA();
 	void							applyTonemap();		// AA_NONE: tonemap scene RT → backbuffer

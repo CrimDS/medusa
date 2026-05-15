@@ -24,16 +24,17 @@ public:
 	enum Type {
 		DIFFUSE,			// diffuse texture
 		LIGHTMAP,			// lightmap surface
-		BUMPMAP,			// bumpmap surface
+		BUMPMAP,			// bumpmap surface (legacy heightfield, derivative-style)
 		DARKMAP,
 		DETAILMAP,
 		GLOSSMAP,
-		NORMALMAP,
+		NORMALMAP,			// tangent-space normal map (PBR consumer)
 		PARALLAXMAP,
 		DECALMAP,
 		SHADERMAP,
+		ORMMAP,				// packed AO (R) / Roughness (G) / Metallic (B) — Unreal convention, PBR consumer
 
-		LAST = SHADERMAP
+		LAST = ORMMAP
 	};
 	enum TextureMode {
 		TM_WRAP,		

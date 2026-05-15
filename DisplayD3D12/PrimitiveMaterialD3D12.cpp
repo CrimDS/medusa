@@ -33,6 +33,12 @@ PrimitiveMaterialD3D12::PrimitiveMaterialD3D12()
 	m_bUpdateShaders = false;
 	m_bSurfacesSortDirty = false;
 
+	// PBR scalar defaults — matte grey plastic.  Overridden via
+	// setPBRMaterial from Material::createDevicePrimitives.
+	m_Roughness = 0.5f;
+	m_Metallic = 0.0f;
+	m_AO = 1.0f;
+
 	// NOTE: Color(r,g,b) defaults alpha to 0 — use 4-arg form with alpha=255.
 	setMaterial( Color(255,255,255,255), Color(255,255,255,255),
 		Color(0,0,0,255), Color(255,255,255,255), 0.0f );
@@ -50,6 +56,15 @@ bool PrimitiveMaterialD3D12::execute()
 	// and let the device create/cache the appropriate PSO
 
 	DisplayDeviceD3D12::LightMap & lights = pDevice->m_Lights;
+
+	// PBR is shader-gated: the bound shader's name decides whether the PBR
+	// fields in CBPerMaterial are consumed.  Cheap string compare here; the
+	// CB is written every draw so per-draw branching is the wrong axis to
+	// optimise on.  Anything that opts in by naming PBR.hlsl gets the PBR
+	// scalars + ORM/normal slot bindings.  Everything else (Default.hlsl,
+	// PassThrough, Star, Cloak, Planet, ...) ignores them as plain padding.
+	const bool bShaderIsPBR = ( m_sShader.length() > 0 ) &&
+		( strcmp( m_sShader, "Shaders/PBR.hlsl" ) == 0 );
 
 	// Determine if we use the passthrough or full lighting shader.
 	// If a custom shader is explicitly set, always use the full pipeline so it gets loaded.
@@ -100,6 +115,10 @@ bool PrimitiveMaterialD3D12::execute()
 		pDevice->m_CurrentMatCB.vMatSpecular = makeShaderFloat4( m_Specular );
 		pDevice->m_CurrentMatCB.fMatSpecularPower = m_SpecularPower;
 		pDevice->m_CurrentMatCB.bEnableAmbient = 1;
+		pDevice->m_CurrentMatCB.fMatRoughness = m_Roughness;
+		pDevice->m_CurrentMatCB.fMatMetallic = m_Metallic;
+		pDevice->m_CurrentMatCB.fMatAO = m_AO;
+		pDevice->m_CurrentMatCB.bEnablePBR = bShaderIsPBR ? 1 : 0;
 
 		setupBlending();
 		{
@@ -151,9 +170,56 @@ bool PrimitiveMaterialD3D12::execute()
 		pDevice->m_CurrentMatCB.vMatSpecular = makeShaderFloat4( m_Specular );
 		pDevice->m_CurrentMatCB.fMatSpecularPower = m_SpecularPower;
 		pDevice->m_CurrentMatCB.bEnableAmbient = 1;
+		pDevice->m_CurrentMatCB.fMatRoughness = m_Roughness;
+		pDevice->m_CurrentMatCB.fMatMetallic = m_Metallic;
+		pDevice->m_CurrentMatCB.fMatAO = m_AO;
+		pDevice->m_CurrentMatCB.bEnablePBR = bShaderIsPBR ? 1 : 0;
 
 		if ( !setupTextures() )
 			return false;
+
+		// PBR IBL — device-owned BRDF LUT (t5) + prefiltered env cube (t6),
+		// copied into this material's slab once and reused across light passes.
+		// bEnableSpecIBL gates the shader's indirect-specular sample; cleared
+		// alongside bEnableAmbient on additive passes so indirect doesn't
+		// double-count.
+		const bool bSpecIBLActive = bShaderIsPBR && pDevice->m_bPBRIBLReady
+			&& pDevice->m_nBRDFLUTSRVStagingIndex != UINT(-1)
+			&& pDevice->m_nEnvCubeSRVStagingIndex != UINT(-1);
+		if ( bSpecIBLActive )
+		{
+			pDevice->m_CurrentMatCB.bEnableSpecIBL = 1;
+
+			// BRDF LUT → t5
+			UINT lutSlot = pDevice->m_nSRVTextureBase + 5;
+			if ( pDevice->isSRVSlotCurrent( lutSlot, pDevice->m_nBRDFLUTSRVStagingIndex ) )
+			{
+				++pDevice->m_nSRVCopiesSkipped;
+			}
+			else
+			{
+				D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = pDevice->m_SRVStagingHeap.GetCPUHandle( pDevice->m_nBRDFLUTSRVStagingIndex );
+				D3D12_CPU_DESCRIPTOR_HANDLE dstHandle = pDevice->getSRVCPUHandle( lutSlot );
+				pDevice->getDevice()->CopyDescriptorsSimple( 1, dstHandle, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+				pDevice->recordSRVSlot( lutSlot, pDevice->m_nBRDFLUTSRVStagingIndex );
+				++pDevice->m_nSRVCopies;
+			}
+
+			// Env cube → t6 (TextureCube SRV — type matches HLSL declaration)
+			UINT cubeSlot = pDevice->m_nSRVTextureBase + 6;
+			if ( pDevice->isSRVSlotCurrent( cubeSlot, pDevice->m_nEnvCubeSRVStagingIndex ) )
+			{
+				++pDevice->m_nSRVCopiesSkipped;
+			}
+			else
+			{
+				D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = pDevice->m_SRVStagingHeap.GetCPUHandle( pDevice->m_nEnvCubeSRVStagingIndex );
+				D3D12_CPU_DESCRIPTOR_HANDLE dstHandle = pDevice->getSRVCPUHandle( cubeSlot );
+				pDevice->getDevice()->CopyDescriptorsSimple( 1, dstHandle, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
+				pDevice->recordSRVSlot( cubeSlot, pDevice->m_nEnvCubeSRVStagingIndex );
+				++pDevice->m_nSRVCopies;
+			}
+		}
 
 		DisplayDeviceD3D12::ShadowPassList::iterator iShadowPass = pDevice->m_ShadowPassList.begin();
 
@@ -262,6 +328,7 @@ bool PrimitiveMaterialD3D12::execute()
 				if ( nLightCount == 0 )
 				{
 					pDevice->m_CurrentMatCB.bEnableAmbient = 0;
+					pDevice->m_CurrentMatCB.bEnableSpecIBL = 0;
 					pDevice->m_nCurrentBlend = 3;	// ADDITIVE: SRC_ALPHA + ONE
 					pDevice->m_bCurrentDoubleSided = m_DoubleSided;
 				}
@@ -319,6 +386,10 @@ void PrimitiveMaterialD3D12::release()
 	m_pShader = NULL;
 	m_sShader = "";
 
+	m_Roughness = 0.5f;
+	m_Metallic = 0.0f;
+	m_AO = 1.0f;
+
 	setMaterial( Color(255,255,255,255), Color(255,255,255,255),
 		Color(0,0,0,255), Color(255,255,255,255), 0.0f );
 }
@@ -365,6 +436,13 @@ void PrimitiveMaterialD3D12::setShader( const char * pShader )
 void PrimitiveMaterialD3D12::setForceDepthWrite( bool bForce )
 {
 	m_bForceDepthWrite = bForce;
+}
+
+void PrimitiveMaterialD3D12::setPBRMaterial( float roughness, float metallic, float ao )
+{
+	m_Roughness = roughness;
+	m_Metallic = metallic;
+	m_AO = ao;
 }
 
 int PrimitiveMaterialD3D12::addSurface( PrimitiveSurface * pSurface,
@@ -500,9 +578,13 @@ bool PrimitiveMaterialD3D12::setupTextures()
 {
 	// Reset texture enables on the current material CB before surfaces set them
 	DisplayDeviceD3D12 * pDevice = (DisplayDeviceD3D12 *)m_pDevice;
-	pDevice->m_CurrentMatCB.bEnableDiffuse  = 0;
-	pDevice->m_CurrentMatCB.bEnableLightMap = 0;
-	pDevice->m_CurrentMatCB.bEnableBumpMap  = 0;
+	pDevice->m_CurrentMatCB.bEnableDiffuse    = 0;
+	pDevice->m_CurrentMatCB.bEnableLightMap   = 0;
+	pDevice->m_CurrentMatCB.bEnableBumpMap    = 0;
+	pDevice->m_CurrentMatCB.bEnableORMMap     = 0;
+	pDevice->m_CurrentMatCB.bEnableNormalMap  = 0;
+	pDevice->m_CurrentMatCB.bEnableSpecIBL    = 0;
+	pDevice->m_CurrentMatCB.bFlipNormalY      = 0;
 	pDevice->m_nTextureStage = 0;
 
 	// Allocate 8 fresh contiguous SRV slots for this material draw (t0-t7).
@@ -657,16 +739,17 @@ int PrimitiveMaterialD3D12::sortSurfaces( Surface p1, Surface p2 )
 {
 	static int SURFACE_SORT_ORDER[] =
 	{
-		1, // DIFFUSE
-		2, // LIGHTMAP
-		0, // BUMPMAP
-		3, // DARKMAP
-		4, // DETAILMAP
-		5, // GLOSSMAP
-		6, // NORMALMAP
+		2, // DIFFUSE
+		3, // LIGHTMAP
+		0, // BUMPMAP (legacy heightfield — bind first so PBR shader can override)
+		4, // DARKMAP
+		5, // DETAILMAP
+		6, // GLOSSMAP
+		1, // NORMALMAP (tangent-space PBR normal — bind early)
 		7, // PARALLAXMAP
 		8, // DECALMAP
 		9, // SHADERMAP
+		10,// ORMMAP
 	};
 
 	return SURFACE_SORT_ORDER[ p1.m_eType ] - SURFACE_SORT_ORDER[ p2.m_eType ];

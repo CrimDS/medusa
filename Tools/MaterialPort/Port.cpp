@@ -46,6 +46,12 @@ BEGIN_PROPERTY_LIST( MaterialPort, Port );
 	ADD_PROPERTY( m_Textures );
 	ADD_PROPERTY( m_sShader );
 
+	// PBR (metal-rough) — property reflection tolerates absent keys, so
+	// legacy .prt files load with the defaults set in the ctor.
+	ADD_PROPERTY( m_Roughness );
+	ADD_PROPERTY( m_Metallic );
+	ADD_PROPERTY( m_AO );
+
 	// deprecated
 	ADD_PROPERTY( m_MipMap );
 	ADD_PROPERTY( m_DiffusePort );
@@ -75,6 +81,11 @@ MaterialPort::MaterialPort() : Port()
 	m_MipMap = false;							// MipMap enable flag
 	m_Fps = 15.0f;
 	m_Frames = 1;
+
+	// PBR (metal-rough) defaults — matte grey plastic.
+	m_Roughness = 0.5f;
+	m_Metallic = 0.0f;
+	m_AO = 1.0f;
 }
 
 //-------------------------------------------------------------------------------
@@ -129,6 +140,7 @@ Resource::Ref MaterialPort::createResource()
 	pMaterial->setDoubleSided( m_DoubleSided );
 	pMaterial->setFps( m_Fps );
 	pMaterial->setFrames( m_Frames );
+	pMaterial->setPBR( m_Roughness, m_Metallic, m_AO );
 
 	for(int i=0;i<m_Textures.size();++i)
 	{
@@ -148,7 +160,27 @@ Resource::Ref MaterialPort::createResource()
 			report( CharString().format( "Failed to add texture '%s' to material!", texture.m_sImagePort ) );
 	}
 
-	pMaterial->setShader( m_sShader );
+	// Auto-promote to PBR when PBR-only maps are present and the artist
+	// hasn't pinned a shader.  Lets a material flip to the PBR pipeline
+	// just by adding an ORM texture in Resourcer — no need to also type
+	// the shader name.  Reversible: remove the ORM/NORMAL maps and the
+	// material reverts to Default.hlsl on next load.  Legacy materials
+	// (no ORMMAP, no NORMALMAP) take m_sShader = "" → Default.hlsl, so
+	// they render exactly as they did before this change.
+	CharString sShader = m_sShader;
+	if ( sShader.length() == 0 )
+	{
+		for ( int i = 0; i < m_Textures.size(); ++i )
+		{
+			Type t = m_Textures[i].m_eType;
+			if ( t == PrimitiveSurface::ORMMAP || t == PrimitiveSurface::NORMALMAP )
+			{
+				sShader = "Shaders/PBR.hlsl";
+				break;
+			}
+		}
+	}
+	pMaterial->setShader( sShader );
 
 	if ( bDirty )
 		UpdateAllViews( NULL );

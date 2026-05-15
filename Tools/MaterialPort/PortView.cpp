@@ -49,6 +49,9 @@ CPortView::CPortView()
 	m_LightEnable = FALSE;
 	m_Stack = -1;
 	m_bFixedFunction = FALSE;
+	m_Roughness = 0.5f;
+	m_Metallic = 0.0f;
+	m_AO = 1.0f;
 	//}}AFX_DATA_INIT
 }
 
@@ -86,7 +89,18 @@ void CPortView::DoDataExchange(CDataExchange* pDX)
 	DDX_CBIndex(pDX, IDC_COMBO1, m_Stack);
 	DDX_Control(pDX, IDC_LIST1, m_cTextureList );
 	//}}AFX_DATA_MAP
-	DDX_Text(pDX, IDC_EDIT6, m_sShader);
+	// IDC_EDIT6 is the shader dropdown (CBS_DROPDOWN combo).  CBString
+	// reads the current edit-field text — for a list selection that's
+	// the friendly name we added in OnInitialUpdate, for typed input
+	// that's whatever the user wrote.  shaderFriendlyToPath in
+	// OnUpdate (view→doc) converts either form to the engine-load path.
+	DDX_CBString(pDX, IDC_EDIT6, m_sShader);
+	DDX_Text(pDX, IDC_ROUGHNESS, m_Roughness);
+	DDV_MinMaxFloat(pDX, m_Roughness, 0.0f, 1.0f);
+	DDX_Text(pDX, IDC_METALLIC, m_Metallic);
+	DDV_MinMaxFloat(pDX, m_Metallic, 0.0f, 1.0f);
+	DDX_Text(pDX, IDC_AO, m_AO);
+	DDV_MinMaxFloat(pDX, m_AO, 0.0f, 1.0f);
 }
 
 
@@ -106,7 +120,12 @@ BEGIN_MESSAGE_MAP(CPortView, CFormView)
 	ON_EN_KILLFOCUS(IDC_EDIT2, OnUpdateMaterial)
 	ON_CBN_SELCHANGE(IDC_BLENDING, OnUpdateMaterial)
 	ON_EN_KILLFOCUS(IDC_EDIT5, OnUpdateMaterial)
-	ON_EN_KILLFOCUS(IDC_EDIT6, OnUpdateMaterial)
+	// Shader combobox: SELCHANGE fires when the user picks from the
+	// dropdown, KILLFOCUS catches typed-then-tab-away.  Both route to
+	// OnUpdateMaterial which translates friendly→path via
+	// shaderFriendlyToPath.
+	ON_CBN_SELCHANGE(IDC_EDIT6, OnUpdateMaterial)
+	ON_CBN_KILLFOCUS(IDC_EDIT6, OnUpdateMaterial)
 	ON_EN_KILLFOCUS(IDC_PIXEL_SHADER, OnUpdateMaterial)
 	ON_BN_CLICKED(IDC_CHECK4, OnUpdateMaterial)
 	ON_BN_CLICKED(IDC_CHECK5, OnUpdateMaterial)
@@ -118,6 +137,9 @@ BEGIN_MESSAGE_MAP(CPortView, CFormView)
 	ON_BN_CLICKED(IDC_BUTTON3, OnEditTexture)
 	ON_NOTIFY(NM_DBLCLK, IDC_LIST1, OnDoubleClickTexture)
 	ON_BN_CLICKED(IDC_CHECK1, OnFixedFunction)
+	ON_EN_KILLFOCUS(IDC_ROUGHNESS, OnUpdateMaterial)
+	ON_EN_KILLFOCUS(IDC_METALLIC, OnUpdateMaterial)
+	ON_EN_KILLFOCUS(IDC_AO, OnUpdateMaterial)
 END_MESSAGE_MAP()
 
 /////////////////////////////////////////////////////////////////////////////
@@ -136,19 +158,95 @@ void CPortView::Dump(CDumpContext& dc) const
 #endif //_DEBUG
 
 /////////////////////////////////////////////////////////////////////////////
+// Shader dropdown helpers.  The UI shows short, friendly names ("PBR",
+// "Cloak", etc.) and an "(auto-detect)" sentinel for empty.  The stored
+// form on Material::m_sShader is the engine-load-path form
+// ("Shaders/PBR.hlsl").  These helpers convert between the two when the
+// dialog is populated / saved.  Custom shader paths typed by hand pass
+// through with a "Shaders/" prefix and ".hlsl" suffix added if missing,
+// so an advanced user can still author a one-off shader without the
+// dropdown.
+
+static struct ShaderMapEntry {
+	const char *	friendly;
+	const char *	path;
+} kShaderMap[] = {
+	{ "(auto-detect)",	""						},
+	{ "Default",		"Shaders/Default.hlsl"	},
+	{ "PBR",			"Shaders/PBR.hlsl"		},
+	{ "Star",			"Shaders/Star.hlsl"		},
+	{ "Cloak",			"Shaders/Cloak.hlsl"	},
+	{ "Planet",			"Shaders/Planet.hlsl"	},
+};
+
+// Accept const char * so both MFC CString (operator LPCTSTR) and the
+// engine's CharString (operator const char *) pass without an explicit
+// conversion at the call site.
+
+static CString shaderPathToFriendly( const char * pathIn )
+{
+	if ( !pathIn || !*pathIn )
+		return _T("(auto-detect)");
+	CString path( pathIn );
+	for ( int i = 0; i < (int)( sizeof(kShaderMap) / sizeof(kShaderMap[0]) ); ++i )
+	{
+		if ( path.CompareNoCase( kShaderMap[i].path ) == 0 )
+			return CString( kShaderMap[i].friendly );
+	}
+	return path;	// unknown shader — show the raw path so the user can see what's there
+}
+
+static CString shaderFriendlyToPath( const char * friendlyIn )
+{
+	if ( !friendlyIn )
+		return _T("");
+	CString trimmed( friendlyIn );
+	trimmed.TrimLeft();
+	trimmed.TrimRight();
+	if ( trimmed.IsEmpty() || trimmed.CompareNoCase( _T("(auto-detect)") ) == 0 )
+		return _T("");
+	for ( int i = 0; i < (int)( sizeof(kShaderMap) / sizeof(kShaderMap[0]) ); ++i )
+	{
+		if ( trimmed.CompareNoCase( kShaderMap[i].friendly ) == 0 )
+			return CString( kShaderMap[i].path );
+	}
+	// Treat as a custom path the user typed.  Prefix "Shaders/" if missing,
+	// append ".hlsl" if missing — both are required by the engine's shader
+	// loader (DisplayDeviceD3D12::getShader).
+	if ( trimmed.Find( _T("Shaders/") ) < 0 && trimmed.Find( _T("Shaders\\") ) < 0 )
+		trimmed = _T("Shaders/") + trimmed;
+	if ( trimmed.Find( _T(".hlsl") ) < 0 && trimmed.Find( _T(".HLSL") ) < 0 )
+		trimmed += _T(".hlsl");
+	return trimmed;
+}
+
+/////////////////////////////////////////////////////////////////////////////
 // CPortView message handlers
 
-void CPortView::OnInitialUpdate() 
+void CPortView::OnInitialUpdate()
 {
 	// modify the style of our frame to prevent user from resizing
 	GetParentFrame()->ModifyStyle(WS_THICKFRAME | WS_MAXIMIZEBOX,0);
 	// resize the parent frame to the size of the dialog box
     ResizeParentToFit(FALSE);
 
-	m_Diffuse.SubclassDlgItem(IDC_DIFFUSE,this); 	
-	m_Ambient.SubclassDlgItem(IDC_AMBIENT,this); 	
-	m_Emissive.SubclassDlgItem(IDC_EMISSIVE,this); 	
-	m_Specular.SubclassDlgItem(IDC_SPECULAR,this); 	
+	m_Diffuse.SubclassDlgItem(IDC_DIFFUSE,this);
+	m_Ambient.SubclassDlgItem(IDC_AMBIENT,this);
+	m_Emissive.SubclassDlgItem(IDC_EMISSIVE,this);
+	m_Specular.SubclassDlgItem(IDC_SPECULAR,this);
+
+	// Populate the shader dropdown with the known shaders + auto-detect.
+	// Editable combo (CBS_DROPDOWN) so an artist can also type a custom
+	// shader name if they have one outside this list.
+	{
+		CComboBox * pShaderCombo = (CComboBox *)GetDlgItem( IDC_EDIT6 );
+		if ( pShaderCombo )
+		{
+			pShaderCombo->ResetContent();
+			for ( int i = 0; i < (int)( sizeof(kShaderMap) / sizeof(kShaderMap[0]) ); ++i )
+				pShaderCombo->AddString( kShaderMap[i].friendly );
+		}
+	}
 
 	//----------------------------------------------------------------------------
 
@@ -198,7 +296,13 @@ void CPortView::OnUpdate(CView* pSender, LPARAM lHint, CObject* pHint)
 		UPDATE_DOC( m_DoubleSided, m_DoubleSided );
 		UPDATE_DOC( m_Fps, m_Fps );
 		UPDATE_DOC( m_Frames, m_Frames );
-		UPDATE_DOC( m_sShader, CharString(m_sShader) );
+		// m_sShader at this point holds the combo's current edit-field
+		// text (friendly name for known shaders, raw input for custom).
+		// Translate to the engine-load path before storing on the doc.
+		UPDATE_DOC( m_sShader, CharString( shaderFriendlyToPath( m_sShader ) ) );
+		UPDATE_DOC( m_Roughness, m_Roughness );
+		UPDATE_DOC( m_Metallic, m_Metallic );
+		UPDATE_DOC( m_AO, m_AO );
 
 		pDoc->UpdateAllViews( NULL );
 	}
@@ -224,7 +328,13 @@ void CPortView::OnUpdate(CView* pSender, LPARAM lHint, CObject* pHint)
 		m_DoubleSided = pDoc->m_DoubleSided;
 		m_Fps = pDoc->m_Fps;
 		m_Frames = pDoc->m_Frames;
-		m_sShader = pDoc->m_sShader;
+		// Translate the stored engine-load path to the friendly name shown
+		// in the shader dropdown.  Unknown paths fall through to the raw
+		// string so custom shaders are still visible/editable.
+		m_sShader = shaderPathToFriendly( pDoc->m_sShader );
+		m_Roughness = pDoc->m_Roughness;
+		m_Metallic = pDoc->m_Metallic;
+		m_AO = pDoc->m_AO;
 
 		UpdateData( false );
 

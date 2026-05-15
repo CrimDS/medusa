@@ -260,6 +260,22 @@ struct CBPerMaterial
 	int				bEnableShadowMap;
 	int				bEnableAmbient;
 	float			pad0;
+
+	// PBR (metal-rough).  Top-level scalars from Material::m_Roughness/
+	// m_Metallic/m_AO; per-texel ORM map (slot t3) multiplies these when
+	// bEnableORM is set by ORMMAP surface execute.  bEnablePBR is set
+	// CPU-side from PrimitiveMaterialD3D12 when m_sShader names PBR.hlsl
+	// (or any future PBR-mode shader) — drives shader behaviour, doesn't
+	// reach into the IL or root signature.
+	float			fMatRoughness;
+	float			fMatMetallic;
+	float			fMatAO;
+	int				bEnablePBR;
+
+	int				bEnableORMMap;		// t3 — packed AO/Roughness/Metallic
+	int				bEnableNormalMap;	// t4 — tangent-space PBR normal
+	int				bEnableSpecIBL;		// device-owned t5 (BRDF LUT) + t6 (env cube)
+	int				bFlipNormalY;		// 1 = DirectX convention (-Y), 0 = OpenGL (+Y, Substance default)
 };
 
 struct CBPerLight
