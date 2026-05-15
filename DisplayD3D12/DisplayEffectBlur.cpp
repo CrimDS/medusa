@@ -23,17 +23,21 @@ DisplayEffectBlurD3D12::~DisplayEffectBlurD3D12()
 	release();
 }
 
-bool DisplayEffectBlurD3D12::preRender( DisplayDevice * pDevice )
+// NOTE: DisplayEffectBlurD3D12 is an UNIMPLEMENTED STUB.  The DX9 path
+// implemented motion blur (cross-frame ping-pong via m_pPreviousTexture).
+// The DX12 port was scaffolded but never finished — pre/postRender no-op
+// and report success, so scenes that request blur silently get nothing.
+// IMPLEMENT_FACTORY is left in so the registration matches the engine's
+// effect catalog; if you decide to drop the effect entirely, remove that
+// macro and audit asset/scene references to "blur".
+
+bool DisplayEffectBlurD3D12::preRender( DisplayDevice * /*pDevice*/ )
 {
-	// TODO: Implement blur pre-render for D3D12
-	// This should redirect rendering to an offscreen target
 	return true;
 }
 
-bool DisplayEffectBlurD3D12::postRender( DisplayDevice * pDevice )
+bool DisplayEffectBlurD3D12::postRender( DisplayDevice * /*pDevice*/ )
 {
-	// TODO: Implement blur post-render for D3D12
-	// This should blend current frame with previous frame
 	return true;
 }
 

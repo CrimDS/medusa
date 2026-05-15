@@ -85,6 +85,7 @@ public:
 
 	bool					m_bUpdateShaders;
 	bool					m_bForceDepthWrite;	// override blend-derived depth-write off (cloak)
+	bool					m_bSurfacesSortDirty;	// set in addSurface, cleared by lazy sort in setupTextures
 	CharString				m_sShader;
 	ShaderD3D12::Ref		m_pShader;
 

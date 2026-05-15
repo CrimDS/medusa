@@ -8,6 +8,7 @@
 
 #include "Display/PrimitiveSurface.h"
 #include "DisplayD3D12/DisplayDeviceD3D12.h"
+#include "Standard/CriticalSection.h"
 
 //----------------------------------------------------------------------------
 
@@ -79,6 +80,14 @@ public:
 		UINT	pitch;
 	};
 	Array< PendingMip >		m_PendingMips;		// mips waiting to be uploaded in execute()
+
+	// Serializes mutations of m_PendingMips between the producer (unlock,
+	// usually on the Broker loader thread; in the font path on the render
+	// thread itself) and the consumer (flushPendingUploads on the render
+	// thread).  Engine convention is meant to keep them apart, but fonts can
+	// re-lock mid-frame so the producer side is observably re-entrant against
+	// rendering — protect the shared array.
+	mutable CriticalSection	m_PendingMipsLock;
 };
 
 //----------------------------------------------------------------------------

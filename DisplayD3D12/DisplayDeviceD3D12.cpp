@@ -150,6 +150,10 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_nDepthSRVIndex( UINT(-1) ),
 	m_nUploadFenceValue( 0 ),
 	m_hUploadFenceEvent( NULL ),
+	m_pCurrentPSO( nullptr ),
+	m_SRVSlotEpoch( 1 ),
+	m_eDepthStencilState( D3D12_RESOURCE_STATE_DEPTH_WRITE ),
+	m_LightCBRingHead( 0 ),
 	m_nDSVIndex( UINT(-1) ),
 	m_nLastBoundSRVBase( 0 ),
 	m_bLastBoundSRVValid( false ),
@@ -171,6 +175,8 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_nLastObjCBGpuVA( 0 )
 {
 	memset( m_nRTVIndices, 0xff, sizeof(m_nRTVIndices) );
+	memset( m_LightCBRingValid, 0, sizeof(m_LightCBRingValid) );
+	memset( m_LightCBRingVA,    0, sizeof(m_LightCBRingVA) );
 	TRACE( "DisplayDeviceD3D12 created!" );
 
 	memset( m_nFenceValues, 0, sizeof(m_nFenceValues) );
@@ -766,6 +772,9 @@ bool DisplayDeviceD3D12::beginScene()
 
 			if ( m_pDepthStencil )
 			{
+				// Post-FX may have left depth in PSR — transition back before clear,
+				// which requires DEPTH_WRITE state.
+				ensureDepthStencilState( m_pCommandList.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE );
 				D3D12_CPU_DESCRIPTOR_HANDLE dsv = m_DSVHeap.GetCPUHandle( 0 );
 				m_pCommandList->ClearDepthStencilView( dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr );
 			}
@@ -825,12 +834,25 @@ bool DisplayDeviceD3D12::beginScene()
 
 		// Per-slot cache of which staging index currently lives in each SRV slot.
 		// Sized to cover the full heap (all per-frame slabs) so indexing by
-		// absolute slot works.  Blanket-invalidate each frame (UINT(-1) = empty).
+		// absolute slot works.  Blanket-invalidate each frame by bumping
+		// m_SRVSlotEpoch — see encoding comment on the member declaration.
+		// On resize we zero the array so the (epoch, idx) pair never spuriously
+		// matches uninitialised garbage.
 		const int fullHeapSize = (int)MAX_SRV_DESCRIPTORS * FRAME_COUNT;
 		if ( m_SRVSlotStagingIndex.size() != fullHeapSize )
+		{
 			m_SRVSlotStagingIndex.allocate( fullHeapSize );
-		for ( int i = 0; i < m_SRVSlotStagingIndex.size(); ++i )
-			m_SRVSlotStagingIndex[i] = UINT(-1);
+			for ( int i = 0; i < m_SRVSlotStagingIndex.size(); ++i )
+				m_SRVSlotStagingIndex[i] = 0;
+		}
+		// Wrap-safe bump: when epoch hits UINT_MAX, reset the array and start
+		// over at 1 so old entries can't ghost-match a freshly-wrapped epoch.
+		if ( ++m_SRVSlotEpoch == 0 )
+		{
+			for ( int i = 0; i < m_SRVSlotStagingIndex.size(); ++i )
+				m_SRVSlotStagingIndex[i] = 0;
+			m_SRVSlotEpoch = 1;
+		}
 
 		// Build screen-space ortho matrix for TL (pre-transformed) vertices.
 		// mProj is perspective for 3D; TL shaders use mProjOrtho instead.
@@ -1559,7 +1581,7 @@ bool DisplayDeviceD3D12::ensureWorkerD3D12Slots( int nWorkers )
 				IID_PPV_ARGS( &ctx.m_pAllocator[f] ) );
 			if ( FAILED( hr ) )
 			{
-				ThrowIfFailed( hr, "ensureWorkerD3D12Slots: CreateCommandAllocator" );
+				LogIfFailed( hr, "ensureWorkerD3D12Slots: CreateCommandAllocator" );
 				return false;
 			}
 		}
@@ -1572,7 +1594,7 @@ bool DisplayDeviceD3D12::ensureWorkerD3D12Slots( int nWorkers )
 			IID_PPV_ARGS( &ctx.m_pCommandList ) );
 		if ( FAILED( hr ) )
 		{
-			ThrowIfFailed( hr, "ensureWorkerD3D12Slots: CreateCommandList" );
+			LogIfFailed( hr, "ensureWorkerD3D12Slots: CreateCommandList" );
 			return false;
 		}
 		ctx.m_pCommandList->Close();
@@ -1737,6 +1759,43 @@ void DisplayDeviceD3D12::registerEffect( const char * pName, Factory * pFactory 
 // PSO management
 //---------------------------------------------------------------------------------------------------
 
+ShaderD3D12 * DisplayDeviceD3D12::resolveFallbackShader( int inputLayout ) const
+{
+	switch ( inputLayout )
+	{
+	case PSOKey::IL_VERTEX:
+		if ( m_pPassThroughShader.valid() )   return m_pPassThroughShader.pointer();
+		break;
+	case PSOKey::IL_VERTEXL:
+		if ( m_pPassThroughLShader.valid() )  return m_pPassThroughLShader.pointer();
+		break;
+	case PSOKey::IL_VERTEXTL:
+		if ( m_pPassThroughTLShader.valid() ) return m_pPassThroughTLShader.pointer();
+		break;
+	}
+	return nullptr;
+}
+
+void DisplayDeviceD3D12::setPSO( ID3D12GraphicsCommandList * cl, ID3D12PipelineState * pPSO )
+{
+	if ( !cl || !pPSO )
+		return;
+	if ( m_pCurrentPSO == pPSO )
+		return;
+	cl->SetPipelineState( pPSO );
+	m_pCurrentPSO = pPSO;
+}
+
+void DisplayDeviceD3D12::ensureDepthStencilState( ID3D12GraphicsCommandList * cl, D3D12_RESOURCE_STATES newState )
+{
+	if ( !cl || !m_pDepthStencil )
+		return;
+	if ( m_eDepthStencilState == newState )
+		return;
+	TransitionResource( cl, m_pDepthStencil.Get(), m_eDepthStencilState, newState );
+	m_eDepthStencilState = newState;
+}
+
 void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::TopologyType topology )
 {
 	if ( !m_bCommandListOpen )
@@ -1812,22 +1871,9 @@ void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::T
 		pShader = m_pMatShader.valid() ? m_pMatShader.pointer() : nullptr;
 	}
 
-	// Resolve fallback shader if no explicit shader set (same logic as getOrCreatePSO)
+	// Resolve fallback shader if no explicit shader set
 	if ( !pShader || !pShader->valid() )
-	{
-		switch ( inputLayout )
-		{
-		case PSOKey::IL_VERTEX:
-			if ( m_pPassThroughShader.valid() )  pShader = m_pPassThroughShader.pointer();
-			break;
-		case PSOKey::IL_VERTEXL:
-			if ( m_pPassThroughLShader.valid() )  pShader = m_pPassThroughLShader.pointer();
-			break;
-		case PSOKey::IL_VERTEXTL:
-			if ( m_pPassThroughTLShader.valid() ) pShader = m_pPassThroughTLShader.pointer();
-			break;
-		}
-	}
+		pShader = resolveFallbackShader( inputLayout );
 
 	// Encode the effective shader bytecode pointers into the key so different
 	// shaders produce distinct PSO cache entries.
@@ -1837,10 +1883,7 @@ void DisplayDeviceD3D12::bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::T
 		key.psBytecode = pShader->pixelShaderBlob() ? pShader->pixelShaderBlob()->GetBufferPointer() : nullptr;
 	}
 
-	ID3D12PipelineState * pPSO = getOrCreatePSO( key, pShader );
-	if ( pPSO )
-		m_pCommandList->SetPipelineState( pPSO );
-
+	setPSO( m_pCommandList.Get(), getOrCreatePSO( key, pShader ) );
 }
 
 //---------------------------------------------------------------------------------------------------
@@ -1980,19 +2023,7 @@ ID3D12PipelineState * DisplayDeviceD3D12::getOrCreatePSO( const PSOKey & key, Sh
 	}
 	else
 	{
-		ShaderD3D12 * pFallback = nullptr;
-		switch ( key.inputLayout )
-		{
-		case PSOKey::IL_VERTEX:
-			if ( m_pPassThroughShader.valid() )  pFallback = m_pPassThroughShader.pointer();
-			break;
-		case PSOKey::IL_VERTEXL:
-			if ( m_pPassThroughLShader.valid() )  pFallback = m_pPassThroughLShader.pointer();
-			break;
-		case PSOKey::IL_VERTEXTL:
-			if ( m_pPassThroughTLShader.valid() ) pFallback = m_pPassThroughTLShader.pointer();
-			break;
-		}
+		ShaderD3D12 * pFallback = resolveFallbackShader( key.inputLayout );
 		if ( pFallback && pFallback->valid() )
 		{
 			psoDesc.VS = pFallback->vertexShaderBytecode();
@@ -2540,11 +2571,32 @@ void DisplayDeviceD3D12::bindPerLightCB( const CBPerLight & light )
 	if ( !m_bCommandListOpen )
 		return;
 
+	// Last-binding fast path (covers single-light scenes).
 	if ( m_bLastLightCBValid && memcmp( &light, &m_LastLightCB, sizeof(CBPerLight) ) == 0 )
 	{
 		m_pCommandList->SetGraphicsRootConstantBufferView( 3, m_nLastLightCBGpuVA );
 		++m_nLightCBSkipped;
 		return;
+	}
+
+	// Multi-light fallback: scan the ring for a recent matching payload.
+	// Hit rate is ~100% in multi-light scenes where every material rebinds
+	// the same N lights in the same order — the previous frame's binding
+	// pattern repeats, and only the FIRST material in a frame populates
+	// the ring (subsequent ones all hit).
+	for ( int i = 0; i < LIGHT_CB_RING_SLOTS; ++i )
+	{
+		if ( !m_LightCBRingValid[i] )
+			continue;
+		if ( memcmp( &light, &m_LightCBRing[i], sizeof(CBPerLight) ) == 0 )
+		{
+			m_pCommandList->SetGraphicsRootConstantBufferView( 3, m_LightCBRingVA[i] );
+			m_LastLightCB = light;
+			m_bLastLightCBValid = true;
+			m_nLastLightCBGpuVA = m_LightCBRingVA[i];
+			++m_nLightCBSkipped;
+			return;
+		}
 	}
 
 	UploadRingBuffer::Allocation alloc = allocateCB( sizeof(CBPerLight) );
@@ -2556,6 +2608,13 @@ void DisplayDeviceD3D12::bindPerLightCB( const CBPerLight & light )
 	m_LastLightCB = light;
 	m_bLastLightCBValid = true;
 	m_nLastLightCBGpuVA = alloc.gpuAddress;
+
+	// Insert into the ring (round-robin replace).
+	m_LightCBRing[ m_LightCBRingHead ] = light;
+	m_LightCBRingVA[ m_LightCBRingHead ] = alloc.gpuAddress;
+	m_LightCBRingValid[ m_LightCBRingHead ] = true;
+	m_LightCBRingHead = ( m_LightCBRingHead + 1 ) % LIGHT_CB_RING_SLOTS;
+
 	++m_nLightCBUploads;
 }
 
@@ -3050,6 +3109,9 @@ bool DisplayDeviceD3D12::createDepthStencil()
 		&dsDesc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clearValue, IID_PPV_ARGS(&m_pDepthStencil))) )
 		return false;
 
+	// New resource starts in DEPTH_WRITE per CreateCommittedResource arg above.
+	m_eDepthStencilState = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+
 	D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
 	dsvDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
 	dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
@@ -3221,6 +3283,17 @@ void DisplayDeviceD3D12::freeD3D12()
 		}
 	}
 	m_CreatedEffects.clear();
+
+	// Return device-owned SRV staging slots to the heap.  In practice
+	// m_SRVStagingHeap dies with the device member object so a slot leak here is
+	// harmless today, but freeing keeps the heap invariant intact in case the
+	// device is ever re-initialized without process restart.
+	m_SRVStagingHeap.Free( m_nSceneSRVIndex );             m_nSceneSRVIndex             = UINT(-1);
+	m_SRVStagingHeap.Free( m_nSMAAEdgeSRVIndex );          m_nSMAAEdgeSRVIndex          = UINT(-1);
+	m_SRVStagingHeap.Free( m_nSMAAWeightsSRVIndex );       m_nSMAAWeightsSRVIndex       = UINT(-1);
+	m_SRVStagingHeap.Free( m_nDefaultExposureSRVIndex );   m_nDefaultExposureSRVIndex   = UINT(-1);
+	m_SRVStagingHeap.Free( m_nDepthSRVIndex );             m_nDepthSRVIndex             = UINT(-1);
+	m_SRVStagingHeap.Free( m_nShadowMapSRVStagingIndex );  m_nShadowMapSRVStagingIndex  = UINT(-1);
 
 	releaseShaders();
 
@@ -3677,10 +3750,12 @@ void DisplayDeviceD3D12::deferReleaseResource( ID3D12Resource * pResource )
 	// frame's deferred list and Release at beginScene of frame N+FRAME_COUNT
 	// (after fence confirms GPU is past the last draw that referenced it).
 	AutoLock lock( &m_DeferredPrimsLock );
-	// Read m_nFrameIndex under the lock — main thread updates it in
-	// moveToNextFrame, sim/loader threads read here.  A torn read at worst
-	// pushes to the wrong frame index, which only delays the release one
-	// frame; never lets us release while the GPU is still using it.
+	// The lock serializes concurrent producers on m_DeferredResources[idx].
+	// It does NOT synchronize m_nFrameIndex against moveToNextFrame (which
+	// writes m_nFrameIndex WITHOUT taking this lock).  A torn or stale read
+	// here at worst pushes to the wrong frame index, which only delays the
+	// release one frame; never lets us release while the GPU is still using
+	// it (FRAME_COUNT=2 absorbs the one-frame skew).
 	const UINT idx = m_nFrameIndex;
 	m_DeferredResources[idx].push( pResource );
 }
@@ -3739,6 +3814,17 @@ void DisplayDeviceD3D12::resetCommandList()
 	m_pCommandAllocators[m_nFrameIndex]->Reset();
 	m_pCommandList->Reset( m_pCommandAllocators[m_nFrameIndex].Get(), nullptr );
 	m_bCommandListOpen = true;
+
+	// Command-list reset clears the GPU pipeline-state slot, so our last-bound
+	// PSO cache must also drop.  Otherwise the next setPSO() call could believe
+	// the desired PSO is already bound and skip the SetPipelineState.
+	m_pCurrentPSO = nullptr;
+
+	// Light CB ring's GpuVAs point into the previous frame's upload ring which
+	// has been reset — invalidate every slot so we don't bind stale memory.
+	for ( int i = 0; i < LIGHT_CB_RING_SLOTS; ++i )
+		m_LightCBRingValid[i] = false;
+	m_LightCBRingHead = 0;
 }
 
 //---------------------------------------------------------------------------------------------------
@@ -4010,69 +4096,70 @@ bool DisplayDeviceD3D12::createFXAA()
 	return true;
 }
 
+// Lazy-init the 1x1 R32F=1.0 fallback exposure texture used as t1 by
+// applyFXAA / applyTonemap when no exposure effect ran this frame.  Done
+// lazily (rather than in createFXAA) because clear-to-1.0 + transition-to-PSR
+// needs an open command list, which createFXAA doesn't have during init /
+// resize flushes.  Clear vector must exactly match the optimized clear value
+// set at resource-creation time ({1, 0, 0, 0}) or D3D12 logs a
+// CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE warning every first-frame.
+void DisplayDeviceD3D12::ensureDefaultExposureTexture()
+{
+	if ( m_bDefaultExposureInitialized )
+		return;
+
+	D3D12_RESOURCE_DESC expDesc = {};
+	expDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	expDesc.Width  = 1;
+	expDesc.Height = 1;
+	expDesc.DepthOrArraySize = 1;
+	expDesc.MipLevels = 1;
+	expDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	expDesc.SampleDesc.Count = 1;
+	expDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+	D3D12_CLEAR_VALUE cv = {};
+	cv.Format = DXGI_FORMAT_R32_FLOAT;
+	cv.Color[0] = 1.0f;
+
+	HRESULT hrExp = m_pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
+		&expDesc, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
+		IID_PPV_ARGS(&m_pDefaultExposureTex) );
+	if ( FAILED(hrExp) )
+		return;
+
+	if ( m_nDefaultExposureRTVIndex == UINT(-1) )
+		m_nDefaultExposureRTVIndex = m_RTVHeap.Allocate();
+	m_pDevice->CreateRenderTargetView( m_pDefaultExposureTex.Get(), nullptr,
+		m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ) );
+
+	if ( m_nDefaultExposureSRVIndex == UINT(-1) )
+		m_nDefaultExposureSRVIndex = m_SRVStagingHeap.Allocate();
+	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+	srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	srvDesc.Texture2D.MipLevels = 1;
+	m_pDevice->CreateShaderResourceView( m_pDefaultExposureTex.Get(), &srvDesc,
+		m_SRVStagingHeap.GetCPUHandle( m_nDefaultExposureSRVIndex ) );
+
+	float white[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+	m_pCommandList->ClearRenderTargetView(
+		m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ), white, 0, nullptr );
+	TransitionResource( m_pCommandList.Get(), m_pDefaultExposureTex.Get(),
+		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+	m_bDefaultExposureInitialized = true;
+}
+
 void DisplayDeviceD3D12::applyFXAA()
 {
 	if ( m_eAAMode != AA_FXAA || !m_bSceneRTEnabled || !m_pSceneRT || !m_pFXAAPSO || !m_bCommandListOpen )
 		return;
 
-	// Lazy-init the 1x1 R32F=1.0 fallback exposure texture.  Done here rather
-	// than createFXAA() because that function runs outside a valid command
-	// list context (called from resize paths that have just flushed the CL).
-	// Clear-to-1.0 + transition-to-PSR needs an open CL, which we only have
-	// once the first frame is in flight.
-	if ( !m_bDefaultExposureInitialized )
-	{
-		D3D12_RESOURCE_DESC expDesc = {};
-		expDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-		expDesc.Width  = 1;
-		expDesc.Height = 1;
-		expDesc.DepthOrArraySize = 1;
-		expDesc.MipLevels = 1;
-		expDesc.Format = DXGI_FORMAT_R32_FLOAT;
-		expDesc.SampleDesc.Count = 1;
-		expDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-
-		D3D12_HEAP_PROPERTIES heapProps = {};
-		heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-		D3D12_CLEAR_VALUE cv = {};
-		cv.Format = DXGI_FORMAT_R32_FLOAT;
-		cv.Color[0] = 1.0f;
-
-		HRESULT hrExp = m_pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
-			&expDesc, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
-			IID_PPV_ARGS(&m_pDefaultExposureTex) );
-		if ( SUCCEEDED(hrExp) )
-		{
-			if ( m_nDefaultExposureRTVIndex == UINT(-1) )
-				m_nDefaultExposureRTVIndex = m_RTVHeap.Allocate();
-			m_pDevice->CreateRenderTargetView( m_pDefaultExposureTex.Get(), nullptr,
-				m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ) );
-
-			if ( m_nDefaultExposureSRVIndex == UINT(-1) )
-				m_nDefaultExposureSRVIndex = m_SRVStagingHeap.Allocate();
-			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-			srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
-			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			srvDesc.Texture2D.MipLevels = 1;
-			m_pDevice->CreateShaderResourceView( m_pDefaultExposureTex.Get(), &srvDesc,
-				m_SRVStagingHeap.GetCPUHandle( m_nDefaultExposureSRVIndex ) );
-
-			// Clear to 1.0 (only R channel matters for R32_FLOAT) and
-			// transition to PSR for sampling.  Clear vector must exactly
-			// match the optimized clear value set at resource-creation
-			// time ({1, 0, 0, 0}) or D3D12 logs a
-			// CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE warning every
-			// first-frame, which over many launches pollutes the trace.
-			float white[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
-			m_pCommandList->ClearRenderTargetView(
-				m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ), white, 0, nullptr );
-			TransitionResource( m_pCommandList.Get(), m_pDefaultExposureTex.Get(),
-				D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
-			m_bDefaultExposureInitialized = true;
-		}
-	}
+	ensureDefaultExposureTexture();
 
 	RectInt rw = renderWindow();
 	float width  = (float)rw.width();
@@ -4100,7 +4187,7 @@ void DisplayDeviceD3D12::applyFXAA()
 	// so any later material draw re-issues instead of assuming stale state.
 	invalidateBoundSRVTable();
 	m_pCommandList->SetGraphicsRootSignature( m_pFXAARootSig.Get() );
-	m_pCommandList->SetPipelineState( m_pFXAAPSO.Get() );
+	setPSO( m_pCommandList.Get(), m_pFXAAPSO.Get() );
 
 	// Bind descriptor heaps
 	ID3D12DescriptorHeap * heaps[] = { m_SRVHeap.Get(), m_SamplerHeap.Get() };
@@ -4166,66 +4253,14 @@ void DisplayDeviceD3D12::applyFXAA()
 // applyTonemap — AA_NONE path.  Resolves the HDR scene RT to the LDR
 // backbuffer with exposure + ACES filmic tonemap and no anti-aliasing.
 // Mirrors applyFXAA's resource binding (shared root sig, same SRV + CB
-// layout) — only the bound PSO differs.  The duplication with applyFXAA
-// will collapse once Phase 4 lands SMAA: at that point a shared runAAPass()
-// helper makes sense.  For now, leaving the FXAA path bit-identical to
-// pre-split behavior is more valuable than the dedupe.
+// layout) — only the bound PSO and CB constants differ.
 
 void DisplayDeviceD3D12::applyTonemap()
 {
 	if ( m_eAAMode != AA_NONE || !m_bSceneRTEnabled || !m_pSceneRT || !m_pTonemapPSO || !m_bCommandListOpen )
 		return;
 
-	// Lazy default-exposure init — same rationale as in applyFXAA: needs an
-	// open command list to clear-and-transition the 1x1 R32F=1.0 fallback,
-	// which createFXAA() doesn't have during init/resize flushes.
-	if ( !m_bDefaultExposureInitialized )
-	{
-		D3D12_RESOURCE_DESC expDesc = {};
-		expDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-		expDesc.Width  = 1;
-		expDesc.Height = 1;
-		expDesc.DepthOrArraySize = 1;
-		expDesc.MipLevels = 1;
-		expDesc.Format = DXGI_FORMAT_R32_FLOAT;
-		expDesc.SampleDesc.Count = 1;
-		expDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-
-		D3D12_HEAP_PROPERTIES heapProps = {};
-		heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-		D3D12_CLEAR_VALUE cv = {};
-		cv.Format = DXGI_FORMAT_R32_FLOAT;
-		cv.Color[0] = 1.0f;
-
-		HRESULT hrExp = m_pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
-			&expDesc, D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
-			IID_PPV_ARGS(&m_pDefaultExposureTex) );
-		if ( SUCCEEDED(hrExp) )
-		{
-			if ( m_nDefaultExposureRTVIndex == UINT(-1) )
-				m_nDefaultExposureRTVIndex = m_RTVHeap.Allocate();
-			m_pDevice->CreateRenderTargetView( m_pDefaultExposureTex.Get(), nullptr,
-				m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ) );
-
-			if ( m_nDefaultExposureSRVIndex == UINT(-1) )
-				m_nDefaultExposureSRVIndex = m_SRVStagingHeap.Allocate();
-			D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-			srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
-			srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-			srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-			srvDesc.Texture2D.MipLevels = 1;
-			m_pDevice->CreateShaderResourceView( m_pDefaultExposureTex.Get(), &srvDesc,
-				m_SRVStagingHeap.GetCPUHandle( m_nDefaultExposureSRVIndex ) );
-
-			float white[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
-			m_pCommandList->ClearRenderTargetView(
-				m_RTVHeap.GetCPUHandle( m_nDefaultExposureRTVIndex ), white, 0, nullptr );
-			TransitionResource( m_pCommandList.Get(), m_pDefaultExposureTex.Get(),
-				D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
-			m_bDefaultExposureInitialized = true;
-		}
-	}
+	ensureDefaultExposureTexture();
 
 	RectInt rw = renderWindow();
 	float width  = (float)rw.width();
@@ -4248,7 +4283,7 @@ void DisplayDeviceD3D12::applyTonemap()
 
 	invalidateBoundSRVTable();
 	m_pCommandList->SetGraphicsRootSignature( m_pFXAARootSig.Get() );
-	m_pCommandList->SetPipelineState( m_pTonemapPSO.Get() );
+	setPSO( m_pCommandList.Get(), m_pTonemapPSO.Get() );
 
 	ID3D12DescriptorHeap * heaps[] = { m_SRVHeap.Get(), m_SamplerHeap.Get() };
 	m_pCommandList->SetDescriptorHeaps( _countof(heaps), heaps );
@@ -4678,7 +4713,7 @@ void DisplayDeviceD3D12::applySMAA()
 				D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
 		}
 		m_pCommandList->SetGraphicsRootDescriptorTable( 1, m_SRVHeap.GetGPUHandle( srvSlot ) );
-		m_pCommandList->SetPipelineState( m_pSMAAEdgePSO.Get() );
+		setPSO( m_pCommandList.Get(), m_pSMAAEdgePSO.Get() );
 		m_pCommandList->DrawInstanced( 3, 1, 0, 0 );
 
 		// Edge RT → PSR for Pass 2 to sample.
@@ -4702,7 +4737,7 @@ void DisplayDeviceD3D12::applySMAA()
 			m_SRVStagingHeap.GetCPUHandle( m_nSMAAEdgeSRVIndex ),
 			D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
 		m_pCommandList->SetGraphicsRootDescriptorTable( 1, m_SRVHeap.GetGPUHandle( srvSlot ) );
-		m_pCommandList->SetPipelineState( m_pSMAAWeightsPSO.Get() );
+		setPSO( m_pCommandList.Get(), m_pSMAAWeightsPSO.Get() );
 		m_pCommandList->DrawInstanced( 3, 1, 0, 0 );
 
 		// Weights RT → PSR for Pass 3 to sample.
@@ -4735,7 +4770,7 @@ void DisplayDeviceD3D12::applySMAA()
 				D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
 		}
 		m_pCommandList->SetGraphicsRootDescriptorTable( 1, m_SRVHeap.GetGPUHandle( srvSlot ) );
-		m_pCommandList->SetPipelineState( m_pSMAABlendPSO.Get() );
+		setPSO( m_pCommandList.Get(), m_pSMAABlendPSO.Get() );
 		m_pCommandList->DrawInstanced( 3, 1, 0, 0 );
 	}
 

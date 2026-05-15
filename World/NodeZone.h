@@ -84,9 +84,15 @@ public:
 	void				detachNoun( Noun * pNoun );
 	void				leaveZone( Noun * pNoun );
 
-	bool				transferNoun( Noun * pNoun, 
-							NodeZone * pNewZone, 
+	bool				transferNoun( Noun * pNoun,
+							NodeZone * pNewZone,
 							bool updatePosition );
+
+	// Drain cross-zone transfers that were deferred during parallel-sim
+	// detectCollisions.  Called serially by WorldContext::simulateLockedZones
+	// after parallelFor returns — never call while a worker is still iterating
+	// zone children.  Safe to call on a zone with no pending entries (no-op).
+	void				processPendingTransfers();
 
 	virtual void		onAttachNoun( Noun * pNoun );				// attach the root noun into the update chain
 	virtual void		onDetachNoun( Noun * pNoun );				// detach the root noun from the update chain
@@ -131,6 +137,20 @@ protected:
 
 	int					m_nNounCount;		// how many nouns in this zone
 	qword				m_nProfileTime;		// CPU usage
+
+	// Cross-zone transfers queued by leaveZone() during parallel-sim
+	// detectCollisions.  We defer the actual transferNoun (which mutates the
+	// destination zone's m_Children — racy with that zone's worker iterating
+	// its children) until WorldContext::simulateLockedZones finishes
+	// parallelFor.  pTargetZone is a raw pointer because zones live longer
+	// than a tick; pNoun is a Reference so the noun stays alive between defer
+	// and process even if intermediate logic would have dropped the last ref.
+	struct PendingTransfer
+	{
+		Reference<Noun>		pNoun;
+		NodeZone *			pTargetZone;
+	};
+	Array< PendingTransfer >	m_PendingTransfers;
 
 	// preRender fast-path cache: when the zone frustum-culls (bAmbientOnly), we
 	// only need to dispatch to children with NF_AMBIENT.  Scanning all children

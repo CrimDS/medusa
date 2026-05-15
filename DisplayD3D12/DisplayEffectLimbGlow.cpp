@@ -425,10 +425,10 @@ bool DisplayEffectLimbGlowD3D12::postRender( DisplayDevice * pDevice )
 	TransitionResource( cl, m_pGlowRT.Get(),
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
-	// Depth → PSR for the foreground-reject lookup in PS_LimbGlow.  Restored
-	// to DEPTH_WRITE at the end of postRender before the DSV is rebound.
-	TransitionResource( cl, pDev->m_pDepthStencil.Get(),
-		D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+	// Depth → PSR for the foreground-reject lookup in PS_LimbGlow.  Routed
+	// through the device-tracked helper so SSAO/LensFlare share the barrier
+	// when multiple post-FX run in the same frame.
+	pDev->ensureDepthStencilState( cl, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 
 	CBLimbGlow cb = {};
 	cb.sunU = sunU;
@@ -511,7 +511,7 @@ bool DisplayEffectLimbGlowD3D12::postRender( DisplayDevice * pDevice )
 	cl->RSSetScissorRects( 1, &sc );
 	float clearColor[4] = { 0, 0, 0, 0 };
 	cl->ClearRenderTargetView( rtv, clearColor, 0, nullptr );
-	cl->SetPipelineState( m_pGlowPSO.Get() );
+	pDev->setPSO( cl, m_pGlowPSO.Get() );
 	drawFullscreenTriangle( pDev );
 
 	// --- Step 2: rim-glow RT → scene RT (full-res, ONE+ONE additive) ---
@@ -538,13 +538,12 @@ bool DisplayEffectLimbGlowD3D12::postRender( DisplayDevice * pDevice )
 	cl->RSSetScissorRects( 1, &sceneScissor );
 
 	bindSRVs( m_nGlowSRVIndex, pDev->m_nDepthSRVIndex );
-	cl->SetPipelineState( m_pCompositePSO.Get() );
+	pDev->setPSO( cl, m_pCompositePSO.Get() );
 	drawFullscreenTriangle( pDev );
 
-	// Depth back to DEPTH_WRITE — required before the next OMSetRenderTargets
-	// binds the DSV (and before subsequent effects like SSAO re-transition it).
-	TransitionResource( cl, pDev->m_pDepthStencil.Get(),
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE );
+	// Depth stays in PSR — beginScene of the next frame transitions back to
+	// DEPTH_WRITE before ClearDepthStencilView.  Subsequent post-FX in this
+	// frame skip the redundant barrier via ensureDepthStencilState().
 
 	// --- Restore main pipeline state ---
 	cl->SetGraphicsRootSignature( pDev->getRootSignature() );

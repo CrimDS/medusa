@@ -380,9 +380,9 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	}
 
 	// --- Step 1: Compute SSAO (depth buffer → AO[0]) ---
-	// Transition depth to SRV
-	TransitionResource( cl, pDev->m_pDepthStencil.Get(),
-		D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+	// Transition depth to SRV via the device-tracked helper — coalesces with
+	// LimbGlow / LensFlare when multiple post-FX run in the same frame.
+	pDev->ensureDepthStencilState( cl, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 	TransitionResource( cl, m_pAOTextures[0].Get(),
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
@@ -416,7 +416,7 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	cl->RSSetViewports( 1, &aoVP );
 	cl->RSSetScissorRects( 1, &aoScissor );
 
-	cl->SetPipelineState( m_pSSAOPSO.Get() );
+	pDev->setPSO( cl, m_pSSAOPSO.Get() );
 	drawFullscreenTriangle( pDev );
 
 	// --- Step 2: Bilateral blur (AO[0] → AO[1]) ---
@@ -425,10 +425,9 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	TransitionResource( cl, m_pAOTextures[1].Get(),
 		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 
-	// Update texel size for blur pass (still half-res)
-	cbAlloc = pDev->allocateCB( sizeof(CBSSAO) );
-	memcpy( cbAlloc.cpuAddress, &cb, sizeof(cb) );
-	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
+	// Blur pass uses the same CBSSAO contents as Step 1 — the CBV from the
+	// previous SetGraphicsRootConstantBufferView is still bound, so don't
+	// re-upload.  (Used to allocate + memcpy + bind here; pure churn.)
 
 	// Bind AO[0] at t0 and depth at t1
 	UINT blurSlot = pDev->allocSRVSlots( 2 );
@@ -445,16 +444,16 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	D3D12_CPU_DESCRIPTOR_HANDLE aoRTV1 = pDev->m_RTVHeap.GetCPUHandle( m_nAORTVIndex[1] );
 	cl->OMSetRenderTargets( 1, &aoRTV1, FALSE, nullptr );
 
-	cl->SetPipelineState( m_pBlurPSO.Get() );
+	pDev->setPSO( cl, m_pBlurPSO.Get() );
 	drawFullscreenTriangle( pDev );
 
 	// --- Step 3: Apply AO to scene RT (multiplicative blend) ---
 	TransitionResource( cl, m_pAOTextures[1].Get(),
 		D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 
-	// Transition depth back to DEPTH_WRITE before restoring render target
-	TransitionResource( cl, pDev->m_pDepthStencil.Get(),
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE );
+	// Depth stays in PSR — beginScene transitions it back to DEPTH_WRITE
+	// once before the next ClearDepthStencilView.  Skipping the round-trip
+	// avoids redundant barriers when LimbGlow / LensFlare run next.
 
 	// Bind AO[1] (blurred) at t0
 	UINT applySlot = pDev->allocSRVSlots( 2 );
@@ -483,7 +482,7 @@ bool DisplayEffectSSAOD3D12::postRender( DisplayDevice * pDevice )
 	memcpy( cbAlloc.cpuAddress, &cb, sizeof(cb) );
 	cl->SetGraphicsRootConstantBufferView( 0, cbAlloc.gpuAddress );
 
-	cl->SetPipelineState( m_pApplyPSO.Get() );
+	pDev->setPSO( cl, m_pApplyPSO.Get() );
 	drawFullscreenTriangle( pDev );
 
 	// --- Restore main pipeline state ---

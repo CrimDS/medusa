@@ -5,6 +5,7 @@
 
 #include "Debug/Trace.h"
 #include "Standard/Bits.h"
+#include "Standard/AutoLock.h"
 #include "PrimitiveSurfaceD3D12.h"
 #include "PrimitiveFactory.h"
 #include "D3D12Helpers.h"		// g_bSRGBPipeline
@@ -140,13 +141,12 @@ bool PrimitiveSurfaceD3D12::execute()
 	}
 
 	// Copy SRV from staging heap into the per-material slot group.
-	// m_nSRVTextureBase is set by setupTextures() to a fresh group of 3 slots,
-	// so consecutive materials never alias each other's descriptors.
+	// m_nSRVTextureBase is set by setupTextures() to a fresh group of 8 slots
+	// (t0-t7), so consecutive materials never alias each other's descriptors.
 	// Skip the copy when the destination slot already holds this exact
 	// staging-heap SRV (typical when the same texture is reused across draws).
 	UINT destSlot = pDevice->m_nSRVTextureBase + nTextureSlot;
-	if ( destSlot < (UINT)pDevice->m_SRVSlotStagingIndex.size()
-		&& pDevice->m_SRVSlotStagingIndex[destSlot] == m_SRVIndex )
+	if ( pDevice->isSRVSlotCurrent( destSlot, m_SRVIndex ) )
 	{
 		++pDevice->m_nSRVCopiesSkipped;
 	}
@@ -155,8 +155,7 @@ bool PrimitiveSurfaceD3D12::execute()
 		D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = pDevice->m_SRVStagingHeap.GetCPUHandle( m_SRVIndex );
 		D3D12_CPU_DESCRIPTOR_HANDLE dstHandle = pDevice->getSRVCPUHandle( destSlot );
 		pDevice->getDevice()->CopyDescriptorsSimple( 1, dstHandle, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
-		if ( destSlot < (UINT)pDevice->m_SRVSlotStagingIndex.size() )
-			pDevice->m_SRVSlotStagingIndex[destSlot] = m_SRVIndex;
+		pDevice->recordSRVSlot( destSlot, m_SRVIndex );
 		++pDevice->m_nSRVCopies;
 	}
 
@@ -587,6 +586,8 @@ bool PrimitiveSurfaceD3D12::unlock()
 		return false;
 	}
 
+	AutoLock lock( &m_PendingMipsLock );
+
 	// Each PendingMip OWNS a copy of the staging data.  This is necessary because
 	// different mip levels have different sizes, so m_pStagingData gets reallocated
 	// between lock(0)/unlock() and lock(1)/unlock().  Without independent copies,
@@ -648,6 +649,8 @@ void PrimitiveSurfaceD3D12::flush()
 
 void PrimitiveSurfaceD3D12::flushPendingUploads( DisplayDeviceD3D12 * pDevice )
 {
+	AutoLock lock( &m_PendingMipsLock );
+
 	if ( m_PendingMips.size() == 0 )
 		return;
 
@@ -749,22 +752,9 @@ void PrimitiveSurfaceD3D12::flushPendingUploads( DisplayDeviceD3D12 * pDevice )
 		D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 	m_CurrentState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 
-	// Create SRV after first upload — same format-picking logic as the
-	// execute()-path SRV creation above (kept in sync deliberately).
-	if ( !m_bSRVCreated )
-	{
-		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		srvDesc.Format = GetSRVFormat( m_DXGIFormat, IsSRGBColourTexture( m_eType ) );
-		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-		srvDesc.Texture2D.MipLevels = m_nLevels;
-
-		pDevice->getDevice()->CreateShaderResourceView(
-			m_Texture.Get(), &srvDesc, pDevice->m_SRVStagingHeap.GetCPUHandle( m_SRVIndex ) );
-		m_bSRVCreated = true;
-	}
-
 	m_bUploaded = true;
+	// SRV creation is the caller's responsibility (execute() handles it after we return).
+	// Creating it here would race with m_SRVIndex==UINT(-1) and write OOB into the staging heap.
 }
 
 //------------------------------------------------------------------------------------

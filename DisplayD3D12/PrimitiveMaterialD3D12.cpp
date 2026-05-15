@@ -31,6 +31,7 @@ PrimitiveMaterialD3D12::PrimitiveMaterialD3D12()
 	m_nFirstClaimChild = INT_MAX;
 	m_nFilterMode = FILTER_ON;
 	m_bUpdateShaders = false;
+	m_bSurfacesSortDirty = false;
 
 	// NOTE: Color(r,g,b) defaults alpha to 0 — use 4-arg form with alpha=255.
 	setMaterial( Color(255,255,255,255), Color(255,255,255,255),
@@ -228,8 +229,7 @@ bool PrimitiveMaterialD3D12::execute()
 					// Copy shadow map SRV into slot t7, skipping the copy when that
 					// slot already holds this exact staging index.
 					UINT smDestSlot = pDevice->m_nSRVTextureBase + 7;
-					if ( smDestSlot < (UINT)pDevice->m_SRVSlotStagingIndex.size()
-						&& pDevice->m_SRVSlotStagingIndex[smDestSlot] == pDevice->m_nShadowMapSRVStagingIndex )
+					if ( pDevice->isSRVSlotCurrent( smDestSlot, pDevice->m_nShadowMapSRVStagingIndex ) )
 					{
 						++pDevice->m_nSRVCopiesSkipped;
 					}
@@ -238,8 +238,7 @@ bool PrimitiveMaterialD3D12::execute()
 						D3D12_CPU_DESCRIPTOR_HANDLE srcHandle = pDevice->m_SRVStagingHeap.GetCPUHandle( pDevice->m_nShadowMapSRVStagingIndex );
 						D3D12_CPU_DESCRIPTOR_HANDLE dstHandle = pDevice->getSRVCPUHandle( smDestSlot );
 						pDevice->getDevice()->CopyDescriptorsSimple( 1, dstHandle, srcHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV );
-						if ( smDestSlot < (UINT)pDevice->m_SRVSlotStagingIndex.size() )
-							pDevice->m_SRVSlotStagingIndex[smDestSlot] = pDevice->m_nShadowMapSRVStagingIndex;
+						pDevice->recordSRVSlot( smDestSlot, pDevice->m_nShadowMapSRVStagingIndex );
 						++pDevice->m_nSRVCopies;
 					}
 
@@ -316,6 +315,7 @@ void PrimitiveMaterialD3D12::release()
 	m_nFilterMode = FILTER_ON;
 	m_bUpdateShaders = false;
 	m_bForceDepthWrite = false;
+	m_bSurfacesSortDirty = false;
 	m_pShader = NULL;
 	m_sShader = "";
 
@@ -379,7 +379,7 @@ int PrimitiveMaterialD3D12::addSurface( PrimitiveSurface * pSurface,
 	if ( pParams != NULL )
 		memcpy( surface.m_fParams, pParams, sizeof(surface.m_fParams) );
 
-	m_Surfaces.qsort( sortSurfaces );
+	m_bSurfacesSortDirty = true;
 	return m_Surfaces.size() - 1;
 }
 
@@ -545,6 +545,15 @@ bool PrimitiveMaterialD3D12::setupTextures()
 	}
 	pDevice->m_nSRVTextureBase = base;
 
+	// Lazy-sort surfaces if any were added since the last execute.
+	// Cheaper than re-sorting on every addSurface() (which used to be
+	// O(N log N) per call = O(N^2 log N) to populate a material).
+	if ( m_bSurfacesSortDirty )
+	{
+		m_Surfaces.qsort( sortSurfaces );
+		m_bSurfacesSortDirty = false;
+	}
+
 	for ( int i = 0; i < m_Surfaces.size(); i++ )
 	{
 		Surface & surface = m_Surfaces[i];
@@ -580,7 +589,11 @@ bool PrimitiveMaterialD3D12::executeChildren()
 	// order — flicker on SECONDARY-pass transparency.  Sorting by m_ChildOrder
 	// restores the order serial rendering produces.  When parallel is off,
 	// every entry is -1 and stable_sort is a near no-op on already-sorted data.
-	std::vector<int> order( nChildren );
+	//
+	// executeChildren runs on the render thread only; a thread_local scratch
+	// avoids the heap alloc that used to fire per material per frame.
+	thread_local std::vector<int> order;
+	order.resize( nChildren );
 	for ( int i = 0; i < nChildren; ++i )
 		order[i] = i;
 	if ( nChildren == m_ChildOrder.size() )

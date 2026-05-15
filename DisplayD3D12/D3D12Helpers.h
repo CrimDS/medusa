@@ -31,7 +31,9 @@ using namespace DirectX;
 
 //----------------------------------------------------------------------------
 
-inline void ThrowIfFailed(HRESULT hr, const char * msg = nullptr)
+// Logs the HRESULT to OutputDebugString; does NOT actually throw.  Callers
+// must still check the HRESULT and handle the failure path themselves.
+inline void LogIfFailed(HRESULT hr, const char * msg = nullptr)
 {
 	if (FAILED(hr))
 	{
@@ -49,6 +51,54 @@ inline void ThrowIfFailed(HRESULT hr, const char * msg = nullptr)
 inline UINT AlignCB(UINT size)
 {
 	return (size + 255) & ~255;
+}
+
+//----------------------------------------------------------------------------
+// Create an UPLOAD-heap committed buffer of dataSize bytes and (optionally)
+// memcpy pData into it.  Returned in GENERIC_READ state, ready to bind as a
+// vertex/index/constant buffer.
+//
+// Static vertex/index buffers currently use this for simplicity; ideally
+// long-lived geometry would live in DEFAULT-heap memory with a one-shot
+// upload+barrier, but that requires lifetime/synchronization plumbing the
+// primitive types don't have yet.  See [[project_threading_status]] / the
+// renderer review punch list — task #10 (HIGH, pervasive).
+inline ComPtr<ID3D12Resource> CreateUploadBuffer( ID3D12Device * pDevice, const void * pData, UINT dataSize )
+{
+	if ( !pDevice || dataSize == 0 )
+		return nullptr;
+
+	D3D12_HEAP_PROPERTIES heapProps = {};
+	heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+	D3D12_RESOURCE_DESC resDesc = {};
+	resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+	resDesc.Width = dataSize;
+	resDesc.Height = 1;
+	resDesc.DepthOrArraySize = 1;
+	resDesc.MipLevels = 1;
+	resDesc.SampleDesc.Count = 1;
+	resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+	ComPtr<ID3D12Resource> buffer;
+	HRESULT hr = pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
+		&resDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buffer) );
+	if ( FAILED(hr) )
+		return nullptr;
+
+	if ( pData )
+	{
+		void * pMapped = nullptr;
+		D3D12_RANGE readRange = { 0, 0 };
+		buffer->Map( 0, &readRange, &pMapped );
+		if ( pMapped )
+		{
+			memcpy( pMapped, pData, dataSize );
+			buffer->Unmap( 0, nullptr );
+		}
+	}
+
+	return buffer;
 }
 
 //----------------------------------------------------------------------------

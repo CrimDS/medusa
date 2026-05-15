@@ -311,8 +311,7 @@ bool DisplayEffectLensFlareD3D12::postRender( DisplayDevice * pDevice )
 			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET );
 		pDev->m_bSceneRTisRT = true;
 	}
-	TransitionResource( cl, pDev->m_pDepthStencil.Get(),
-		D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
+	pDev->ensureDepthStencilState( cl, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE );
 
 	// Bind SRVs — t0 is don't-care (shader doesn't reference it), t1 is depth.
 	UINT slot = pDev->allocSRVSlots( 2 );
@@ -348,13 +347,11 @@ bool DisplayEffectLensFlareD3D12::postRender( DisplayDevice * pDevice )
 	cl->RSSetViewports( 1, &vp );
 	cl->RSSetScissorRects( 1, &sc );
 
-	cl->SetPipelineState( m_pFlarePSO.Get() );
+	pDev->setPSO( cl, m_pFlarePSO.Get() );
 	drawFullscreenTriangle( pDev );
 
-	// Restore depth back to DEPTH_WRITE for the next OMSetRenderTargets
-	// (DSV bind) and any subsequent post effects.
-	TransitionResource( cl, pDev->m_pDepthStencil.Get(),
-		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE );
+	// Depth stays in PSR — coalesced with other post-FX; beginScene will
+	// transition it back to DEPTH_WRITE before the next ClearDepthStencilView.
 
 	// Restore main pipeline state.
 	cl->SetGraphicsRootSignature( pDev->getRootSignature() );

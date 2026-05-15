@@ -6,19 +6,7 @@
 #include "DisplayD3D12/PrimitiveLineStripD3D12.h"
 #include "DisplayD3D12/PrimitiveFactory.h"
 
-static ComPtr<ID3D12Resource> CreateUploadBuffer( ID3D12Device * pDev, const void * pData, UINT sz )
-{
-	if (!pDev || sz == 0) return nullptr;
-	D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
-	D3D12_RESOURCE_DESC rd = {}; rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-	rd.Width = sz; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
-	rd.SampleDesc.Count = 1; rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-	ComPtr<ID3D12Resource> buf;
-	if (FAILED(pDev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buf)))) return nullptr;
-	if (pData) { void*p=nullptr; D3D12_RANGE rr={0,0}; buf->Map(0,&rr,&p); if(p){memcpy(p,pData,sz); buf->Unmap(0,nullptr);} }
-	return buf;
-}
+// CreateUploadBuffer helper now lives in D3D12Helpers.h
 
 //------------------------------------------------------------------------------------
 

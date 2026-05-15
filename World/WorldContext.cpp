@@ -298,6 +298,16 @@ static void worldContextSimulateZone( int i, void * ud )
 // original serial loop byte-for-byte identical so the default path is
 // guaranteed unchanged.  Guarded by size() > 1 because parallelFor short-
 // circuits a single job inline anyway but this makes intent explicit.
+//
+// Cross-zone transfers triggered during detectCollisions are NOT executed
+// inline — they would race with another worker iterating the destination
+// zone's m_Children (e.g. crash at NodeZone.cpp:572 update loop).  Instead
+// they're queued on each zone via NodeZone::leaveZone and drained here,
+// serially, once every worker has finished its tick.  Behaviour change vs.
+// pre-fix: a noun that crosses out of its zone now gets its update() call
+// in the OLD zone for that tick; the transfer takes effect next tick.  This
+// matches the behaviour you'd get if the destination zone happened to be
+// processed before the source zone anyway.
 static void simulateLockedZones( WorldContext * pContext, dword nTick )
 {
 	const int nZones = pContext->lockedZoneCount();
@@ -312,6 +322,13 @@ static void simulateLockedZones( WorldContext * pContext, dword nTick )
 		for ( int i = 0; i < nZones; ++i )
 			pContext->lockedZone( i )->simulate( nTick );
 	}
+
+	// Drain deferred cross-zone transfers in a single serial pass.  No worker
+	// is iterating any zone's m_Children at this point, so transferNoun's
+	// detach+attach is safe.  Both code paths (parallel and serial) defer so
+	// the behaviour is consistent.
+	for ( int i = 0; i < nZones; ++i )
+		pContext->lockedZone( i )->processPendingTransfers();
 }
 
 void WorldContext::captureRenderSnapshot( RenderSnapshot & out )

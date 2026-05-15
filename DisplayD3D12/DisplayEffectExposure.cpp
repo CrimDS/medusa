@@ -328,7 +328,7 @@ bool DisplayEffectExposureD3D12::postRender( DisplayDevice * pDevice )
 	cl->RSSetViewports( 1, &vp );
 	cl->RSSetScissorRects( 1, &sc );
 
-	cl->SetPipelineState( m_pAdaptPSO.Get() );
+	pDev->setPSO( cl, m_pAdaptPSO.Get() );
 	cl->IASetPrimitiveTopology( D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST );
 	cl->IASetVertexBuffers( 0, 0, nullptr );
 	cl->DrawInstanced( 3, 1, 0, 0 );

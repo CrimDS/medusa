@@ -489,7 +489,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	setMipRT( 0, vp, sc );
 	float clearColor[4] = { 0, 0, 0, 0 };
 	cl->ClearRenderTargetView( pDev->m_RTVHeap.GetCPUHandle( m_nMipRTVIndex[0] ), clearColor, 0, nullptr );
-	cl->SetPipelineState( m_pBrightPassPSO.Get() );
+	pDev->setPSO( cl, m_pBrightPassPSO.Get() );
 	drawFullscreenTriangle( pDev );
 
 	// --- Step 2: Downsample chain, mip[i-1] → mip[i] for i = 1..N-1 ---
@@ -510,7 +510,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 		bindSourceSRV( m_nMipSRVIndex[i - 1] );
 		setMipRT( i, vp, sc );
 		cl->ClearRenderTargetView( pDev->m_RTVHeap.GetCPUHandle( m_nMipRTVIndex[i] ), clearColor, 0, nullptr );
-		cl->SetPipelineState( m_pDownsamplePSO.Get() );
+		pDev->setPSO( cl, m_pDownsamplePSO.Get() );
 		drawFullscreenTriangle( pDev );
 	}
 
@@ -532,7 +532,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 		setMipRT( j, vp, sc );
 		// NO clear — additive blend layers this upsample onto the existing
 		// downsample result already in mip[j].
-		cl->SetPipelineState( m_pUpsamplePSO.Get() );
+		pDev->setPSO( cl, m_pUpsamplePSO.Get() );
 		drawFullscreenTriangle( pDev );
 	}
 
@@ -576,7 +576,7 @@ bool DisplayEffectHDRD3D12::postRender( DisplayDevice * pDevice )
 	cbComposite.fBrightThreshold = 0.0f;
 	uploadCB( cbComposite );
 
-	cl->SetPipelineState( m_pAdditivePSO.Get() );
+	pDev->setPSO( cl, m_pAdditivePSO.Get() );
 	drawFullscreenTriangle( pDev );
 
 	// --- Restore main pipeline state ---

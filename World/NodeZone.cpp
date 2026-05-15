@@ -306,10 +306,15 @@ void NodeZone::initializeZone( WorldContext * pContext )
 
 void NodeZone::releaseZone()
 {
+	// drop any deferred transfers that never got drained (e.g. zone unlocked
+	// mid-tick or context shutting down) — the Reference<Noun> entries will
+	// release their refs on Array::release().
+	m_PendingTransfers.release();
+
 	// unhook all nouns
 	for(int i=0;i<childCount();++i)
 		unhookNouns( child(i) );
-	// delete the hash 
+	// delete the hash
 	m_pCollisionHash->release();
 }
 
@@ -410,7 +415,16 @@ void NodeZone::leaveZone( Noun * pNoun )
 
 	if ( pInZone != NULL )
 	{
-		transferNoun( pNoun, pInZone, true );	// transfer noun to it's new zone
+		// Defer the actual transferNoun() — it mutates pInZone->m_Children,
+		// which races with that zone's worker iterating its children
+		// elsewhere in the parallelFor.  Process via processPendingTransfers()
+		// after parallelFor returns.  See WorldContext::simulateLockedZones.
+		// (Reading pInZone's hull/position above is fine — those don't mutate
+		// during the sim tick.)
+		PendingTransfer pt;
+		pt.pNoun        = pNoun;
+		pt.pTargetZone  = pInZone;
+		m_PendingTransfers.push( pt );
 	}
 	else
 	{
@@ -419,10 +433,26 @@ void NodeZone::leaveZone( Noun * pNoun )
 		hull().clamp( vPosition );
 		pNoun->setPosition( vPosition );
 
-		//TRACE( CharString().format("NodeZone::leaveZone() - Noun %s not in zone at %s", 
+		//TRACE( CharString().format("NodeZone::leaveZone() - Noun %s not in zone at %s",
 		//	pNoun->name(), ConvertType<CharString>( pNoun->position() ) ) );
 		//detachNoun( pNoun );					// remove the noun if outside the worldContext
 	}
+}
+
+void NodeZone::processPendingTransfers()
+{
+	// Drain deferred cross-zone transfers from this zone.  Called serially
+	// by WorldContext::simulateLockedZones after the parallel sim phase, so
+	// no other worker is iterating any zone's m_Children — transferNoun's
+	// detach-and-attach is safe here.  Per-target hull/position checks
+	// already happened in leaveZone(); we just execute the transfer.
+	for ( int i = 0; i < m_PendingTransfers.size(); ++i )
+	{
+		PendingTransfer & pt = m_PendingTransfers[i];
+		if ( pt.pNoun.valid() && pt.pTargetZone != NULL && pt.pNoun->parent() == this )
+			transferNoun( pt.pNoun, pt.pTargetZone, true );
+	}
+	m_PendingTransfers.release();
 }
 
 bool NodeZone::transferNoun( Noun * pNoun, NodeZone * pNewZone, bool updatePosition )
@@ -588,6 +618,11 @@ void NodeZone::close()
 		leaveZone( *nouns );
 		nouns.pop();
 	}
+
+	// leaveZone defers transferNoun to processPendingTransfers — but close()
+	// is the terminal evacuation: the zone is about to be destroyed, so we
+	// must complete the transfers before returning.  Drain inline here.
+	processPendingTransfers();
 }
 
 // use the collision hash to find nouns in the area
@@ -774,14 +809,16 @@ void NodeZone::detectCollisions()
 	}
 	PROFILE_END();	// "detectCollisions:queryAndTest"
 
-	// Scene-graph mutations below (leaveZone → transferNoun) and collision-hash
-	// update must serialize with other parallel workers — coarse lock.
-	// leaveZone/transferNoun re-acquire the lock reentrantly, which is free
-	// on Windows CriticalSection.
+	// Collision-hash update must serialize with other parallel workers —
+	// coarse lock.  leaveZone() no longer mutates the scene graph inline;
+	// it only enqueues a PendingTransfer (processed serially by
+	// WorldContext::simulateLockedZones after parallelFor returns), so the
+	// lock here protects updateLastPosition and m_pCollisionHash->update()
+	// against concurrent reads from other zones' query() calls.
 	{
 		PROFILE_START( "detectCollisions:hashUpdate" );
 		AutoLock lock( &WorldContext::sm_SimMutLock );
-		// process all nouns that are outside this zone
+		// queue all nouns that are outside this zone for deferred transfer
 		for ( NounList::iterator iNoun = outsideZone.begin(); iNoun != outsideZone.end(); ++iNoun )
 			leaveZone( *iNoun );
 		// update the last position vector on all collidable objects in this zone..

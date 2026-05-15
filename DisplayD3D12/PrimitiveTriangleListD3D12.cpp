@@ -6,47 +6,7 @@
 #include "DisplayD3D12/PrimitiveTriangleListD3D12.h"
 #include "DisplayD3D12/PrimitiveFactory.h"
 
-//------------------------------------------------------------------------------------
-// Helper: create an UPLOAD heap buffer and copy data into it
-
-static ComPtr<ID3D12Resource> CreateUploadBuffer( ID3D12Device * pDevice, const void * pData, UINT dataSize )
-{
-	if ( !pDevice || dataSize == 0 )
-		return nullptr;
-
-	D3D12_HEAP_PROPERTIES heapProps = {};
-	heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-
-	D3D12_RESOURCE_DESC resDesc = {};
-	resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-	resDesc.Width = dataSize;
-	resDesc.Height = 1;
-	resDesc.DepthOrArraySize = 1;
-	resDesc.MipLevels = 1;
-	resDesc.SampleDesc.Count = 1;
-	resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-
-	ComPtr<ID3D12Resource> buffer;
-	HRESULT hr = pDevice->CreateCommittedResource( &heapProps, D3D12_HEAP_FLAG_NONE,
-		&resDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&buffer) );
-	if ( FAILED(hr) )
-		return nullptr;
-
-	if ( pData )
-	{
-		void * pMapped = nullptr;
-		D3D12_RANGE readRange = { 0, 0 };
-		buffer->Map( 0, &readRange, &pMapped );
-		if ( pMapped )
-		{
-			memcpy( pMapped, pData, dataSize );
-			buffer->Unmap( 0, nullptr );
-		}
-	}
-
-	return buffer;
-}
-
+// CreateUploadBuffer helper now lives in D3D12Helpers.h
 //------------------------------------------------------------------------------------
 
 IMPLEMENT_PRIMITIVE_FACTORY_D3D12( PrimitiveTriangleListD3D12 );

@@ -180,6 +180,18 @@ public:
 	// PSO management
 	ID3D12PipelineState *			getOrCreatePSO( const PSOKey & key, ShaderD3D12 * pShader = nullptr );
 
+	// Binds pPSO via cl->SetPipelineState only when it differs from the most
+	// recently bound PSO.  ALL callers (bindPSO, applyFXAA/Tonemap/SMAA, every
+	// DisplayEffect*::postRender) must go through this so the cached
+	// m_pCurrentPSO stays consistent with the GPU state.  Invalidated to
+	// nullptr in resetCommandList().
+	void							setPSO( ID3D12GraphicsCommandList * cl, ID3D12PipelineState * pPSO );
+
+	// Picks the layout-matching passthrough shader when no material shader is
+	// bound, so the PSO has a valid VS/PS bytecode for its declared input layout.
+	// Same logic was previously inlined in two places (bindPSO + getOrCreatePSO).
+	ShaderD3D12 *					resolveFallbackShader( int inputLayout ) const;
+
 	// Persistent PSO cache plumbing (see m_pPSOLibrary).  Init reads an
 	// existing pso_cache.bin and constructs a pipeline library from it (or an
 	// empty library if no/stale blob); save serializes the in-memory library
@@ -506,8 +518,31 @@ public:
 	ComPtr<ID3D12RootSignature>		m_pRootSignature;
 	ComPtr<ID3D12RootSignature>		m_pPostProcessRootSig;
 
-	// Pipeline State Object cache
+	// Pipeline State Object cache.  THREADING: only the render thread touches
+	// this map (bindPSO / getOrCreatePSO / freeD3D12).  Parallel preRender
+	// workers must NOT call getOrCreatePSO; if that invariant changes this
+	// map needs a lock.
 	std::map<PSOKey, ComPtr<ID3D12PipelineState>>	m_PSOCache;
+
+	// Most recently bound pipeline state — used by setPSO() to skip redundant
+	// SetPipelineState calls.  Reset to nullptr each resetCommandList() because
+	// the GPU state machine starts fresh after a command-list reset.  ANY direct
+	// cl->SetPipelineState() call would desync this cache, so all callers must
+	// route through setPSO().
+	ID3D12PipelineState *			m_pCurrentPSO;
+
+	// Current logical D3D12 state of m_pDepthStencil.  Tracked here so the post
+	// effects (SSAO/LimbGlow/LensFlare) can each request DEPTH_WRITE→PSR via
+	// ensureDepthStencilState() and only the FIRST one actually issues the
+	// barrier; the rest skip.  beginScene transitions back to DEPTH_WRITE in
+	// one shot before ClearDepthStencilView.  Net: 2 transitions per frame
+	// instead of 6 when all three effects are enabled.
+	D3D12_RESOURCE_STATES			m_eDepthStencilState;
+
+	// Transition m_pDepthStencil only when newState differs from
+	// m_eDepthStencilState.  Callers MUST route every depth-stencil resource
+	// barrier through here so the cached state stays consistent.
+	void							ensureDepthStencilState( ID3D12GraphicsCommandList * cl, D3D12_RESOURCE_STATES newState );
 
 	// Persistent (cross-launch) PSO cache via ID3D12PipelineLibrary.
 	// Cold first launch on a given (GPU, driver) compiles every PSO from
@@ -602,8 +637,33 @@ public:
 	// Per-slot cache of which staging-heap SRV index currently lives in each
 	// shader-visible heap slot.  Lets setupTextures()/shadow-map binding skip
 	// CopyDescriptorsSimple when the destination slot already holds the source.
-	// Sized to MAX_SRV_DESCRIPTORS and reset at the start of each frame.
-	Array<UINT>						m_SRVSlotStagingIndex;
+	//
+	// Encoding: upper 32 bits = m_SRVSlotEpoch at write time, lower 32 bits =
+	// the SRV staging index that was written into the slot.  A cache hit
+	// requires the FULL 64-bit value to match (epoch << 32) | candidateIndex
+	// — so a per-frame epoch bump invalidates every entry without touching
+	// memory.  Avoids the 1 MB memset that used to run on every beginScene
+	// (MAX_SRV_DESCRIPTORS * FRAME_COUNT * 4 bytes).
+	Array<uint64_t>					m_SRVSlotStagingIndex;
+	UINT							m_SRVSlotEpoch;
+
+	// Encode/check/write helpers for m_SRVSlotStagingIndex.  See encoding note
+	// above.  isSRVSlotCurrent returns true when the slot currently holds
+	// srvIndex from THIS frame's epoch.
+	inline uint64_t encodeSRVSlotEntry( UINT srvIndex ) const
+	{
+		return ( (uint64_t)m_SRVSlotEpoch << 32 ) | (uint64_t)srvIndex;
+	}
+	inline bool isSRVSlotCurrent( UINT slot, UINT srvIndex ) const
+	{
+		return slot < (UINT)m_SRVSlotStagingIndex.size()
+			&& m_SRVSlotStagingIndex[slot] == encodeSRVSlotEntry( srvIndex );
+	}
+	inline void recordSRVSlot( UINT slot, UINT srvIndex )
+	{
+		if ( slot < (UINT)m_SRVSlotStagingIndex.size() )
+			m_SRVSlotStagingIndex[slot] = encodeSRVSlotEntry( srvIndex );
+	}
 
 	// Last-bound per-material and per-light CB data for redundant-upload suppression.
 	// We hash the struct via byte-wise compare against this cached copy; on a hit
@@ -616,6 +676,19 @@ public:
 	CBPerLight						m_LastLightCB;
 	bool							m_bLastLightCBValid;
 	D3D12_GPU_VIRTUAL_ADDRESS		m_nLastLightCBGpuVA;
+
+	// Multi-light scenes used to thrash the single-entry cache above: Material
+	// A binds L1, L2; Material B binds L1 (memcmp miss vs the just-bound L2),
+	// L2 (miss vs L1), etc.  This small ring stores the most recent N distinct
+	// CBPerLight payloads we've uploaded this frame, with a linear-scan memcmp
+	// match.  N=4 covers the typical 1-2 lights/material with shadow cascades.
+	// Slots are cleared in resetCommandList() since the ring's GpuVAs point
+	// into the previous frame's upload ring.
+	enum { LIGHT_CB_RING_SLOTS = 4 };
+	CBPerLight						m_LightCBRing[LIGHT_CB_RING_SLOTS];
+	D3D12_GPU_VIRTUAL_ADDRESS		m_LightCBRingVA[LIGHT_CB_RING_SLOTS];
+	bool							m_LightCBRingValid[LIGHT_CB_RING_SLOTS];
+	int								m_LightCBRingHead;
 
 	// Same pattern for CBPerObject (world matrix).  Heavy savings on text/UI
 	// rendering — Font::push fans out one PrimitiveSetTransform per glyph
@@ -732,6 +805,12 @@ public:
 	bool							createFXAA();
 	void							applyFXAA();
 	void							applyTonemap();		// AA_NONE: tonemap scene RT → backbuffer
+
+	// Lazy-init the 1x1 R32F=1.0 fallback exposure texture used at t1 by
+	// applyFXAA/applyTonemap when no exposure effect ran this frame.  Needs
+	// an open command list (for clear + transition), so we can't do it in
+	// createFXAA().  No-op once initialized.
+	void							ensureDefaultExposureTexture();
 	bool							createSMAA();		// allocates SMAA RTs + PSOs (called from createFXAA)
 	void							applySMAA();		// AA_SMAA: 3-pass MLAA-style edge AA
 
