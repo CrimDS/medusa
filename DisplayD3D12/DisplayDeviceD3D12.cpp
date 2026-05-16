@@ -114,6 +114,7 @@ DisplayDeviceD3D12::DisplayDeviceD3D12() :
 	m_nFrameIndex( 0 ),
 	m_hFenceEvent( NULL ),
 	m_cAmbientLight( BLACK ),
+	m_cSceneAmbient( BLACK ),
 	m_fShadowDepthRange( 0.0f ),
 	m_bShadowMapReady( false ),
 	m_bShadowMapSupported( true ),
@@ -608,6 +609,18 @@ void DisplayDeviceD3D12::clearZ( float fDepth )
 
 void DisplayDeviceD3D12::setAmbient( Color nColor )
 {
+	m_cAmbientLight = nColor;
+}
+
+void DisplayDeviceD3D12::setSceneAmbient( Color nColor )
+{
+	// Update both: the canonical scene ambient (used by device-wide bakes
+	// like maybeRebakeEnvCube, which need a stable world-ambient value)
+	// AND the per-context ambient (so existing shader paths that read
+	// m_cAmbientLight stay correct without per-call-site migration).
+	// HUD thumbnails use setAmbient() instead — they only touch the per-
+	// context value and leave the scene ambient stable.
+	m_cSceneAmbient = nColor;
 	m_cAmbientLight = nColor;
 }
 
@@ -3474,10 +3487,13 @@ bool DisplayDeviceD3D12::bakePBRIBL()
 	//-------------------------------------------------------------------------
 	EnvSampler env = {};
 	{
+		// Use m_cSceneAmbient (canonical world ambient), NOT m_cAmbientLight
+		// (per-context override).  beginScene fires per HUD/window with
+		// their own m_cAmbientLight values; m_cSceneAmbient stays stable.
 		float inv = 1.0f / 255.0f;
-		env.skyR = srgbToLinear( m_cAmbientLight.m_R * inv );
-		env.skyG = srgbToLinear( m_cAmbientLight.m_G * inv );
-		env.skyB = srgbToLinear( m_cAmbientLight.m_B * inv );
+		env.skyR = srgbToLinear( m_cSceneAmbient.m_R * inv );
+		env.skyG = srgbToLinear( m_cSceneAmbient.m_G * inv );
+		env.skyB = srgbToLinear( m_cSceneAmbient.m_B * inv );
 
 		env.sunDirX = 0.0f; env.sunDirY = -1.0f; env.sunDirZ = 0.0f;
 		env.sunR = 0.0f; env.sunG = 0.0f; env.sunB = 0.0f;
@@ -3870,13 +3886,15 @@ bool DisplayDeviceD3D12::rebakeEnvCubeOnly()
 	const UINT CUBE_FACE_SIZE = 256;
 	const UINT CUBE_MIP_COUNT = 5;
 
-	// Snapshot the live environment from the current m_Lights + m_cAmbientLight.
+	// Snapshot the live environment from the current m_Lights + m_cSceneAmbient.
+	// Same rationale as bakePBRIBL: use the canonical scene ambient, not
+	// the transient per-context one that HUDs flip.
 	EnvSampler env = {};
 	{
 		float inv = 1.0f / 255.0f;
-		env.skyR = srgbToLinear( m_cAmbientLight.m_R * inv );
-		env.skyG = srgbToLinear( m_cAmbientLight.m_G * inv );
-		env.skyB = srgbToLinear( m_cAmbientLight.m_B * inv );
+		env.skyR = srgbToLinear( m_cSceneAmbient.m_R * inv );
+		env.skyG = srgbToLinear( m_cSceneAmbient.m_G * inv );
+		env.skyB = srgbToLinear( m_cSceneAmbient.m_B * inv );
 
 		env.sunDirX = 0.0f; env.sunDirY = -1.0f; env.sunDirZ = 0.0f;
 		env.sunR = 0.0f; env.sunG = 0.0f; env.sunB = 0.0f;
@@ -4129,6 +4147,7 @@ void DisplayDeviceD3D12::maybeRebakeEnvCube()
 {
 	if ( !m_bPBRIBLReady )
 		return;
+
 	if ( GetTickCount() - m_nLastBakeTick < 2000 )
 		return;     // throttle
 
@@ -4147,9 +4166,11 @@ void DisplayDeviceD3D12::maybeRebakeEnvCube()
 		}
 	}
 	const float inv = 1.0f / 255.0f;
-	float curSkyR = srgbToLinear( m_cAmbientLight.m_R * inv );
-	float curSkyG = srgbToLinear( m_cAmbientLight.m_G * inv );
-	float curSkyB = srgbToLinear( m_cAmbientLight.m_B * inv );
+	// Drift comparison against the canonical scene ambient — m_cAmbientLight
+	// is per-context and would oscillate with each HUD/window's beginScene.
+	float curSkyR = srgbToLinear( m_cSceneAmbient.m_R * inv );
+	float curSkyG = srgbToLinear( m_cSceneAmbient.m_G * inv );
+	float curSkyB = srgbToLinear( m_cSceneAmbient.m_B * inv );
 
 	// Direction drift: dot product of unit vectors.  <0.95 = ~18° apart.
 	float sunDot = curSunDirX * m_vLastBakeSunDir[0]

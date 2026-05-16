@@ -115,6 +115,8 @@ public:
 	virtual void					clear( Color nColor );
 	virtual void					clearZ( float fDepth = 1.0f );
 	virtual void					setAmbient( Color nColor );
+	virtual void					setSceneAmbient( Color nColor );
+	virtual Color					sceneAmbient() const { return m_cSceneAmbient; }
 	virtual int						addDirectionalLight( int nPriority, Color nColor, const Vector3 & vDirection );
 	virtual int						addPointLight( int nPriority, Color nColor, const Vector3 & vPosition, float fRadius );
 	virtual void					clearLights();
@@ -566,7 +568,8 @@ public:
 	CBPerMaterial					m_CurrentMatCB;		// accumulated per-material state; bound after setupTextures()
 
 	// Lighting
-	Color							m_cAmbientLight;
+	Color							m_cAmbientLight;	// per-context (HUD thumbnails override per draw)
+	Color							m_cSceneAmbient;	// canonical world ambient (load-bearing for env-cube tracking, SH bake, etc.)
 	LightMap						m_Lights;
 
 	// Shaders
@@ -627,7 +630,7 @@ public:
 	float							m_vLastBakeSunDir[3];
 	float							m_vLastBakeSunRGB[3];
 	float							m_vLastBakeSkyRGB[3];
-	dword							m_nLastBakeTick;	// throttle: min ticks between rebakes
+	dword							m_nLastBakeTick;			// throttle: min ticks between rebakes
 
 	// Command list open state — true between resetCommandList() and flushCommandList()
 	bool							m_bCommandListOpen;

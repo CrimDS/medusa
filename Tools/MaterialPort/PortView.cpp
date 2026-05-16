@@ -89,12 +89,12 @@ void CPortView::DoDataExchange(CDataExchange* pDX)
 	DDX_CBIndex(pDX, IDC_COMBO1, m_Stack);
 	DDX_Control(pDX, IDC_LIST1, m_cTextureList );
 	//}}AFX_DATA_MAP
-	// IDC_EDIT6 is the shader dropdown (CBS_DROPDOWN combo).  CBString
-	// reads the current edit-field text — for a list selection that's
-	// the friendly name we added in OnInitialUpdate, for typed input
-	// that's whatever the user wrote.  shaderFriendlyToPath in
-	// OnUpdate (view→doc) converts either form to the engine-load path.
-	DDX_CBString(pDX, IDC_EDIT6, m_sShader);
+	// NOTE: IDC_EDIT6 (shader dropdown) is intentionally NOT bound via
+	// DDX_CBString.  CBS_DROPDOWN combos have timing issues where the
+	// edit-field text isn't reliably committed when CBN_CLOSEUP fires,
+	// so DDX reads stale content.  Shader sync happens directly via
+	// GetCurSel/GetLBText (read) and FindStringExact/SetCurSel (write)
+	// in OnUpdate — see syncShaderFromCombo and syncShaderToCombo.
 	DDX_Text(pDX, IDC_ROUGHNESS, m_Roughness);
 	DDV_MinMaxFloat(pDX, m_Roughness, 0.0f, 1.0f);
 	DDX_Text(pDX, IDC_METALLIC, m_Metallic);
@@ -120,11 +120,14 @@ BEGIN_MESSAGE_MAP(CPortView, CFormView)
 	ON_EN_KILLFOCUS(IDC_EDIT2, OnUpdateMaterial)
 	ON_CBN_SELCHANGE(IDC_BLENDING, OnUpdateMaterial)
 	ON_EN_KILLFOCUS(IDC_EDIT5, OnUpdateMaterial)
-	// Shader combobox: SELCHANGE fires when the user picks from the
-	// dropdown, KILLFOCUS catches typed-then-tab-away.  Both route to
-	// OnUpdateMaterial which translates friendly→path via
-	// shaderFriendlyToPath.
+	// Shader combobox: SELCHANGE is the primary handler now that we read
+	// directly from the combo (readShaderFromCombo via GetCurSel) rather
+	// than from the edit-field text — this sidesteps the CBS_DROPDOWN
+	// timing issue where the edit field isn't updated yet when
+	// SELCHANGE fires.  CLOSEUP keeps as a belt-and-suspenders catch.
+	// KILLFOCUS handles typed-then-tab-away for custom shader paths.
 	ON_CBN_SELCHANGE(IDC_EDIT6, OnUpdateMaterial)
+	ON_CBN_CLOSEUP(IDC_EDIT6, OnUpdateMaterial)
 	ON_CBN_KILLFOCUS(IDC_EDIT6, OnUpdateMaterial)
 	ON_EN_KILLFOCUS(IDC_PIXEL_SHADER, OnUpdateMaterial)
 	ON_BN_CLICKED(IDC_CHECK4, OnUpdateMaterial)
@@ -220,6 +223,42 @@ static CString shaderFriendlyToPath( const char * friendlyIn )
 	return trimmed;
 }
 
+// Read the current shader selection out of the combo directly — bypasses
+// DDX_CBString and its CBS_DROPDOWN timing issues.  Returns the path-form
+// (e.g. "Shaders/PBR.hlsl"), or empty for the auto-detect sentinel.
+static CharString readShaderFromCombo( CWnd * pView )
+{
+	CComboBox * pCombo = (CComboBox *)pView->GetDlgItem( IDC_EDIT6 );
+	if ( !pCombo )
+		return CharString( "" );
+
+	CString text;
+	int sel = pCombo->GetCurSel();
+	if ( sel >= 0 )
+		pCombo->GetLBText( sel, text );		// trust the list selection first
+	else
+		pCombo->GetWindowText( text );		// fall back to typed input
+
+	return CharString( shaderFriendlyToPath( text ) );
+}
+
+// Push the doc's stored shader path into the combo as the friendly name
+// (selects the matching list item if known; otherwise types the raw path
+// into the edit field for custom shaders).
+static void writeShaderToCombo( CWnd * pView, const char * pathIn )
+{
+	CComboBox * pCombo = (CComboBox *)pView->GetDlgItem( IDC_EDIT6 );
+	if ( !pCombo )
+		return;
+
+	CString friendly = shaderPathToFriendly( pathIn );
+	int idx = pCombo->FindStringExact( -1, friendly );
+	if ( idx >= 0 )
+		pCombo->SetCurSel( idx );			// updates edit field too
+	else
+		pCombo->SetWindowText( friendly );	// custom path — clear selection, type
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // CPortView message handlers
 
@@ -296,10 +335,9 @@ void CPortView::OnUpdate(CView* pSender, LPARAM lHint, CObject* pHint)
 		UPDATE_DOC( m_DoubleSided, m_DoubleSided );
 		UPDATE_DOC( m_Fps, m_Fps );
 		UPDATE_DOC( m_Frames, m_Frames );
-		// m_sShader at this point holds the combo's current edit-field
-		// text (friendly name for known shaders, raw input for custom).
-		// Translate to the engine-load path before storing on the doc.
-		UPDATE_DOC( m_sShader, CharString( shaderFriendlyToPath( m_sShader ) ) );
+		// Shader: read directly from the combo (bypasses DDX_CBString
+		// timing issues with CBS_DROPDOWN — see DoDataExchange note).
+		UPDATE_DOC( m_sShader, readShaderFromCombo( this ) );
 		UPDATE_DOC( m_Roughness, m_Roughness );
 		UPDATE_DOC( m_Metallic, m_Metallic );
 		UPDATE_DOC( m_AO, m_AO );
@@ -328,15 +366,17 @@ void CPortView::OnUpdate(CView* pSender, LPARAM lHint, CObject* pHint)
 		m_DoubleSided = pDoc->m_DoubleSided;
 		m_Fps = pDoc->m_Fps;
 		m_Frames = pDoc->m_Frames;
-		// Translate the stored engine-load path to the friendly name shown
-		// in the shader dropdown.  Unknown paths fall through to the raw
-		// string so custom shaders are still visible/editable.
-		m_sShader = shaderPathToFriendly( pDoc->m_sShader );
+		// Shader dropdown is written directly to the control, after
+		// UpdateData(FALSE) below (which would clobber it if we set
+		// m_sShader without DDX binding the field).
 		m_Roughness = pDoc->m_Roughness;
 		m_Metallic = pDoc->m_Metallic;
 		m_AO = pDoc->m_AO;
 
 		UpdateData( false );
+
+		// Sync shader combo directly — not DDX-bound (see DoDataExchange).
+		writeShaderToCombo( this, pDoc->m_sShader );
 
 		UpdateTextureListControl();
 

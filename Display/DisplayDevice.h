@@ -188,7 +188,18 @@ public:
 	virtual void					clear( Color nColor ) = 0;			// clear the backbuffer to the specific color
 	virtual void					clearZ( float fDepth = 1.0f ) = 0;	// clear the z-buffer
 
-	virtual void					setAmbient( Color nColor ) = 0;		// set the ambient light
+	virtual void					setAmbient( Color nColor ) = 0;		// set the per-context ambient (transient — HUD thumbnails can override per draw)
+	// Set the canonical scene ambient.  Distinct from setAmbient() to
+	// distinguish "this is the world's ambient" (load-bearing, used by
+	// device-wide bakes like the PBR env cube) from "this is the
+	// per-draw ambient fill" (HUD thumbnails use this for bright preview
+	// rendering, see WindowTarget / WindowGadget).  setSceneAmbient
+	// also updates the per-context ambient as a convenience, so the
+	// main scene only needs one call.  Default impl just forwards to
+	// setAmbient — backends that don't track scene ambient distinctly
+	// get correct legacy behaviour.
+	virtual void					setSceneAmbient( Color nColor ) { setAmbient( nColor ); }
+	virtual Color					sceneAmbient() const { return Color(0,0,0); }
 	virtual int						addDirectionalLight( int nPriority,
 										Color nColor,					// color of directional light
 										const Vector3 & vDir ) = 0;		// direction of light in view space

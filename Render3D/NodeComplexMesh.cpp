@@ -13,6 +13,7 @@
 #include "Debug/Assert.h"
 #include "Standard/Limits.h"
 #include "Display/PrimitiveSetTransform.h"
+#include "Math/Quat.h"
 #include "Render3D/NodeComplexMesh.h"
 
 //-------------------------------------------------------------------------------
@@ -102,15 +103,40 @@ void NodeComplexMesh::render( RenderContext &context, const Matrix33 & frame, co
 
 void NodeComplexMesh::preRender( RenderContext &context, const Matrix33 & frame, const Vector3 & position )
 {
-	// animate this object if it has an animation
-	if ( m_Frames.size() > 0 )
+	// Interpolate position+rotation between bracketing keyframes so animation
+	// is smooth at the render rate instead of stepping at m_Fps (typically
+	// 15).  Position uses LERP; rotation uses normalized-lerp on quaternions
+	// (slerp's classic 1/sin(0) blow-up when adjacent keyframes are nearly
+	// identical isn't guarded in Quat::slerp — and at small per-frame deltas
+	// nlerp is visually indistinguishable anyway).
+	const int fc = m_Frames.size();
+	if ( fc > 0 )
 	{
-		int frameIndex = (int)(context.time() * m_Fps);
-		frameIndex = frameIndex % m_Frames.size();
+		float t  = context.time() * m_Fps;
+		float tm = fmodf( t, (float)fc );
+		if ( tm < 0.0f ) tm += (float)fc;
 
-		Frame & f = m_Frames[ frameIndex ];
-		m_Frame = f.m_Frame;
-		m_Position = f.m_Position;
+		const int   i0 = (int)tm;
+		const int   i1 = (i0 + 1) % fc;
+		const float u  = tm - (float)i0;
+
+		const Frame & a = m_Frames[ i0 ];
+		const Frame & b = m_Frames[ i1 ];
+
+		m_Position = a.m_Position * (1.0f - u) + b.m_Position * u;
+
+		if ( i0 == i1 )            // single-frame anim, no rotation interp needed
+		{
+			m_Frame = a.m_Frame;
+		}
+		else
+		{
+			Quat qa( a.m_Frame );
+			Quat qb( b.m_Frame );
+			if ( qa.dot( qb ) < 0.0f )
+				qb = -qb;          // shortest path around the hypersphere
+			m_Frame = Quat::lerp( qa, qb, u ).getMatrix33();
+		}
 	}
 
 	NodeTransform::preRender( context, frame, position );
