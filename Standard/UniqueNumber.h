@@ -163,6 +163,10 @@ protected:
 					sm_pProvider;
 };
 
+// Wire/on-disk size must match across Windows x86, Windows x64, Linux x64
+// (sent via IMPLEMENT_RAW_STREAMING).  WidgetKey/ClassKey inherit from this.
+static_assert( sizeof(UniqueNumber) == 8, "UniqueNumber must be exactly 8 bytes on the wire (qword m_Id)" );
+
 //----------------------------------------------------------------------------
 
 inline UniqueNumber::operator qword() const

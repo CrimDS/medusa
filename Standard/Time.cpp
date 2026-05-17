@@ -171,7 +171,9 @@ WideString Time::format(dword nTime, const wchar * pFormat)
 #if defined(_WIN32)
 	wcsftime(sOut, MAX_TIME_FORMAT_STRING, pFormat, _localtime32((__time32_t *)&nTime));
 #else
-	wcsftime(sOut, MAX_TIME_FORMAT_STRING, pFormat, localtime((time_t *)&nTime));
+	// See CharString variant below for the time_t-size rationale.
+	time_t t = (time_t)nTime;
+	wcsftime(sOut, MAX_TIME_FORMAT_STRING, pFormat, localtime(&t));
 #endif
 	return WideString(sOut);
 }
@@ -182,7 +184,13 @@ CharString Time::format(dword nTime, const char * pFormat)
 #if defined(_WIN32)
 	strftime(sOut, MAX_TIME_FORMAT_STRING, pFormat, _localtime32((__time32_t *)&nTime));
 #else
-	strftime(sOut, MAX_TIME_FORMAT_STRING, pFormat, localtime((time_t *)&nTime));
+	// time_t is 64-bit on Linux LP64; nTime is dword (32-bit).  Reinterpret-
+	// casting &nTime to time_t* and dereferencing reads 4 bytes of stack
+	// garbage past nTime, yielding a wildly out-of-range time → localtime()
+	// returns NULL → strftime(NULL) segfaults.  Copy through a proper time_t
+	// (which sign-/zero-extends correctly) before calling localtime.
+	time_t t = (time_t)nTime;
+	strftime(sOut, MAX_TIME_FORMAT_STRING, pFormat, localtime(&t));
 #endif
 	return CharString(sOut);
 }
@@ -224,8 +232,13 @@ bool Time::isTime(dword nSeconds, const char * pMask)
 #if defined(_WIN32)
 	tm * pTime = _localtime32((const __time32_t *)&nSeconds);
 #else
-	tm * pTime = localtime((const time_t *)&nSeconds);
+	// Same time_t-size mismatch as Time::format above: nSeconds is dword
+	// (4 bytes) but Linux time_t is 8.  Copy through a proper time_t first.
+	time_t t = (time_t)nSeconds;
+	tm * pTime = localtime(&t);
 #endif
+	if (!pTime)
+		return false;
 	if (!CheckMaskPart(sParts[0], (pTime->tm_mon + 1)))
 		return false;
 	if (!CheckMaskPart(sParts[1], pTime->tm_mday))
@@ -247,7 +260,10 @@ CharString Time::time(dword nSeconds)
 #if defined(_WIN32)
 	return _ctime32((__time32_t *)&nSeconds);
 #else
-	return ctime((time_t *)&nSeconds);
+	// Same time_t-size mismatch — see Time::format above.
+	time_t t = (time_t)nSeconds;
+	const char * s = ctime(&t);
+	return s ? s : "";
 #endif
 }
 

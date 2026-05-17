@@ -208,6 +208,33 @@ public:
 	// per-slot applied-dt tracking is no longer needed.
 	void					extrapLocalShip( int idx, float fDt );
 
+	// Frame extrap to wall-clock "now" for the local ship.  Same idea as
+	// extrapLocalShip but for rotation: slerps A→B with t computed from
+	// (now - A.captureTicks) / (B.captureTicks - A.captureTicks), which is
+	// 1.0 at B and grows past 1.0 for extrap.  Uses a numerically guarded
+	// slerp (Quat conversion + shortest-path negation + nlerp fallback for
+	// near-identical frames), so the engine Quat::slerp's 1/sin(theta) NaN
+	// blow-up that historically forced frame-lerp off is sidestepped.
+	// alpha should be clamped to ~2.0 by the caller so a sim stall doesn't
+	// rotate the ship into orbit.
+	void					extrapLocalShipFrame( int idx,
+									const RenderSnapshot & A,
+									const RenderSnapshot & B,
+									float alpha );
+
+	// Ballistic-extrap opt-in.  Nouns that flag themselves (NounProjectile
+	// in particular) get their pinned pose overridden with B (latest, un-
+	// lagged) and advanced by m_Velocities[idx] * fDt at pin time — same
+	// pattern as the local ship, but using the noun's own velocity vector
+	// instead of ship-heading dynamics.  Safe vs the server because the
+	// sim itself does `m_Position += m_vVelocity * dt` between tick
+	// boundaries with velocity held constant within a tick (NounProjectile
+	// simulate); extrap by the latest captured velocity reproduces that
+	// exactly, no client/server divergence.
+	void					setExtrap( int idx );
+	bool					extrap( int idx ) const;
+	void					extrapBallistic( int idx, float fDt );
+
 	// Option 3 — materialize this snapshot as the linear interpolation of
 	// two history slots A (older) and B (newer) at fractional time t ∈ [0, 1].
 	// Starts with `*this = B` (structural data — key list, ship scalars,
@@ -230,6 +257,13 @@ public:
 	// extrapLocalShip.  Structural fields (key, ship scalars) stay at
 	// whatever materialize left them.
 	void					copyPoseFrom( const RenderSnapshot & src,
+									int srcIdx, int dstIdx );
+
+	// Position+velocity copy (no frame).  Used by the ballistic-extrap path
+	// where the slerp'd frame from materialize is the smoothed heading we
+	// want to keep, and only position needs to be overridden with B's
+	// freshest value before extrapBallistic forwards it to "now".
+	void					copyBallisticPoseFrom( const RenderSnapshot & src,
 									int srcIdx, int dstIdx );
 
 	// World-state snapshot fields (populated by WorldContext::captureRenderSnapshot).
@@ -290,6 +324,11 @@ private:
 	// Phase D D.8 — planet state.  Per-noun-slot; non-planet slots stay zero.
 	std::vector<float>		m_PlanetControl;
 	std::vector<dword>		m_PlanetFlags;
+
+	// Ballistic-extrap opt-in flag (see setExtrap above).  unsigned char,
+	// not bool — vector<bool> is a packed bitfield and harder to work with
+	// from the captureSnapshotState path.  Parallel to the noun arrays.
+	std::vector<unsigned char>	m_Extrap;
 
 	// Index into the parallel arrays by noun key.  Populated by addNoun,
 	// cleared by clear().  Lets the render path map a live Noun back to

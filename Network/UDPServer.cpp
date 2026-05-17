@@ -9,6 +9,17 @@
 #include "Socket.h"
 #include "Debug/Trace.h"
 
+#include <stdint.h>		// intptr_t for portable SOCKET <-> void* cast (see below)
+
+// On Win32, SOCKET is pointer-width (UINT_PTR); on Linux, it's int (4 bytes).
+// The engine stores the socket handle in `void * m_pSocket` to fit either,
+// but a direct (SOCKET)void* cast on Linux is a precision-loss error under
+// modern gcc.  Bouncing through intptr_t makes the round-trip explicit and
+// safe on both platforms — Windows' UINT_PTR is the same size as intptr_t,
+// and Linux's int slots into the low bits of intptr_t cleanly.
+#define SOCKET_FROM_PTR(p)  ((SOCKET)(intptr_t)(p))
+#define PTR_FROM_SOCKET(s)  ((void *)(intptr_t)(s))
+
 #if defined(WIN32)
 #include <winsock2.h>
 
@@ -66,7 +77,7 @@ bool UDPServer::UDP::send()
     Address.sin_addr.s_addr = htonl( address() );
     Address.sin_port = htons( port() );
 
-	int nSent = ::sendto( (SOCKET)m_pSocket, (const char *)Data, nDataSize + 1, 0, (sockaddr *)&Address, sizeof(Address) );
+	int nSent = ::sendto( SOCKET_FROM_PTR(m_pSocket), (const char *)Data, nDataSize + 1, 0, (sockaddr *)&Address, sizeof(Address) );
 	if ( nSent < 0 )
 		return false;		// some type of error has occurred while trying to send..
 	if ( nSent != (nDataSize + 1) )
@@ -107,7 +118,7 @@ bool UDPServer::start( u16 nPort )
 	SOCKET nSocket = socket( AF_INET, SOCK_DGRAM, IPPROTO_UDP );
 	if ( nSocket == INVALID_SOCKET  )
 		return false;	// failed to create socket
-	m_pSocket = (void *)nSocket;
+	m_pSocket = PTR_FROM_SOCKET(nSocket);
 
 	// bind this socket to the port
     sockaddr_in thisAddress;
@@ -118,7 +129,7 @@ bool UDPServer::start( u16 nPort )
     thisAddress.sin_port = htons( m_nPort );
 
 	// bind the port, then listen for a connection
-	if ( ::bind( (SOCKET)m_pSocket, (sockaddr *)&thisAddress, sizeof(thisAddress)) != 0 )
+	if ( ::bind( SOCKET_FROM_PTR(m_pSocket), (sockaddr *)&thisAddress, sizeof(thisAddress)) != 0 )
 		return false;		// failed to bind!
 
 	// start the thread that will actually block to receive ALL incoming packets for this server...
@@ -143,9 +154,9 @@ bool UDPServer::stop()
 		// NOTE: Closing the socket needs to be done first, this causes the thread if blocking to unblock so it
 		// can exit cleanly...
 #if defined(_WIN32)
-		closesocket( reinterpret_cast<SOCKET>( m_pSocket ) );
+		closesocket( SOCKET_FROM_PTR( m_pSocket ) );
 #else
-		::close( reinterpret_cast<SOCKET>( m_pSocket ) );
+		::close( SOCKET_FROM_PTR( m_pSocket ) );
 #endif
 		m_pSocket = NULL;
 	}
@@ -261,7 +272,7 @@ int UDPServer::receiveThread()
 		sockaddr_in Address;
 		int nAddressSize = sizeof(Address);
 
-		int nReceived = ::recvfrom( (SOCKET)m_pSocket, (char *)Data, sizeof(Data), 0, (sockaddr *)&Address, (socklen_t *)&nAddressSize );
+		int nReceived = ::recvfrom( SOCKET_FROM_PTR(m_pSocket), (char *)Data, sizeof(Data), 0, (sockaddr *)&Address, (socklen_t *)&nAddressSize );
 		if ( nReceived < 1 )
 			continue;		// error while receiving packet..
 

@@ -252,6 +252,10 @@ const Color SKYBLUE			(	135,	206,	235,	255);
 const Color BRIGHT_PURPLE	(	128,	0,		128,	255);
 const Color TEAL			(	0,		128,	128,	255);
 
+// Wire/on-disk size must match across Windows x86, Windows x64, Linux x64
+// (sent via IMPLEMENT_RAW_STREAMING — raw sizeof bytes).  4x u8 packed.
+static_assert( sizeof(Color) == 4, "Color must be exactly 4 bytes on the wire (4x u8)" );
+
 //----------------------------------------------------------------------------
 
 

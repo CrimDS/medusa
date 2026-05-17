@@ -18,7 +18,14 @@
 //----------------------------------------------------------------------------
 
 const int KILL_TIMEOUT		= 30 * 1000;		// when destroying a thread, wait this long before killing the thread outright
-const int MIN_STACK_SIZE	= 16 * 1024;
+// Minimum stack for worker threads, in bytes.  Was 16 KB, which on Linux
+// pthreads is what you actually get (Windows silently rounds tiny stacks up
+// to ~1 MB).  StringTemplate::format alone allocates FORMAT_BUFFER_SIZE
+// (128 KB) on the stack, so anything below ~256 KB instantly overflows the
+// first time a worker calls e.g. UniqueNumber::string() through the Broker
+// load path.  1 MB matches what Windows gives by default and leaves
+// comfortable headroom for normal call depth.
+const int MIN_STACK_SIZE	= 1 * 1024 * 1024;
 
 CriticalSection					Thread::sm_Lock;						// sempahore for locking the thread list
 std::map< dword, Thread * >		Thread::sm_Threads;					// static list of all thread objects

@@ -428,10 +428,11 @@ inline const Vector3 & Noun::zonePosition() const
 	return m_vZonePosition;
 }
 
-inline bool Noun::isWorldValid() const
-{
-	return m_Tick == m_nWorldTick;
-}
+// Out-of-line in Noun.cpp — the snap-mode branch needs to call
+// isRenderingFromSnapshot()/RenderContext::sm_bUseRenderSnapshot which would
+// pull RenderSnapshot.h / RenderContext.h into this header.  The cost of the
+// non-inlined call is one function jump per accessor read; per-call cache hits
+// still avoid calculateWorld()'s work.
 
 inline const Vector3 & Noun::worldPosition() const
 {

@@ -24,6 +24,15 @@ public:
 		float			fDistance;
 	};
 
+	// Virtual destructor — NodeZone::~NodeZone() does `delete m_pCollisionHash`
+	// where the static type is `CollisionHashAbstract*` but the dynamic type
+	// is CollisionHashBSP / CollisionHash1D.  Without a virtual destructor
+	// the compiler emits a sized delete for sizeof(base) (=8 bytes, vtable
+	// only); ASAN flags it as new-delete-type-mismatch on Linux x64 (16-byte
+	// alloc vs 8-byte dealloc), and on MSVC it's the same UB papered over by
+	// the allocator implementation.
+	virtual ~CollisionHashAbstract() {}
+
 	// Accessors
 	virtual bool		isInitialized() const = 0;
 	virtual bool		query( const Vector3 & vPosition, float fRadius, 

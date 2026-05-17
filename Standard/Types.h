@@ -49,8 +49,23 @@ typedef unsigned short		u16;
 typedef short				s16;
 typedef unsigned int		u32;
 typedef int					s32;
+// Must be exactly 32-bit on every target.  `unsigned long` IS 32-bit on
+// Windows LLP64 (MSVC x64) but 64-bit on Linux LP64 (gcc x64) — using it
+// unconditionally silently broke every StringHash64 / ClassKey computation
+// on Linux (hash rotations stopped wrapping at 32 bits, so Linux-computed
+// hash of e.g. "GameContext" didn't match the value stored in .wob files
+// written by the Windows build).
+//
+// Branch on platform so we get 32 bits on both, AND match the Win32 API
+// `DWORD` (= `unsigned long`) on Windows — otherwise every Reg*/Thread*/
+// GetExitCode* call rejects `dword*` arguments with C2664.
+#if defined(_WIN32)
 typedef unsigned long		ul32;
 typedef long				sl32;
+#else
+typedef unsigned int		ul32;
+typedef int					sl32;
+#endif
 
 typedef float				f32;
 typedef double				f64;

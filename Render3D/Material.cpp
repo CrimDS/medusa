@@ -436,10 +436,12 @@ PrimitiveSurface * Material::getSurface( DisplayDevice * pDisplay, Image::Link p
 		SizeInt imageSize( pImage->size() );
 		if ( imageSize.width <= 0 || imageSize.height <= 0 || imageSize.width > 16384 || imageSize.height > 16384 )
 		{
-			char buf[256];
-			sprintf_s( buf, "ERROR: Material::getSurface() - corrupt Image size %dx%d format=%d, skipping!\n",
+			// Was: sprintf_s into a local buf + OutputDebugStringA (both MSVC-only).
+			// LOG_ERROR routes through the engine's logging backend on every
+			// platform — same destination as the TRACE() above, just severity-
+			// tagged and printf-formatted.
+			LOG_ERROR( "Material", "getSurface() - corrupt Image size %dx%d format=%d, skipping!",
 				imageSize.width, imageSize.height, (int)pImage->format() );
-			OutputDebugStringA( buf );
 			return NULL;
 		}
 		SizeInt maxSize( pDisplay->textureMaxSize() );

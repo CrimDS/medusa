@@ -50,8 +50,30 @@ void WorldServer::loginClients()
 		LoginJob & job = *m_LoginQueue;
 		if ( job.bDone )
 		{
-			// we now have login data for the client, finish the login process for the client..
-			send( job.nClientId, WorldClient::CLIENT_LOGIN ) << loginClient( job );
+			// IMPORTANT: evaluate loginClient() BEFORE the send().
+			// loginClient() has heavy side effects — it sends CLIENT_RECV_
+			// SERVER_STATUS, CONTEXT_INIT, CLIENT_SET_PROFILE etc. through
+			// the SAME socket as part of producing its bool return.  The
+			// wire order the client expects is "all those packets first,
+			// then a final CLIENT_LOGIN(bool)".
+			//
+			// The original code was:
+			//   send( nClientId, CLIENT_LOGIN ) << loginClient( job );
+			// which relies on right-to-left evaluation of the operands of
+			// `<<` so that loginClient() runs before send().  Pre-C++17 the
+			// order of operand evaluation for `<<` is UNSPECIFIED — MSVC
+			// happened to evaluate right-to-left so this worked.  C++17
+			// mandates left-to-right, so under gcc the OutStream ctor writes
+			// CLIENT_LOGIN's msgID byte FIRST, then loginClient() sends all
+			// its side-effect packets, then the bool gets appended last —
+			// totally mangling the wire stream.  Symptom: client logs
+			// `CLIENT_LOGIN, login = Yes` (because the CLIENT_RECV_SERVER_
+			// STATUS msgID byte 0x02 was read as the bool), then blocks
+			// forever on a 3-byte FileSocket::read (the gameId dword's
+			// remaining bytes after its first byte got consumed as the
+			// next msgID).
+			bool bLoggedIn = loginClient( job );
+			send( job.nClientId, WorldClient::CLIENT_LOGIN ) << bLoggedIn;
 			m_LoginQueue.pop();
 		}
 		else

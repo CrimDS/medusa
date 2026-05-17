@@ -64,7 +64,7 @@ void BrokerServer::onReceive( dword client, byte message, const InStream & input
 				// allocate a buffer to read the widget into
 				dword fileSize = file.size();
 				byte * pBuffer = new byte[ fileSize ];
-				
+
 				// read the widget into this buffer
 				file.read( pBuffer, fileSize );
 
@@ -72,7 +72,7 @@ void BrokerServer::onReceive( dword client, byte message, const InStream & input
 				OutStream output = send( client, BrokerClient::CLIENT_RECEIVE_WIDGET );
 				output.write( pBuffer, fileSize );
 
-				delete pBuffer;
+				delete[] pBuffer;
 			}
 			else
 			{

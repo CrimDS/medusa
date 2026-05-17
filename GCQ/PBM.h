@@ -91,7 +91,7 @@ inline void PBM::initialize( int width, int height, Color * pPixels )
 
 inline void PBM::release()
 {
-	delete m_pPixels;
+	delete[] m_pPixels;
 	m_pPixels = NULL;
 }
 
@@ -116,7 +116,7 @@ inline const InStream & operator>>( const InStream & input, PBM & pbm )
 
 	pbm.initialize( width, height, pPixels );
 
-	delete pPixels;
+	delete[] pPixels;
 
 	return input;
 }

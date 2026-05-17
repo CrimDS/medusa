@@ -234,13 +234,13 @@ void MD5::digest( const byte * Input, unsigned int nInputLen )
 void MD5::Transform( const byte Block[64] )
 {
 	//initialise local data with current checksum
-	unsigned long a = m_lMD5[0];
-	unsigned long b = m_lMD5[1];
-	unsigned long c = m_lMD5[2];
-	unsigned long d = m_lMD5[3];
+	dword a = m_lMD5[0];
+	dword b = m_lMD5[1];
+	dword c = m_lMD5[2];
+	dword d = m_lMD5[3];
 
 	//copy BYTES from input 'Block' to an array of ULONGS 'X'
-	unsigned long X[16];
+	dword X[16];
 	ByteToDWord( X, Block, 64 );
 
 	//Perform Round 1 of the transformation
@@ -395,10 +395,10 @@ void MD5::ByteToDWord(dword* Output, const byte* Input, unsigned int nLength)
 	//transfer the data by shifting and copying
 	for ( ; j < nLength; i++, j += 4)
 	{
-		Output[i] = (unsigned long)Input[j]			| 
-					(unsigned long)Input[j+1] << 8	| 
-					(unsigned long)Input[j+2] << 16 | 
-					(unsigned long)Input[j+3] << 24;
+		Output[i] = (dword)Input[j]			| 
+					(dword)Input[j+1] << 8	| 
+					(dword)Input[j+2] << 16 | 
+					(dword)Input[j+3] << 24;
 	}
 }
 

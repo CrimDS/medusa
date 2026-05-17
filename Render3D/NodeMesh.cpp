@@ -13,6 +13,7 @@
 #include "Debug/Assert.h"
 #include "Standard/Limits.h"
 #include "Display/PrimitiveSetTransform.h"
+#include "Math/Quat.h"
 #include "Render3D/Scene.h"
 #include "Render3D/NodeMesh.h"
 
@@ -84,17 +85,42 @@ void NodeMesh::render( RenderContext &context, const Matrix33 & frame, const Vec
 
 void NodeMesh::preRender( RenderContext &context, const Matrix33 & frame, const Vector3 & position )
 {
-	if ( m_Frames.size() > 0 )
+	// v1 mesh keyframe interp — same pattern as NodeComplexMesh / Node-
+	// ComplexMesh2.  Position LERP + quaternion nlerp with shortest-path
+	// negation so the rotation interp is numerically safe even when
+	// adjacent keyframes are nearly identical (engine Quat::slerp's
+	// 1/sin(theta) blow-up bites otherwise).
+	const int fc = m_Frames.size();
+	if ( fc > 0 )
 	{
 		Scene * pScene = Scene::currentScene();
 		ASSERT( pScene );
 
-		int frameIndex = (int)( context.time() * pScene->fps() );
-		frameIndex = frameIndex % m_Frames.size();
+		float t  = context.time() * pScene->fps();
+		float tm = fmodf( t, (float)fc );
+		if ( tm < 0.0f ) tm += (float)fc;
 
-		Frame & f = m_Frames[ frameIndex ];
-		m_Frame = f.m_Frame;
-		m_Position = f.m_Position;
+		const int   i0 = (int)tm;
+		const int   i1 = (i0 + 1) % fc;
+		const float u  = tm - (float)i0;
+
+		const Frame & a = m_Frames[ i0 ];
+		const Frame & b = m_Frames[ i1 ];
+
+		m_Position = a.m_Position * (1.0f - u) + b.m_Position * u;
+
+		if ( i0 == i1 )
+		{
+			m_Frame = a.m_Frame;
+		}
+		else
+		{
+			Quat qa( a.m_Frame );
+			Quat qb( b.m_Frame );
+			if ( qa.dot( qb ) < 0.0f )
+				qb = -qb;
+			m_Frame = Quat::lerp( qa, qb, u ).getMatrix33();
+		}
 	}
 
 	NodeTransform::preRender( context, frame, position );

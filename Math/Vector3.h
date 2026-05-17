@@ -103,6 +103,11 @@ public:
 IMPLEMENT_STREAMING( Vector3 );					// bit streaming operators
 IMPLEMENT_RAW_STREAMING( Vector3 );
 
+// Wire/on-disk size must match across Windows x86, Windows x64, Linux x64.
+// Vector3 is sent via IMPLEMENT_RAW_STREAMING (raw sizeof bytes) — any ABI
+// drift here breaks the network protocol.
+static_assert( sizeof(Vector3) == 12, "Vector3 must be exactly 12 bytes on the wire (3x f32)" );
+
 //----------------------------------------------------------------------------
 // Helpers
 

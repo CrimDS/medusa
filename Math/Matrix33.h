@@ -85,6 +85,10 @@ public:
 IMPLEMENT_RAW_STREAMING( Matrix33 );
 IMPLEMENT_STREAMING( Matrix33 );					// bit streaming operators
 
+// Wire/on-disk size must match across Windows x86, Windows x64, Linux x64
+// (sent via IMPLEMENT_RAW_STREAMING — raw sizeof bytes).
+static_assert( sizeof(Matrix33) == 36, "Matrix33 must be exactly 36 bytes on the wire (3x Vector3)" );
+
 //----------------------------------------------------------------------------
 
 inline Matrix33::Matrix33() 

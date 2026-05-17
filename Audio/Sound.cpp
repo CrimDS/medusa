@@ -154,7 +154,11 @@ void Sound::release()
 
 	if ( m_pWave )
 	{
-		delete (byte *)m_pWave;
+		// m_pWave is allocated with `new byte[]` in Sound::read() and
+		// Sound::initializeSound(); pair the [] form here.  Scalar `delete`
+		// on an array allocation is UB — papered over on Windows/MSVC but
+		// surfaces on Linux x64 (and ASAN flags it as alloc-dealloc-mismatch).
+		delete[] (byte *)m_pWave;
 		m_pWave = NULL;
 	}
 }

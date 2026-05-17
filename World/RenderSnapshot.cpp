@@ -6,8 +6,14 @@
 #include "World/RenderSnapshot.h"
 #include "World/WorldClient.h"		// for WorldClient::sm_bPipelinedSimRender — see setAssertSnapshotCoverage
 #include "Standard/Time.h"			// Option 2: Time::ticks() for local-ship extrap dt
+#include "Math/Quat.h"				// frame slerp (materialize + local-ship frame extrap)
 
 #include <math.h>					// atan2f / sinf / cosf in extrapLocalShip
+
+// Defined further down; declared here so extrapLocalShipFrame above the
+// definition can reach it.  Numerically-guarded quaternion slerp with
+// shortest-path negation and an nlerp fallback for near-identical inputs.
+static Matrix33 slerpFrameSafe( const Matrix33 & a, const Matrix33 & b, float t );
 
 //---------------------------------------------------------------------------------------------------
 
@@ -108,6 +114,7 @@ void RenderSnapshot::clear()
 	m_ShipRank.clear();
 	m_PlanetControl.clear();
 	m_PlanetFlags.clear();
+	m_Extrap.clear();
 	m_KeyToIndex.clear();
 }
 
@@ -150,6 +157,7 @@ void RenderSnapshot::addNoun( WidgetKey nKey,
 	m_ShipRank.push_back( 0 );
 	m_PlanetControl.push_back( 0.0f );
 	m_PlanetFlags.push_back( 0 );
+	m_Extrap.push_back( 0 );
 	m_KeyToIndex[ nKey.m_Id ] = nIndex;
 }
 
@@ -258,21 +266,116 @@ void RenderSnapshot::copyPoseFrom( const RenderSnapshot & src,
 	m_Velocities[ dstIdx ]     = src.m_Velocities[ srcIdx ];
 }
 
+void RenderSnapshot::copyBallisticPoseFrom( const RenderSnapshot & src,
+	int srcIdx, int dstIdx )
+{
+	// Position+velocity only — frame is left untouched so the slerp'd
+	// rotation from materialize survives.  Used by the projectile extrap
+	// path where we want B's un-lagged position (then extrapBallistic
+	// forward to "now") but the smooth slerp'd heading rather than B's
+	// snapped one (smart projectiles re-aim per tick).
+	m_Positions[ dstIdx ]      = src.m_Positions[ srcIdx ];
+	m_WorldPositions[ dstIdx ] = src.m_WorldPositions[ srcIdx ];
+	m_Velocities[ dstIdx ]     = src.m_Velocities[ srcIdx ];
+}
+
+void RenderSnapshot::setExtrap( int idx )
+{
+	m_Extrap[ idx ] = 1;
+}
+
+bool RenderSnapshot::extrap( int idx ) const
+{
+	return m_Extrap[ idx ] != 0;
+}
+
+void RenderSnapshot::extrapBallistic( int idx, float fDt )
+{
+	// Sim does `m_Position += m_vVelocity * dt` between tick boundaries with
+	// velocity held constant within a tick (NounProjectile::simulate).
+	// Reproducing that exactly here gives zero client/server divergence —
+	// when the next snapshot publishes, the new pose already accounts for
+	// the full inter-tick advance.  Apply to both local and world position
+	// (zone-direct projectiles' velocity is world-aligned, and DarkSpace
+	// zones are static, so the deltas match).
+	const Vector3 d = m_Velocities[ idx ] * fDt;
+	m_Positions[ idx ]      += d;
+	m_WorldPositions[ idx ] += d;
+}
+
+void RenderSnapshot::extrapLocalShipFrame( int idx,
+	const RenderSnapshot & A, const RenderSnapshot & B, float alpha )
+{
+	// Local ship frame extrap.  After the local-ship overlay has copied B's
+	// pose, we override the frame with slerp(A_frame, B_frame, alpha) where
+	// alpha = (now - A.captureTicks)/(B.captureTicks - A.captureTicks).  At
+	// alpha=1.0 this reproduces B exactly (sanity check); at alpha=2.0 it
+	// rotates one full sim-tick of angular delta beyond B in the A→B
+	// direction — i.e. constant-angular-velocity extrap to "now".  Matches
+	// the position extrap path so rotation and translation move together
+	// with zero input lag.
+	const int aIdx = A.findIndex( m_Keys[ idx ] );
+	const int bIdx = B.findIndex( m_Keys[ idx ] );
+	if ( aIdx < 0 || bIdx < 0 )
+		return;					// A or B is missing the ship — leave frame as-is
+	m_Frames[ idx ]      = slerpFrameSafe( A.m_Frames[ aIdx ],      B.m_Frames[ bIdx ],      alpha );
+	m_WorldFrames[ idx ] = slerpFrameSafe( A.m_WorldFrames[ aIdx ], B.m_WorldFrames[ bIdx ], alpha );
+}
+
+// Slerp between two rotation matrices with the numerical guards the engine's
+// own Quat::slerp lacks.  The previous "frame LERP off" decision was driven
+// by the engine slerp's 1/sin(theta) blow-up when adjacent frames are nearly
+// identical (acos(d)≈0 → sin≈0 → NaN), plus the component-wise matrix lerp
+// + orthonormalize path which can produce zero-determinant matrices that
+// render as invisible/translucent geometry.
+//
+// This implementation:
+//   • Negates qb when dot(qa,qb) < 0 so we always take the short way around.
+//   • Falls back to normalized-lerp when |dot| > 0.9995 (near-identical
+//     case, where slerp's sin(theta) approaches zero).
+//   • Supports t > 1 for extrap (constant-angular-velocity continuation
+//     beyond B) — used by the local-ship frame extrap path.
+static Matrix33 slerpFrameSafe( const Matrix33 & a, const Matrix33 & b, float t )
+{
+	Quat qa( a );
+	Quat qb( b );
+	float d = qa.dot( qb );
+	if ( d < 0.0f ) { qb = -qb; d = -d; }
+
+	Quat r;
+	if ( d > 0.9995f )
+	{
+		// Near-identical frames — nlerp is locally accurate and numerically
+		// stable.  For extrap (t outside [0,1]) on near-identical frames
+		// the rotation per unit t is tiny anyway, so nlerp is fine here too.
+		r = qa + ( qb - qa ) * t;
+	}
+	else
+	{
+		const float theta    = acosf( d );
+		const float invSin   = 1.0f / sinf( theta );
+		const float wa       = sinf( ( 1.0f - t ) * theta ) * invSin;
+		const float wb       = sinf( t * theta ) * invSin;
+		r = qa * wa + qb * wb;
+	}
+	r.normalize();		// defend against accumulated FP drift
+	return r.getMatrix33();
+}
+
 void RenderSnapshot::materialize( const RenderSnapshot & A,
 	const RenderSnapshot & B, float t )
 {
 	// Deep-copy B as the base — structural fields (key list, ship scalars,
 	// flags, jump state, planet state) are taken wholesale from the newer
-	// capture.  We only override the smoothly-interpolable pose data
-	// (positions + velocities).
+	// capture.  Pose data (positions, velocities, frames) is then overridden
+	// by an A→B blend below.
 	//
-	// FRAME LERP IS INTENTIONALLY OMITTED.  Rotation stepping at 20 Hz is
-	// visually imperceptible for typical ship yaw rates (≤ 1 rad/s ≈ 3°
-	// per sim tick), and the component-wise-lerp-then-orthoNormalizeXY
-	// path was causing ships to render invisibly / see-through in the
-	// initial Option 3 rollout.  If we ever re-introduce it, use proper
-	// quaternion slerp and verify with a lone-ship test before going back
-	// to wide scenes.
+	// Frame interpolation is now ON (was off historically — the comment used
+	// to warn against it because the engine's Quat::slerp NaNs on identical
+	// adjacent frames, and a component-wise matrix lerp was making ships
+	// translucent).  slerpFrameSafe above handles both pitfalls, so smart-
+	// projectile heading re-aim and ship rotation render smoothly at the
+	// snapshot rate instead of stepping at 20 Hz.
 	*this = B;
 
 	// Defensive: rebuild m_KeyToIndex from m_Keys after the copy.  With
@@ -304,6 +407,8 @@ void RenderSnapshot::materialize( const RenderSnapshot & A,
 		m_Positions[i]      = A.m_Positions[aIdx]      * one_minus_t + m_Positions[i]      * t;
 		m_WorldPositions[i] = A.m_WorldPositions[aIdx] * one_minus_t + m_WorldPositions[i] * t;
 		m_Velocities[i]     = A.m_Velocities[aIdx]     * one_minus_t + m_Velocities[i]     * t;
+		m_Frames[i]         = slerpFrameSafe( A.m_Frames[aIdx],      m_Frames[i],      t );
+		m_WorldFrames[i]    = slerpFrameSafe( A.m_WorldFrames[aIdx], m_WorldFrames[i], t );
 	}
 }
 
@@ -455,6 +560,7 @@ const RenderSnapshot & RenderSnapshotRing::pinForFrame()
 		const int bIdx      = B.findIndex( WidgetKey( nLocalKey ) );
 		if ( pinnedIdx >= 0 && bIdx >= 0 )
 		{
+
 			m_Pinned.copyPoseFrom( B, bIdx, pinnedIdx );
 			const qword nNow = Time::ticks();
 			if ( nNow > B.m_CaptureTicks )
@@ -464,6 +570,64 @@ const RenderSnapshot & RenderSnapshotRing::pinForFrame()
 				if ( fDt > 0.05f ) fDt = 0.05f;
 				if ( fDt > 0.0f )
 					m_Pinned.extrapLocalShip( pinnedIdx, fDt );
+			}
+
+			// Rotation extrap: slerp A→B beyond B by (now - A.ticks)/(B - A).
+			// At alpha=1.0 this is exactly B (un-lagged); at alpha=2.0 it's
+			// one full sim-tick of angular continuation past B.  Clamped at
+			// 2.0 so a sim stall doesn't fling the ship — when the next
+			// publish arrives the new B clips back to authoritative.  This
+			// is the rotational analogue of extrapLocalShip and is what
+			// closes the "position smooth, rotation steps at 20 Hz" gap
+			// that made the local ship feel less than fully smooth.
+			if ( A.m_CaptureTicks != 0 && B.m_CaptureTicks > A.m_CaptureTicks )
+			{
+				const double frameSpan = double( B.m_CaptureTicks - A.m_CaptureTicks );
+				const double sinceA    = double( nNow - A.m_CaptureTicks );
+				float alpha = float( sinceA / frameSpan );
+				if ( alpha < 0.0f ) alpha = 0.0f;
+				if ( alpha > 2.0f ) alpha = 2.0f;
+				m_Pinned.extrapLocalShipFrame( pinnedIdx, A, B, alpha );
+			}
+
+		}
+	}
+
+	// Ballistic-extrap overlay — projectiles (NounProjectile et al) opt in
+	// via captureSnapshotState/setExtrap.  Same pattern as the local ship:
+	// override the LERP'd pose with B's freshest value, then advance by the
+	// noun's own velocity vector * fDt.  Closes the muzzle-gap on outgoing
+	// projectiles (which used to render 50 ms behind the firing ship) and
+	// keeps them in lock-step with sim — server still owns authoritative
+	// position, but since `m_Position += m_vVelocity * dt` is exactly what
+	// sim does between tick boundaries, the next published snapshot lands
+	// where extrap already had us.  No client/server desync.
+	if ( B.m_CaptureTicks != 0 )
+	{
+		const qword nNow = Time::ticks();
+		if ( nNow > B.m_CaptureTicks )
+		{
+			float fDt = float( double( nNow - B.m_CaptureTicks )
+			                 / double( Time::ticksPerSecond() ) );
+			if ( fDt > 0.05f ) fDt = 0.05f;
+			if ( fDt > 0.0f )
+			{
+				const int nCount = m_Pinned.nounCount();
+				for ( int i = 0; i < nCount; ++i )
+				{
+					if ( !m_Pinned.extrap( i ) )
+						continue;
+					const int bIdx = B.findIndex( m_Pinned.nounKey( i ) );
+					if ( bIdx < 0 )
+						continue;   // present in pinned but not B — leave alone
+					// Position-only copy from B (NOT copyPoseFrom — that
+					// would clobber the slerp'd frame from materialize, and
+					// smart projectiles re-aim per tick so we WANT the
+					// smoothed heading, not B's snapped one).  Velocity
+					// from B is fresher for the extrap step.
+					m_Pinned.copyBallisticPoseFrom( B, bIdx, i );
+					m_Pinned.extrapBallistic( i, fDt );
+				}
 			}
 		}
 	}

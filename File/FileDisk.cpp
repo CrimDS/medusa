@@ -871,7 +871,7 @@ void * FileDisk::loadFile( const char * pFile )
 
 		if ( fd.read( pBuffer, nSize ) != nSize )
 		{
-			delete (byte *)pBuffer;
+			delete[] (byte *)pBuffer;
 			pBuffer = NULL;
 		}
 

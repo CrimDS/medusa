@@ -239,7 +239,12 @@ bool Broker::requestLoad( const WidgetKey & a_nKey, const ClassKey & a_nType, Re
 		return true;
 	}
 
-	dword nStartTime = clock();
+	// Wall-clock timestamp for the "Load of X blocked for Y ms" diagnostic
+	// below.  Was clock() which returns CPU-time-summed-across-all-threads
+	// on Linux at microsecond resolution — producing log lines like "blocked
+	// for 36625375 ms" on a server that had only been up 79 seconds.  QPC-
+	// based Time::ticks() is wall-clock and matches the rest of the engine.
+	const qword nStartTicks = Time::ticks();
 
 	AutoLock lock( &sm_Lock );
 
@@ -362,8 +367,10 @@ worker_done: ;
 		{
 			a_pRequest->wait();
 		}
-		LOG_DEBUG_LOW( "Broker", "Load of %s blocked for %u ms",
-			a_nKey.string().cstr(), clock() - nStartTime );
+		const qword nElapsedMs = ( Time::ticks() - nStartTicks ) * 1000
+		                       / Time::ticksPerSecond();
+		LOG_DEBUG_LOW( "Broker", "Load of %s blocked for %llu ms",
+			a_nKey.string().cstr(), (unsigned long long)nElapsedMs );
 	}
 
 	return true;

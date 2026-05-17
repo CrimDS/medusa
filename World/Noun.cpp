@@ -355,6 +355,26 @@ void Noun::invalidateWorld() const
 	}
 }
 
+bool Noun::isWorldValid() const
+{
+	// Render thread reading from the published snapshot must NEVER trust the
+	// per-noun m_WorldPosition cache: m_Pinned regenerates per render frame
+	// (pinForFrame LERPs remote nouns and extraps the local ship) while
+	// m_Tick is a 50ms sim-tick counter, so caching by m_Tick produces stale
+	// reads within the tick window — the hull renders at the fresh LERPed
+	// snap pos via the Noun::preRender swap path, while camera/shields/HUD
+	// calls to pShip->worldPosition() would otherwise hit a cached snap-from-
+	// frame-0 value (or worse, a tick-quantised live value left by sim).  Net
+	// effect was a 20 Hz hull-vs-camera sawtooth.  Returning false in snap
+	// mode forces every accessor (worldPosition/worldFrame/zonePosition/
+	// worldVelocity/worldHull) to re-enter calculateWorld and re-read the
+	// current m_Pinned via the snap branch.  snap.findIndex is an O(1) hash
+	// lookup so the cost is negligible.
+	if ( isRenderingFromSnapshot() && RenderContext::sm_bUseRenderSnapshot )
+		return false;
+	return m_Tick == m_nWorldTick;
+}
+
 void Noun::calculateWorld() const
 {
 	// When the render thread is reading from the published snapshot, short-
@@ -370,12 +390,19 @@ void Noun::calculateWorld() const
 		const int nIdx = snap.findIndex( key() );
 		if ( nIdx >= 0 && snap.nounKey( nIdx ).m_Id == key().m_Id )
 		{
-			m_nWorldTick    = m_Tick;
+			// We re-read m_Pinned on every render-side call (see isWorldValid
+			// above for the why).  Write the snap values through to the cache
+			// fields so direct readers of m_WorldPosition / m_WorldFrame /
+			// m_WorldHull (e.g. the diag block in preRender) see consistent
+			// values, then poison m_nWorldTick so the next SIM-thread read
+			// doesn't pick up the snap value via its own cache hit
+			// (m_Tick == m_nWorldTick).  Sim re-reads live via the walk below.
 			m_WorldPosition = snap.worldPosition( nIdx );
 			m_WorldFrame    = snap.worldFrame( nIdx );
 			m_vWorldVelocity = snap.velocity( nIdx );
 			m_vZonePosition = snap.position( nIdx );
 			m_WorldHull.setBox( hull(), m_WorldFrame, m_WorldPosition );
+			m_nWorldTick    = (dword)-1;
 			return;
 		}
 	}

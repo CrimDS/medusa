@@ -12,6 +12,11 @@
 #include "Standard/CharString.h"
 #include "Standard/Types.h"
 
+#if !defined(_WIN32)
+#include <cxxabi.h>
+#include <cstdlib>
+#endif
+
 //---------------------------------------------------------------------------------------------------
 
 //! This function returns the name of the given type..
@@ -23,14 +28,34 @@ struct TypeName
 		static CharString sName;
 		if ( sName[0] == 0 )
 		{
-			sName = typeid(T).name();
 	#if defined(_WIN32)
+			sName = typeid(T).name();
 			// strip the type qualifiers off the front of VS generated type names,
 			// so our types will be normalized between windows & linux..
 			sName.replace( "class ", "" );
 			sName.replace( "struct ", "" );
 			sName.replace( "enum ", "" );
 			sName.replace( "union ", "" );
+	#else
+			// gcc/clang Itanium ABI typeid().name() returns the mangled name
+			// (e.g. `15WidgetReferenceI4NounE` for `WidgetReference<Noun>`).
+			// Demangle it so the resulting CharString matches what MSVC's
+			// strip pass produces (`WidgetReference<Noun>`).  Without this,
+			// every templated/non-primitive type hashes to a different
+			// nameHash on Linux vs Windows, and Value::read on the client
+			// can't resolve types the Linux server sends over the wire.
+			int status = 0;
+			char * demangled = abi::__cxa_demangle(
+				typeid(T).name(), nullptr, nullptr, &status );
+			if ( status == 0 && demangled != nullptr )
+			{
+				sName = demangled;
+				::free( demangled );
+			}
+			else
+			{
+				sName = typeid(T).name();
+			}
 	#endif
 		}
 
@@ -131,25 +156,35 @@ struct TypeName<s64>
 	}
 };
 
+// On Windows LLP64 `ul32` is `unsigned long`, which is a distinct type from
+// `u32` (= `unsigned int`) even though both are 32-bit — needs its own
+// specialization or templates picking up `unsigned long` fields fall through
+// to typeid(T).name() and produce non-normalized names.
+// On Linux LP64 we re-typedef `ul32` to `unsigned int` (see Types.h: native
+// `unsigned long` is 64-bit and would silently corrupt hash math).  That
+// makes ul32==u32 as a type, and adding a TypeName<ul32> specialization
+// would be a redefinition error — so guard these to Windows only.
+#if defined(_WIN32)
 template<>
 struct TypeName<ul32>
 {
-	static const CharString & name() 
-	{ 
-		static CharString name( "ul32" );
-		return name; 
+	static const CharString & name()
+	{
+		static CharString name( "u32" );
+		return name;
 	}
 };
 
 template<>
 struct TypeName<sl32>
 {
-	static const CharString & name() 
-	{ 
-		static CharString name( "sl32" );
-		return name; 
+	static const CharString & name()
+	{
+		static CharString name( "s32" );
+		return name;
 	}
 };
+#endif
 
 template<>
 struct TypeName<f32>

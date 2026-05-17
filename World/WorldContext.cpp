@@ -371,11 +371,19 @@ void WorldContext::captureRenderSnapshot( RenderSnapshot & out )
 			// shadow focus, contact rendering) outside the preRender chain.
 			// Without capturing world here, those calls walk the live parent
 			// chain and race with sim's mutations on ancestors → streaks.
+			//
+			// Use the STATIC NodeTransform::worldPosition walk (not
+			// pNoun->worldPosition()) so we don't validate Noun's per-noun
+			// m_WorldPosition cache with the live value.  If we did, the
+			// next render-side worldPosition() call would short-circuit
+			// (isWorldValid==true) and return the tick-quantised live value
+			// instead of the LERPed snap value the hull is rendered at —
+			// producing a 20 Hz hull-vs-camera sawtooth (see project notes).
 			out.addNoun(
 				pNoun->key(),
 				pNoun->position(),
 				pNoun->frame(),
-				pNoun->worldPosition(),
+				NodeTransform::worldPosition( pNoun ),
 				NodeTransform::worldFrame( pNoun ),
 				pNoun->velocity(),
 				pNoun->nodeFlags() );
@@ -398,11 +406,13 @@ void WorldContext::captureRenderSnapshot( RenderSnapshot & out )
 				if ( pChild == NULL )
 					continue;
 
+				// Same as parent: use the STATIC walk to avoid validating
+				// the child's m_WorldPosition cache with the live value.
 				out.addNoun(
 					pChild->key(),
 					pChild->position(),
 					pChild->frame(),
-					pChild->worldPosition(),
+					NodeTransform::worldPosition( pChild ),
 					NodeTransform::worldFrame( pChild ),
 					pChild->velocity(),
 					pChild->nodeFlags() );
@@ -432,6 +442,7 @@ bool WorldContext::update()
 		dword nCurrentTick = m_Timer.tick();
 		if (! user()->isSleeping() )
 		{
+			const dword nStartTick = m_Tick;
 			while( nCurrentTick > m_Tick )
 			{
 				// update the current tick
@@ -450,12 +461,22 @@ bool WorldContext::update()
 			for(int i=0;i<m_Worlds.size();++i)
 				m_Worlds[i]->update();
 
-			// Stage 3.1: drain sim state into the render snapshot ring.  Nothing
-			// downstream consumes it yet; Stage 3.2 redirects render reads to
-			// this snapshot.  Doing the capture here means worker threads
-			// (parallelSimulate) have completed and mutations are done.
-			captureRenderSnapshot( RenderSnapshotRing::instance().writeSlot() );
-			RenderSnapshotRing::instance().publish();
+			// Stage 3.1: drain sim state into the render snapshot ring.  Only
+			// publish when a real sim tick actually advanced — SimThread wakes
+			// every 10 ms but the tick rate is 20 Hz, so 4 out of every 5
+			// wakes have no new sim state to publish.  Publishing those no-op
+			// captures with a fresh m_CaptureTicks WOULD poison the render-
+			// side extrap anchor: fDt = nNow - B.captureTicks resets near
+			// zero on each duplicate publish, so the local ship's
+			// position += v*fDt extrap can't accumulate across the inter-
+			// tick interval and the ship visibly holds-then-jumps every
+			// 50 ms.  Gating on (m_Tick > nStartTick) keeps B.captureTicks
+			// anchored to the wall time of the last real tick.
+			if ( m_Tick > nStartTick )
+			{
+				captureRenderSnapshot( RenderSnapshotRing::instance().writeSlot() );
+				RenderSnapshotRing::instance().publish();
+			}
 		}
 		else
 		{

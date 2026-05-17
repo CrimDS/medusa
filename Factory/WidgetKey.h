@@ -33,6 +33,11 @@ public:
 
 IMPLEMENT_RAW_STREAMING( WidgetKey );
 
+// Wire/on-disk size must match across Windows x86, Windows x64, Linux x64
+// (sent via IMPLEMENT_RAW_STREAMING — raw sizeof bytes).  WidgetKey extends
+// UniqueNumber which holds a single qword m_Id.
+static_assert( sizeof(WidgetKey) == 8, "WidgetKey must be exactly 8 bytes on the wire (qword m_Id)" );
+
 const WidgetKey NULL_WIDGET( (qword)0 );
 
 //---------------------------------------------------------------------------------------------------

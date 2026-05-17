@@ -88,7 +88,7 @@ bool Value::read( const InStream & input )
 	dword nTypeNameHash;
 	input >> nTypeNameHash;
 
-	if ( nTypeNameHash != 0L )
+	if ( nTypeNameHash != 0 )
 	{
 		m_pType = Type::findNameHash( nTypeNameHash );
 		if (! m_pType )
@@ -111,7 +111,7 @@ bool Value::write( const OutStream & output ) const
 		return m_pType->write( output, m_pData );
 	}
 
-	output << 0L;
+	output << (dword)0;
 	return true;
 }
 

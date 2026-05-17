@@ -12,8 +12,21 @@
 
 #include <assert.h>
 #include <stddef.h>
+#include <stdint.h>		// uintptr_t (transitive via intrin.h on MSVC, but not on gcc)
 #include <map>
+#if defined(_MSC_VER)
 #include <intrin.h>		// _InterlockedCompareExchangePointer (pointer-width atomic CAS)
+#else
+// gcc/clang shim with identical semantics to MSVC's intrinsic: pointer-width
+// CAS returning the prior value at *ppSlot.  Uses __sync_val_compare_and_swap
+// (note: argument order differs — gcc takes (ptr, oldval, newval) while MSVC
+// takes (ptr, newval, oldval); the shim reorders so callers stay portable).
+static inline void * _InterlockedCompareExchangePointer(
+	void * volatile * ppSlot, void * pNew, void * pCompare )
+{
+	return __sync_val_compare_and_swap( ppSlot, pCompare, pNew );
+}
+#endif
 
 #include "Atomic.h"
 #include "Types.h"

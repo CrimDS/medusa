@@ -437,40 +437,53 @@ inline const OutStream & operator<<( const OutStream & output, const bool & data
 
 //---------------------------------------------------------------------------------------------------
 
+// `unsigned long` / `long` are 4 bytes on Windows (LLP64) but 8 bytes on
+// Linux (LP64) — streaming `sizeof(data)` writes different byte counts per
+// platform.  On Windows these overloads are LIVE because `dword` typedefs
+// to `unsigned long` (see Types.h:63) — dword/ul32/sl32 streams everywhere
+// dispatch through here.  On Linux `dword` typedefs to `unsigned int`
+// instead, so these overloads are unreachable from `dword` and the size
+// stays 4 bytes — keeping them as a fallback for any stray `unsigned long`
+// variable does no harm since Windows is the only x86 server build.
+//
+// Note for x64 Linux server: do NOT pass a raw `unsigned long` / `long`
+// variable to these operators — it'll write 8 bytes where the Win x86
+// production wire reads 4.  Use dword/u32 (or s32/sl32) at the call site
+// instead.  Value.cpp:114's `0L` was the canonical instance of this bug.
 inline const InStream & operator>>( const InStream & input, unsigned long & data )
-{																		
-	if ( (input.filter() & FF_TEXT) == 0 )								
-		input.read( &data, sizeof( data ) );							
-	else							
+{
+	if ( (input.filter() & FF_TEXT) == 0 )
+		input.read( &data, sizeof( data ) );
+	else
 		data = strtoul( input.readLine(), NULL, 10 );
-	return input;														
-}																		
+	return input;
+}
 
-inline const OutStream & operator<<( const OutStream & output, const unsigned long & data )	
-{																						
-	if ( (output.filter() & FF_TEXT) == 0 )												
-		output.write( &data, sizeof( data ) );										
-	else																				
+inline const OutStream & operator<<( const OutStream & output, const unsigned long & data )
+{
+	if ( (output.filter() & FF_TEXT) == 0 )
+		output.write( &data, sizeof( data ) );
+	else
 		output.writeFormatted( "%u", data );
-	return output;																		
+	return output;
 }
 
 inline const InStream & operator>>( const InStream & input, long & data )
-{																		
-	if ( (input.filter() & FF_TEXT) == 0 )								
-		input.read( &data, sizeof( data ) );							
-	else							
+{
+	if ( (input.filter() & FF_TEXT) == 0 )
+		input.read( &data, sizeof( data ) );
+	else
 		data = atoi( input.readLine() );
-	return input;														
-}																		
+	return input;
+}
 
-inline const OutStream & operator<<( const OutStream & output, const long & data )	
-{																						
-	if ( (output.filter() & FF_TEXT) == 0 )												
-		output.write( &data, sizeof( data ) );										
-	else																				
+inline const OutStream & operator<<( const OutStream & output, const long & data )
+{
+	if ( (output.filter() & FF_TEXT) == 0 )
+		output.write( &data, sizeof( data ) );
+	else
 		output.writeFormatted( "%d", data );
-	return output;																		
+	return output;
 }
 
 //---------------------------------------------------------------------------------------------------
@@ -709,7 +722,10 @@ inline const InStream & operator>>( const InStream & input, std::vector<T> & v )
 template<class T>
 inline const OutStream & operator<<( const OutStream & output, const std::vector<T> & v )
 {
-	output << v.size();
+	// Cast to int — std::vector::size() returns size_t, which is 4 bytes on
+	// Win x86 but 8 bytes on Linux LP64 and Win x64.  The read side reads
+	// `int count` (4 bytes), so we must write 4 bytes here regardless of ABI.
+	output << (int)v.size();
 	for(size_t i=0;i<v.size();++i)
 		output << v[i];
 	return output;
@@ -813,7 +829,8 @@ inline const InStream & operator>>( const InStream & input, std::list<T> & li )
 template<class T>
 inline const OutStream & operator<<( const OutStream & output, const std::list<T> & li )
 {
-	output << li.size();
+	// See std::vector overload above: cast size_t → int for wire-stable width.
+	output << (int)li.size();
 	for( typename std::list<T>::const_iterator i = li.begin(); i != li.end(); ++i )
 		output << *i;
 
@@ -901,7 +918,8 @@ inline const InStream & operator>>( const InStream & input, std::map<K,T> &map )
 template<class K,class T>
 inline const OutStream & operator<<( const OutStream & output, const std::map<K,T> & map )
 {
-	output << map.size();
+	// See std::vector overload above: cast size_t → int for wire-stable width.
+	output << (int)map.size();
 	for( typename std::map<K,T>::const_iterator i = map.begin(); i != map.end(); ++i )
 		output << i->first << i->second;
 
@@ -979,7 +997,14 @@ inline const InStream & operator>>( const InStream & input, Buffer & buffer )
 	if ( nBytes > 256 * 1024 * 1024 )
 		throw std::bad_alloc();
 
-	void * pBuffer = new byte[ nBytes ];
+	// Must allocate with malloc — Buffer::set takes ownership and frees via
+	// `::free()` in Buffer::free().  Using `new byte[]` here pairs new[] with
+	// free() — undefined behaviour that ASAN flags as alloc-dealloc-mismatch.
+	// Without ASAN it usually works (same arena) but eventually corrupts heap
+	// metadata and surfaces as a "double-free" in Image::release() at random.
+	void * pBuffer = malloc( nBytes );
+	if ( pBuffer == NULL )
+		throw std::bad_alloc();
 	if ( (input.filter() & FF_TEXT) == 0 )
 		input.read( pBuffer, nBytes );
 	else
@@ -1038,7 +1063,9 @@ inline const OutStream & operator<<( const OutStream & output, const Dictionary:
 	}
 	else
 	{
-		output << (u32)0 << (size_t)0;
+		// (int)0 for the map.size() slot — std::map's operator<< writes
+		// `(int)map.size()`, so the NULL-dictionary placeholder must match.
+		output << (u32)0 << (int)0;
 	}
 
 	return output;

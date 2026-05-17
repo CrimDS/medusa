@@ -16,10 +16,13 @@
 #include "Standard/Settings.h"
 
 #if defined(_WIN32) || defined(_XBOX)
-#define _WIN32_WINNT    0x0400        
+#define _WIN32_WINNT    0x0400
 #include <windows.h>
 #include <Excpt.h>
 #include <dbghelp.h>
+#else
+#include <unistd.h>
+#include <limits.h>
 #endif
 
 //---------------------------------------------------------------------------------------------------
@@ -42,6 +45,18 @@ void LoadProgramVersion()
 		{
 		   Path p( szExePath );
 		   sVersionFile = p.directory() + "Version.ini";
+		}
+#else
+		// Without this, `./Version.ini` resolves against the SHELL CWD, not the
+		// executable's directory — server falls back to default version 1000
+		// and rejects every real client at the SERVER_LOGIN version check.
+		char szExePath[ PATH_MAX ];
+		ssize_t nLen = readlink( "/proc/self/exe", szExePath, sizeof(szExePath) - 1 );
+		if ( nLen > 0 )
+		{
+			szExePath[ nLen ] = 0;
+			Path p( szExePath );
+			sVersionFile = p.directory() + "Version.ini";
 		}
 #endif
 

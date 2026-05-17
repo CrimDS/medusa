@@ -71,6 +71,10 @@ public:
 IMPLEMENT_RAW_STREAMING( Quat );
 IMPLEMENT_STREAMING( Quat );					// bit streaming operators
 
+// Wire/on-disk size must match across Windows x86, Windows x64, Linux x64
+// (sent via IMPLEMENT_RAW_STREAMING — raw sizeof bytes).
+static_assert( sizeof(Quat) == 16, "Quat must be exactly 16 bytes on the wire (4x f32)" );
+
 //----------------------------------------------------------------------------
 
 inline Quat::Quat()

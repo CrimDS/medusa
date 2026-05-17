@@ -52,8 +52,11 @@ private:
 
 private:
 	byte			m_lpszBuffer[64];		// input buffer
-	unsigned long	m_nCount[2];			// number of bits, modulo 2^64 (lsb first)
-	unsigned long	m_lMD5[4];				// MD5 checksum
+	// dword (= unsigned int, 32-bit on both Win/Linux) — was `unsigned long`
+	// which is 64-bit on Linux LP64 and broke the MD5 32-bit-word arithmetic.
+	// The RFC defines MD5 over 32-bit "words" so this is the correct width.
+	dword			m_nCount[2];			// number of bits, modulo 2^64 (lsb first)
+	dword			m_lMD5[4];				// MD5 checksum
 };
 
 

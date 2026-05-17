@@ -61,6 +61,15 @@ public:
 		}
 	};
 
+	// Virtual destructor — Socket::~Socket() does `delete m_pCodec` where
+	// the static type is `Codec*` but the dynamic type is ZLIB / NoCodec etc.
+	// Without this, the compiler emits a sized delete for sizeof(Codec) (=8
+	// bytes for vtable only), but the actual object is larger (ZLIB is 24 B).
+	// On Linux x64 the glibc allocator caught it as a corruption; ASAN flags
+	// it as new-delete-type-mismatch.  On MSVC the same UB usually papered
+	// over but is incorrect on every target.
+	virtual ~Codec() {}
+
 	//! Create another version of this codec, any internal dictionary will not be copied.
 	virtual Codec *			clone() = 0;
 	// encode data using this codec, returns the number of bytes put into the output buffer

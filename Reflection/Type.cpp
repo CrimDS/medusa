@@ -128,8 +128,16 @@ void Type::initialize()
 	TypeSerialized<s16>::instance();
 	TypeSerialized<u32>::instance();
 	TypeSerialized<s32>::instance();
+	// On Windows LLP64 `ul32`/`sl32` are `unsigned long`/`long` — distinct
+	// types from u32/s32 even though same width, so they need their own
+	// TypeSerialized instances to be discoverable by reflection.
+	// On Linux LP64 we typedef them back to `unsigned int`/`int` (native
+	// `unsigned long` would be 64-bit and corrupt hash math — see Types.h),
+	// which makes the explicit instances a double-registration error.
+#if defined(_WIN32)
 	TypeSerialized<ul32>::instance();
 	TypeSerialized<sl32>::instance();
+#endif
 	TypeSerialized<u64>::instance();
 	TypeSerialized<s64>::instance();
 	TypeSerialized<f32>::instance();
