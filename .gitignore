@@ -27,3 +27,4 @@ ReleaseLinux/
 *.FileListAbsolute.txt
 *.exp
 *.lib
+Render3D/log.txt

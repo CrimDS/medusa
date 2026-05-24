@@ -35,20 +35,24 @@ public:
 	// Constants
 	enum {
 		PRIMITIVE_STACK_SIZE	= 1024 * 8,
-		DYNAMIC_VB_SIZE			= 1024 * 1024 * 64, 		// 64MB ring buffer per frame
-		DYNAMIC_CB_SIZE			= 1024 * 1024 * 8, 		// 8MB for constant buffers per frame
-		MAX_SRV_DESCRIPTORS		= 131072,	// bumped 4096 → 32768 → 131072.  Wrap mid-frame overwrites earlier slots' bindings, corrupting textures ("font glyphs appearing on planet surfaces", random squares / letters painted on meshes when the camera moves in fullscreen).  32768 was fine for windowed 1280x960 but fullscreen at native resolution pushes past 4096 binds/frame (wider FOV → more visible ships/planets + larger HUD).  131072/8 = 16384 binds/frame headroom.  512KB VRAM for the heap = trivial.  Proper fix is flush-on-wrap or per-frame slab; this is a higher cap, not a real fix.
+		// PBR-era scenes can stream enough texture/mesh upload data in one
+		// frame to wrap a 64MB upload ring before the command list executes.
+		// The ring is not safe to wrap mid-frame, so keep enough headroom for
+		// large ship/system loads instead of corrupting earlier VB/CB data.
+		DYNAMIC_VB_SIZE			= 1024 * 1024 * 256, 		// 256MB ring buffer per frame
+		DYNAMIC_CB_SIZE			= 1024 * 1024 * 16, 		// 16MB for constant buffers per frame
+		MAX_SRV_DESCRIPTORS		= 131072,	// bumped 4096 > 32768 > 131072.  Wrap mid-frame overwrites earlier slots' bindings, corrupting textures ("font glyphs appearing on planet surfaces", random squares / letters painted on meshes when the camera moves in fullscreen).  32768 was fine for windowed 1280x960 but fullscreen at native resolution pushes past 4096 binds/frame (wider FOV > more visible ships/planets + larger HUD).  131072/8 = 16384 binds/frame headroom.  512KB VRAM for the heap = trivial.  Proper fix is flush-on-wrap or per-frame slab; this is a higher cap, not a real fix.
 		MAX_SAMPLER_DESCRIPTORS	= 64,
 		MAX_RTV_DESCRIPTORS		= 32,
 		MAX_DSV_DESCRIPTORS		= 8,
 	};
 
-	// Format used by the FXAA intermediate scene RT.  R11G11B10_FLOAT — 32 bpp
+	// Format used by the FXAA intermediate scene RT.  R11G11B10_FLOAT - 32 bpp
 	// (same footprint as the previous R10G10B10A2_UNORM choice, critical under
 	// 32-bit+LAA) but an actual HDR floating-point target instead of LDR.
 	// Values above 1.0 survive through material writes, bloom accumulation, and
 	// SSAO composite; the FXAA pass then tonemaps + resolves to the R8G8B8A8
-	// swap chain at end of frame.  No alpha channel — audited against blend
+	// swap chain at end of frame.  No alpha channel - audited against blend
 	// states in use (DEST_ALPHA / INV_DEST_ALPHA not used anywhere) so nothing
 	// reads RT alpha back as a blend factor.  Also retains the fine-gradient
 	// precision that the 10/10/10/2 choice originally bought (float mantissa
@@ -150,26 +154,26 @@ public:
 	void							releaseShaders();
 
 	// Defer release of a raw D3D12 resource until the current frame's GPU
-	// fence has signalled.  Takes ownership of one AddRef — caller should
+	// fence has signalled.  Takes ownership of one AddRef - caller should
 	// Detach from its ComPtr or AddRef before passing in.  Thread-safe;
 	// callable from sim / loader / worker threads as well as the main
 	// thread.  No-op if pResource is null.  Used by the primitive
 	// release() paths so a smart-ref destructor on a non-render thread
 	// (e.g. NodeComplexMesh2::invalidate from NounPlanet::postInitialize
 	// running on SimThread) doesn't drop the GPU resource while it's
-	// still bound in an in-flight command list — the device retains it
+	// still bound in an in-flight command list - the device retains it
 	// until the corresponding frame's fence signals.
 	void							deferReleaseResource( ID3D12Resource * pResource );
 
 	// Safe wrapper around deferReleaseResource: handles the case where the
 	// device has already been destroyed but a primitive still holds a raw
 	// pointer to it.  Happens during MDI teardown when the property panel
-	// (CPropertyView) closes AFTER the 3D scene MDI child — by that time
-	// CSceneRender → RenderContext → Reference<DisplayDevice> has already
+	// (CPropertyView) closes AFTER the 3D scene MDI child - by that time
+	// CSceneRender > RenderContext > Reference<DisplayDevice> has already
 	// released the device, but the scene-graph-owned primitives (held by
 	// NodeComplexMesh2, etc.) only release later from the document tear-
 	// down, and their m_pDevice raw pointer is dangling.  We consult
-	// sm_DeviceList — pointer-only lookup, never dereferences pDev — to
+	// sm_DeviceList - pointer-only lookup, never dereferences pDev - to
 	// know whether the device is still live.  If it is, we route through
 	// the normal deferred-release path; if it isn't, we just COM-Release
 	// the resource directly (the GPU is well past any frame that bound it
@@ -233,7 +237,7 @@ public:
 	void							bindPerFrameCB();
 	void							bindPerObjectCB();
 	void							bindPerMaterialCB( const CBPerMaterial & mat );
-	void							computeDiffuseSH( ShaderFloat4 outCoefs[9] );	// Chunk 4 — fills 9 SH coefficients from procedural environment
+	void							computeDiffuseSH( ShaderFloat4 outCoefs[9] );	// Chunk 4 - fills 9 SH coefficients from procedural environment
 	void							bindPerLightCB( const CBPerLight & light );
 
 	// Bind the SRV root descriptor table (root param 4) to the given base slot,
@@ -256,7 +260,7 @@ public:
 	// Get filter mode as D3D12 filter type
 	D3D12_FILTER					getD3D12Filter() const;
 
-	// Bind pipeline state before draw calls — called by each drawing primitive
+	// Bind pipeline state before draw calls - called by each drawing primitive
 	void							bindPSO( PSOKey::InputLayoutType inputLayout, PSOKey::TopologyType topology );
 
 	//----------------------------------------------------------------------------
@@ -353,7 +357,7 @@ public:
 	// + per-CL bind/cache mirrors so threads can record draw calls into separate
 	// CLs without contending on the shared CB-cache / SRV-bind tracking.
 	//
-	// Lazily initialised by ensureWorkerD3D12Slots() — Stage 2 defines the shape
+	// Lazily initialised by ensureWorkerD3D12Slots() - Stage 2 defines the shape
 	// and lifetime only; no caller invokes it yet.  Stage 3 will spin this up
 	// for the SECONDARY pass (transparency), then later passes.
 	struct WorkerD3D12Context
@@ -366,7 +370,7 @@ public:
 		ComPtr<ID3D12GraphicsCommandList>	m_pCommandList;
 		bool								m_bCommandListOpen;
 
-		// Per-CL CB cache mirrors — same redundant-upload-suppression role as
+		// Per-CL CB cache mirrors - same redundant-upload-suppression role as
 		// m_LastObjCB / m_LastMatCB / m_LastLightCB on the main device, but
 		// each CL has its own bind state, so caches must be per-CL too.
 		CBPerObject						m_LastObjCB;
@@ -385,7 +389,7 @@ public:
 		UINT							m_nLastBoundSRVBase;
 		bool							m_bLastBoundSRVValid;
 
-		// Per-CL active material's SRV base — set by setupTextures() after it
+		// Per-CL active material's SRV base - set by setupTextures() after it
 		// CAS-claims its 8-slot range (Stage 1b makes the claim race-free).
 		// Workers each get their own copy so two materials being recorded in
 		// parallel don't stomp each other's base.
@@ -403,7 +407,7 @@ public:
 		// SSE intrinsics, but Array<WorkerD3D12Context> heap-allocates with
 		// only 8-byte alignment on Win32 (compiler warning C4316).  Storage
 		// kept as float matrix; Stage 3 callers convert at use site via
-		// XMLoadFloat4x4 / XMStoreFloat4x4 (zero perf cost — same memcpy).
+		// XMLoadFloat4x4 / XMStoreFloat4x4 (zero perf cost - same memcpy).
 		XMFLOAT4X4						m_mCurrentWorld;
 		ShaderD3D12::Ref				m_pMatShader;
 
@@ -423,7 +427,7 @@ public:
 			, m_bUsingFixedFunction( false )
 			, m_nTextureStage( 0 )
 		{
-			// Identity matrix — XMFLOAT4X4 has no useful default constructor
+			// Identity matrix - XMFLOAT4X4 has no useful default constructor
 			// for that, so set it explicitly via XMStoreFloat4x4.
 			XMStoreFloat4x4( &m_mCurrentWorld, XMMatrixIdentity() );
 		}
@@ -432,7 +436,7 @@ public:
 	Array< WorkerD3D12Context >		m_WorkerD3D12Contexts;
 
 	// Lazily allocate per-worker D3D12 contexts (allocators + CLs) sized to
-	// nWorkers.  Idempotent — safe to call repeatedly.  Returns true on
+	// nWorkers.  Idempotent - safe to call repeatedly.  Returns true on
 	// success.  Stage 3 will call this from the parallel dispatcher.
 	bool							ensureWorkerD3D12Slots( int nWorkers );
 
@@ -502,7 +506,7 @@ public:
 	// Appended to from PrimitiveMaterialD3D12::clear(), which can run on any
 	// thread (smart-ref destructors fire from worker threads when render snapshots
 	// rotate).  Drained on the main thread at the start of beginScene().
-	// m_DeferredPrimsLock guards both sides — single-threaded callers see
+	// m_DeferredPrimsLock guards both sides - single-threaded callers see
 	// uncontended Enter/Leave (~20ns).
 	Array< DevicePrimitive::Ref >	m_DeferredPrimitives[FRAME_COUNT];
 	// Raw D3D12 resources (vertex / index / texture buffers) released from
@@ -526,7 +530,7 @@ public:
 	// map needs a lock.
 	std::map<PSOKey, ComPtr<ID3D12PipelineState>>	m_PSOCache;
 
-	// Most recently bound pipeline state — used by setPSO() to skip redundant
+	// Most recently bound pipeline state - used by setPSO() to skip redundant
 	// SetPipelineState calls.  Reset to nullptr each resetCommandList() because
 	// the GPU state machine starts fresh after a command-list reset.  ANY direct
 	// cl->SetPipelineState() call would desync this cache, so all callers must
@@ -534,7 +538,7 @@ public:
 	ID3D12PipelineState *			m_pCurrentPSO;
 
 	// Current logical D3D12 state of m_pDepthStencil.  Tracked here so the post
-	// effects (SSAO/LimbGlow/LensFlare) can each request DEPTH_WRITE→PSR via
+	// effects (SSAO/LimbGlow/LensFlare) can each request DEPTH_WRITE>PSR via
 	// ensureDepthStencilState() and only the FIRST one actually issues the
 	// barrier; the rest skip.  beginScene transitions back to DEPTH_WRITE in
 	// one shot before ClearDepthStencilView.  Net: 2 transitions per frame
@@ -550,7 +554,7 @@ public:
 	// Cold first launch on a given (GPU, driver) compiles every PSO from
 	// HLSL/DXBC and stores the GPU machine code into the library; subsequent
 	// launches skip the codegen and load from disk.  The blob backing the
-	// library MUST stay alive for the lifetime of the library — keep it in
+	// library MUST stay alive for the lifetime of the library - keep it in
 	// m_PSOCacheBlob, only freed in freeD3D12() after Reset().
 	ComPtr<ID3D12PipelineLibrary>	m_pPSOLibrary;
 	std::vector<unsigned char>		m_PSOCacheBlob;
@@ -609,11 +613,11 @@ public:
 	UINT							m_nShadowMapSRVStagingIndex;	// SRV index in m_SRVStagingHeap
 	UINT							m_nDepthSRVIndex;			// SRV index for depth buffer (SSAO)
 
-	// PBR IBL — device-owned textures sampled by PBR.hlsl.  Bake-once-and-
+	// PBR IBL - device-owned textures sampled by PBR.hlsl.  Bake-once-and-
 	// reuse: BRDF LUT is environment-independent (always the same); env cube
 	// is procedural from the same sky+sun model as computeDiffuseSH but
 	// frozen at bake time for v1 (won't track sun-position changes between
-	// zones — followup work).  Both bound to PBR materials' t5/t6 slots via
+	// zones - followup work).  Both bound to PBR materials' t5/t6 slots via
 	// the same per-slab copy pattern used for the shadow map at t7.
 	ComPtr<ID3D12Resource>			m_pBRDFLUT;					// R16G16_FLOAT 256x256, 1 mip
 	UINT							m_nBRDFLUTSRVStagingIndex;	// SRV in m_SRVStagingHeap
@@ -625,17 +629,17 @@ public:
 	// maybeRebakeEnvCube() against the live sun direction in m_Lights and
 	// m_cAmbientLight to detect when the procedural environment has
 	// drifted far enough to warrant a re-bake (zone change, time-of-day
-	// shift, nebula tint change).  Cube only — the BRDF LUT is
+	// shift, nebula tint change).  Cube only - the BRDF LUT is
 	// environment-independent and never re-bakes.
 	float							m_vLastBakeSunDir[3];
 	float							m_vLastBakeSunRGB[3];
 	float							m_vLastBakeSkyRGB[3];
 	dword							m_nLastBakeTick;			// throttle: min ticks between rebakes
 
-	// Command list open state — true between resetCommandList() and flushCommandList()
+	// Command list open state - true between resetCommandList() and flushCommandList()
 	bool							m_bCommandListOpen;
 
-	// Per-frame SRV ring allocator — reset each beginScene(), advanced by setupTextures()
+	// Per-frame SRV ring allocator - reset each beginScene(), advanced by setupTextures()
 	// and by post-process effects (FXAA/HDR/SSAO).  Atomic so future parallel CL
 	// recording can claim non-overlapping SRV ranges via fetch_add / CAS-loop.
 	// Single-threaded callers see no behaviour change (uncontended atomic ops).
@@ -648,7 +652,7 @@ public:
 	UINT							m_nLastBoundSRVBase;
 	bool							m_bLastBoundSRVValid;
 
-	// Per-frame counters for the ALT+P profiler view — surfaced via PROFILE_LMESSAGE.
+	// Per-frame counters for the ALT+P profiler view - surfaced via PROFILE_LMESSAGE.
 	UINT							m_nSRVBindCalls;		// requested this frame
 	UINT							m_nSRVBindSkipped;		// skipped because base unchanged
 	UINT							m_nMatCBUploads;		// CBPerMaterial uploads this frame
@@ -667,7 +671,7 @@ public:
 	// Encoding: upper 32 bits = m_SRVSlotEpoch at write time, lower 32 bits =
 	// the SRV staging index that was written into the slot.  A cache hit
 	// requires the FULL 64-bit value to match (epoch << 32) | candidateIndex
-	// — so a per-frame epoch bump invalidates every entry without touching
+	// - so a per-frame epoch bump invalidates every entry without touching
 	// memory.  Avoids the 1 MB memset that used to run on every beginScene
 	// (MAX_SRV_DESCRIPTORS * FRAME_COUNT * 4 bytes).
 	Array<uint64_t>					m_SRVSlotStagingIndex;
@@ -717,7 +721,7 @@ public:
 	int								m_LightCBRingHead;
 
 	// Same pattern for CBPerObject (world matrix).  Heavy savings on text/UI
-	// rendering — Font::push fans out one PrimitiveSetTransform per glyph
+	// rendering - Font::push fans out one PrimitiveSetTransform per glyph
 	// batch; many adjacent glyphs share the same world matrix and previously
 	// each one allocated+memcpy'd+SetGraphicsRootConstantBufferView'd a fresh
 	// CB.  Sized small (single CBPerObject = one matrix) so the compare is
@@ -745,14 +749,14 @@ public:
 	CriticalSection					m_UploadCS;
 
 	// Post-process pipeline + anti-aliasing.  Two independent flags:
-	//   m_bSceneRTEnabled — scene RT exists and the HDR post-process pipeline
+	//   m_bSceneRTEnabled - scene RT exists and the HDR post-process pipeline
 	//     is alive.  HDR, SSAO, Exposure, LimbGlow, LensFlare all gate on this
 	//     (they read m_pSceneRT).  Distinct from "which AA runs" so that e.g.
 	//     AA-off + HDR-on is a valid configuration.
-	//   m_eAAMode — selects the AA path executed at present-time:
-	//     AA_NONE = tonemap-only copy scene RT → backbuffer
+	//   m_eAAMode - selects the AA path executed at present-time:
+	//     AA_NONE = tonemap-only copy scene RT > backbuffer
 	//     AA_FXAA = current FXAA path (default; matches pre-split behavior)
-	//     AA_SMAA = 3-pass SMAA (edge → blend weights → neighborhood blend)
+	//     AA_SMAA = 3-pass SMAA (edge > blend weights > neighborhood blend)
 	//   These started as a single m_bFXAAEnabled flag that overloaded both
 	//   meanings; the split lets the FSAA config setting drive AA selection
 	//   without taking the whole post-process pipeline down with it.
@@ -764,7 +768,7 @@ public:
 	ShaderD3D12::Ref				m_pFXAAShader;
 	ComPtr<ID3D12PipelineState>		m_pFXAAPSO;
 	ComPtr<ID3D12RootSignature>		m_pFXAARootSig;
-	// Tonemap-only resolve PSO — used by the AA_NONE path.  Shares m_pFXAARootSig
+	// Tonemap-only resolve PSO - used by the AA_NONE path.  Shares m_pFXAARootSig
 	// (identical root signature: CBV b0, SRV table {scene t0, exposure t1},
 	// sampler s0) so all that differs is the bound pixel shader bytecode.
 	ShaderD3D12::Ref				m_pTonemapShader;
@@ -772,10 +776,10 @@ public:
 
 	// SMAA 3-pass post-process.  SMAA.hlsl is a multi-entry shader (PS_Edge,
 	// PS_Weights, PS_Blend with shared vs_main) compiled inline via
-	// D3DCompileFromFile — same pattern DisplayEffectSSAO uses.  Three PSOs
+	// D3DCompileFromFile - same pattern DisplayEffectSSAO uses.  Three PSOs
 	// share one root signature.  Two intermediate RTs at scene-RT size:
 	// edge mask (R8G8_UNORM, ~2 bpp) and blend weights (R8G8B8A8_UNORM, 4 bpp).
-	// Not canonical Iryoku SMAA — see top of SMAA.hlsl for the algorithm and
+	// Not canonical Iryoku SMAA - see top of SMAA.hlsl for the algorithm and
 	// trade-offs.
 	ComPtr<ID3DBlob>				m_pSMAAVSBlob;
 	ComPtr<ID3DBlob>				m_pSMAAPSEdgeBlob;
@@ -791,12 +795,12 @@ public:
 	UINT							m_nSMAAEdgeSRVIndex;
 	UINT							m_nSMAAWeightsRTVIndex;
 	UINT							m_nSMAAWeightsSRVIndex;
-	SizeInt							m_LastSMAASize;		// for resize detection — recreate RTs only when scene size changes
+	SizeInt							m_LastSMAASize;		// for resize detection - recreate RTs only when scene size changes
 	bool							m_bSMAAAvailable;	// false if any of the createSMAA() steps failed
 	bool							m_bSceneRTEnabled;		// scene RT pipeline alive (HDR/SSAO/Exposure/LimbGlow/LensFlare gate here)
 	AAMode							m_eAAMode;				// AA path selected at present()
 	bool							m_bSceneRTisRT;			// true when m_pSceneRT is in RENDER_TARGET state
-	bool							m_bRenderingPostAA;		// true after the AA pass bound the swap chain — UI/OVERLAY draws use R8G8B8A8 PSOs
+	bool							m_bRenderingPostAA;		// true after the AA pass bound the swap chain - UI/OVERLAY draws use R8G8B8A8 PSOs
 
 	// Auto-exposure plumbing.  DisplayEffectExposure (when active) writes a 1x1
 	// R32F texture each frame with the EMA-smoothed exposure multiplier, and
@@ -830,10 +834,10 @@ public:
 	bool							readyShadowMap();
 	bool							bakePBRIBL();		// CPU-bake BRDF LUT + prefiltered env cube; one-time at init
 	bool							rebakeEnvCubeOnly();	// CPU re-bake of just the env cube; reuses existing GPU resource
-	void							maybeRebakeEnvCube();	// called from beginScene — checks drift, rebakes if needed
+	void							maybeRebakeEnvCube();	// called from beginScene - checks drift, rebakes if needed
 	bool							createFXAA();
 	void							applyFXAA();
-	void							applyTonemap();		// AA_NONE: tonemap scene RT → backbuffer
+	void							applyTonemap();		// AA_NONE: tonemap scene RT > backbuffer
 
 	// Lazy-init the 1x1 R32F=1.0 fallback exposure texture used at t1 by
 	// applyFXAA/applyTonemap when no exposure effect ran this frame.  Needs
