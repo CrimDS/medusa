@@ -1,9 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"C:/Projects/DSMapping/New GCQL/build/cmake_install.cmake",
-		"C:/Projects/DSMapping/New GCQL/build/libnet/cmake_install.cmake",
-		"C:/Projects/DSMapping/New GCQL/build/app/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

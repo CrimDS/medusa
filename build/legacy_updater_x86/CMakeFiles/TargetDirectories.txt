@@ -1,4 +1,0 @@
-C:/Projects/DSMapping/New GCQL/build/legacy_updater_x86/CMakeFiles/GameCQLegacyUpdate.dir
-C:/Projects/DSMapping/New GCQL/build/legacy_updater_x86/CMakeFiles/ALL_BUILD.dir
-C:/Projects/DSMapping/New GCQL/build/legacy_updater_x86/CMakeFiles/ZERO_CHECK.dir
-C:/Projects/DSMapping/New GCQL/build/legacy_updater_x86/libnet/CMakeFiles/libnet.dir

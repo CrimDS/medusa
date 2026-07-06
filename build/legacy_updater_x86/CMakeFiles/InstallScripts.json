@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"C:/Projects/DSMapping/New GCQL/build/legacy_updater_x86/cmake_install.cmake",
-		"C:/Projects/DSMapping/New GCQL/build/legacy_updater_x86/libnet/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
