@@ -1,0 +1,5 @@
+set(__QT_DEPLOY_TARGET_libnet_FILE C:/Projects/DSMapping/New GCQL/build/libnet/Debug/libnet.lib)
+set(__QT_DEPLOY_TARGET_libnet_TYPE STATIC_LIBRARY)
+set(__QT_DEPLOY_TARGET_GameCQ_FILE C:/Projects/DSMapping/New GCQL/build/app/Debug/GameCQ.exe)
+set(__QT_DEPLOY_TARGET_GameCQ_TYPE EXECUTABLE)
+set(__QT_DEPLOY_TARGET_GameCQ_RUNTIME_DLLS C:/Qt/6.10.2/msvc2022_64/bin/Qt6Concurrentd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6WebEngineWidgetsd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6WebEngineCored.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6WebChanneld.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6Positioningd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6PrintSupportd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6QuickWidgetsd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6Widgetsd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6Quickd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6OpenGLd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6Guid.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6QmlMetad.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6QmlModelsd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6QmlWorkerScriptd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6Qmld.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6Networkd.dll;C:/Qt/6.10.2/msvc2022_64/bin/Qt6Cored.dll)

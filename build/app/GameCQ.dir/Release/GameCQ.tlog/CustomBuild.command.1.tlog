@@ -1,0 +1,30 @@
+^C:\PROJECTS\DSMAPPING\NEW GCQL\BUILD\CMAKEFILES\7A23E498770CB7B895A7AD8C2500FC7B\QRC_GAMECQ_THEME_RESOURCES.CPP.RULE
+setlocal
+C:\Qt\6.10.2\msvc2022_64\bin\rcc.exe --output "C:/Projects/DSMapping/New GCQL/build/app/.qt/rcc/qrc_gamecq_theme_resources.cpp" --name gamecq_theme_resources "C:/Projects/DSMapping/New GCQL/build/app/.qt/rcc/gamecq_theme_resources.qrc" --no-zstd
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\PROJECTS\DSMAPPING\NEW GCQL\BUILD\CMAKEFILES\7A23E498770CB7B895A7AD8C2500FC7B\QRC_GAMECQ_LEGACY_ICON_RESOURCES.CPP.RULE
+setlocal
+C:\Qt\6.10.2\msvc2022_64\bin\rcc.exe --output "C:/Projects/DSMapping/New GCQL/build/app/.qt/rcc/qrc_gamecq_legacy_icon_resources.cpp" --name gamecq_legacy_icon_resources "C:/Projects/DSMapping/New GCQL/build/app/.qt/rcc/gamecq_legacy_icon_resources.qrc" --no-zstd
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\PROJECTS\DSMAPPING\NEW GCQL\APP\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SC:/Projects/DSMapping/New GCQL" "-BC:/Projects/DSMapping/New GCQL/build" --check-stamp-file "C:/Projects/DSMapping/New GCQL/build/app/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

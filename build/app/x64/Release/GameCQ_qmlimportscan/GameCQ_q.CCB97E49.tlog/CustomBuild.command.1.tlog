@@ -1,0 +1,32 @@
+^C:\PROJECTS\DSMAPPING\NEW GCQL\BUILD\CMAKEFILES\2B2E5C4BAD2B4A8F169699DC53EF852D\GAMECQ_BUILD.CMAKE.RULE
+setlocal
+cd "C:\Projects\DSMapping\New GCQL\app"
+if %errorlevel% neq 0 goto :cmEnd
+C:
+if %errorlevel% neq 0 goto :cmEnd
+call "C:\Projects\DSMapping\New GCQL\build\.qt\bin\qt_setup_tool_path.bat" C:/Qt/6.10.2/msvc2022_64/bin/qmlimportscanner.exe "@C:/Projects/DSMapping/New GCQL/build/app/.qt/qml_imports/GameCQ_build.rsp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\PROJECTS\DSMAPPING\NEW GCQL\BUILD\CMAKEFILES\D567DF463FB2DDEC977F89C6330FEBEE\GAMECQ_QMLIMPORTSCAN.RULE
+setlocal
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\PROJECTS\DSMAPPING\NEW GCQL\APP\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SC:/Projects/DSMapping/New GCQL" "-BC:/Projects/DSMapping/New GCQL/build" --check-stamp-file "C:/Projects/DSMapping/New GCQL/build/app/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

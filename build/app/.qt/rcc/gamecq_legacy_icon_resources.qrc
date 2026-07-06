@@ -1,0 +1,34 @@
+<RCC>
+  <qresource prefix="/gamecq/icons">
+    <file alias="1.ico">C:/Projects/DSMapping/New GCQL/Icons/1.ico</file>
+    <file alias="Avatar.ico">C:/Projects/DSMapping/New GCQL/Icons/Avatar.ico</file>
+    <file alias="GCQL.ico">C:/Projects/DSMapping/New GCQL/Icons/GCQL.ico</file>
+    <file alias="GCQLDoc.ico">C:/Projects/DSMapping/New GCQL/Icons/GCQLDoc.ico</file>
+    <file alias="MirrorUpload.ico">C:/Projects/DSMapping/New GCQL/Icons/MirrorUpload.ico</file>
+    <file alias="activity.ico">C:/Projects/DSMapping/New GCQL/Icons/activity.ico</file>
+    <file alias="avatar_a.ico">C:/Projects/DSMapping/New GCQL/Icons/avatar_a.ico</file>
+    <file alias="avatar_d.ico">C:/Projects/DSMapping/New GCQL/Icons/avatar_d.ico</file>
+    <file alias="avatar_m.ico">C:/Projects/DSMapping/New GCQL/Icons/avatar_m.ico</file>
+    <file alias="avatar_sub.ico">C:/Projects/DSMapping/New GCQL/Icons/avatar_sub.ico</file>
+    <file alias="bigfoot.ico">C:/Projects/DSMapping/New GCQL/Icons/bigfoot.ico</file>
+    <file alias="clan.ico">C:/Projects/DSMapping/New GCQL/Icons/clan.ico</file>
+    <file alias="clans.ico">C:/Projects/DSMapping/New GCQL/Icons/clans.ico</file>
+    <file alias="dsIco.ico">C:/Projects/DSMapping/New GCQL/Icons/dsIco.ico</file>
+    <file alias="friend.ico">C:/Projects/DSMapping/New GCQL/Icons/friend.ico</file>
+    <file alias="friend_o.ico">C:/Projects/DSMapping/New GCQL/Icons/friend_o.ico</file>
+    <file alias="friends.ico">C:/Projects/DSMapping/New GCQL/Icons/friends.ico</file>
+    <file alias="game.ico">C:/Projects/DSMapping/New GCQL/Icons/game.ico</file>
+    <file alias="game1.ico">C:/Projects/DSMapping/New GCQL/Icons/game1.ico</file>
+    <file alias="game2.ico">C:/Projects/DSMapping/New GCQL/Icons/game2.ico</file>
+    <file alias="games.ico">C:/Projects/DSMapping/New GCQL/Icons/games.ico</file>
+    <file alias="games1.ico">C:/Projects/DSMapping/New GCQL/Icons/games1.ico</file>
+    <file alias="ico00001.ico">C:/Projects/DSMapping/New GCQL/Icons/ico00001.ico</file>
+    <file alias="ico00004.ico">C:/Projects/DSMapping/New GCQL/Icons/ico00004.ico</file>
+    <file alias="ico00005.ico">C:/Projects/DSMapping/New GCQL/Icons/ico00005.ico</file>
+    <file alias="room.ico">C:/Projects/DSMapping/New GCQL/Icons/room.ico</file>
+    <file alias="rooms.ico">C:/Projects/DSMapping/New GCQL/Icons/rooms.ico</file>
+    <file alias="sort.ico">C:/Projects/DSMapping/New GCQL/Icons/sort.ico</file>
+    <file alias="yam.ico">C:/Projects/DSMapping/New GCQL/Icons/yam.ico</file>
+  </qresource>
+</RCC>
+

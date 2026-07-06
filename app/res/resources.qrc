@@ -1,0 +1,6 @@
+<RCC>
+    <qresource prefix="/gamecq">
+        <file>theme.qss</file>
+        <file>theme_ember.qss</file>
+    </qresource>
+</RCC>

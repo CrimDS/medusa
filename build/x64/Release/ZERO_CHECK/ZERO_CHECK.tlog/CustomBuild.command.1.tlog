@@ -1,0 +1,10 @@
+^C:\PROJECTS\DSMAPPING\NEW GCQL\BUILD\CMAKEFILES\2A0C4B74EE8F95A50E28D578A6DEC376\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SC:/Projects/DSMapping/New GCQL" "-BC:/Projects/DSMapping/New GCQL/build" --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file "C:/Projects/DSMapping/New GCQL/build/GameCQ.slnx"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

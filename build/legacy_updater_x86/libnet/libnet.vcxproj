@@ -1,0 +1,429 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <PreferredToolArchitecture>x64</PreferredToolArchitecture>
+  </PropertyGroup>
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|Win32">
+      <Configuration>Debug</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|Win32">
+      <Configuration>Release</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="MinSizeRel|Win32">
+      <Configuration>MinSizeRel</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="RelWithDebInfo|Win32">
+      <Configuration>RelWithDebInfo</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{2CBA94D7-8F33-3C82-831A-87BE1CE1D026}</ProjectGuid>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <Platform>Win32</Platform>
+    <ProjectName>libnet</ProjectName>
+    <VCProjectUpgraderObjectName>NoUpgrade</VCProjectUpgraderObjectName>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <CharacterSet>MultiByte</CharacterSet>
+    <PlatformToolset>v145</PlatformToolset>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="ExtensionSettings">
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <_ProjectFileVersion>10.0.20506.1</_ProjectFileVersion>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">C:\Projects\DSMapping\New GCQL\build\legacy_updater_x86\libnet\Debug\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">libnet.dir\Debug\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">libnet</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">.lib</TargetExt>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">C:\Projects\DSMapping\New GCQL\build\legacy_updater_x86\libnet\Release\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">libnet.dir\Release\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">libnet</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">.lib</TargetExt>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'">C:\Projects\DSMapping\New GCQL\build\legacy_updater_x86\libnet\MinSizeRel\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'">libnet.dir\MinSizeRel\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'">libnet</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'">.lib</TargetExt>
+    <OutDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'">C:\Projects\DSMapping\New GCQL\build\legacy_updater_x86\libnet\RelWithDebInfo\</OutDir>
+    <IntDir Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'">libnet.dir\RelWithDebInfo\</IntDir>
+    <TargetName Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'">libnet</TargetName>
+    <TargetExt Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'">.lib</TargetExt>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
+      <BufferSecurityCheck></BufferSecurityCheck>
+      <CallingConvention></CallingConvention>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4251;4275;4996</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <FloatingPointModel></FloatingPointModel>
+      <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
+      <InlineFunctionExpansion>Disabled</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>Disabled</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;MEDUSA_DLL;REGEXP_UNICODE;NETWORK_DLL;GCQ_DLL;Z_SOLO;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;CMAKE_INTDIR="Debug"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;MEDUSA_DLL;REGEXP_UNICODE;NETWORK_DLL;GCQ_DLL;Z_SOLO;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Lib>
+      <AdditionalOptions>%(AdditionalOptions) /machine:X86</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <BufferSecurityCheck></BufferSecurityCheck>
+      <CallingConvention></CallingConvention>
+      <DisableSpecificWarnings>4251;4275;4996</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <FloatingPointModel></FloatingPointModel>
+      <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
+      <InlineFunctionExpansion>AnySuitable</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>MaxSpeed</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;MEDUSA_DLL;REGEXP_UNICODE;NETWORK_DLL;GCQ_DLL;Z_SOLO;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;CMAKE_INTDIR="Release"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <DebugInformationFormat>
+      </DebugInformationFormat>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;MEDUSA_DLL;REGEXP_UNICODE;NETWORK_DLL;GCQ_DLL;Z_SOLO;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Lib>
+      <AdditionalOptions>%(AdditionalOptions) /machine:X86</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <BufferSecurityCheck></BufferSecurityCheck>
+      <CallingConvention></CallingConvention>
+      <DisableSpecificWarnings>4251;4275;4996</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <FloatingPointModel></FloatingPointModel>
+      <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
+      <InlineFunctionExpansion>OnlyExplicitInline</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>MinSpace</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;MEDUSA_DLL;REGEXP_UNICODE;NETWORK_DLL;GCQ_DLL;Z_SOLO;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;CMAKE_INTDIR="MinSizeRel"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <DebugInformationFormat>
+      </DebugInformationFormat>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;MEDUSA_DLL;REGEXP_UNICODE;NETWORK_DLL;GCQ_DLL;Z_SOLO;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Lib>
+      <AdditionalOptions>%(AdditionalOptions) /machine:X86</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
+      <BasicRuntimeChecks>Default</BasicRuntimeChecks>
+      <BufferSecurityCheck></BufferSecurityCheck>
+      <CallingConvention></CallingConvention>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <DisableSpecificWarnings>4251;4275;4996</DisableSpecificWarnings>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <FloatingPointModel></FloatingPointModel>
+      <ForceConformanceInForLoopScope></ForceConformanceInForLoopScope>
+      <InlineFunctionExpansion>OnlyExplicitInline</InlineFunctionExpansion>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MinimalRebuild></MinimalRebuild>
+      <Optimization>MaxSpeed</Optimization>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <RemoveUnreferencedCodeData></RemoveUnreferencedCodeData>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <SupportJustMyCode></SupportJustMyCode>
+      <TreatWChar_tAsBuiltInType></TreatWChar_tAsBuiltInType>
+      <UseFullPaths>false</UseFullPaths>
+      <WarningLevel>Level3</WarningLevel>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;MEDUSA_DLL;REGEXP_UNICODE;NETWORK_DLL;GCQ_DLL;Z_SOLO;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;CMAKE_INTDIR="RelWithDebInfo"</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)</ObjectFileName>
+      <ScanSourceForModuleDependencies>false</ScanSourceForModuleDependencies>
+    </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;MEDUSA_DLL;REGEXP_UNICODE;NETWORK_DLL;GCQ_DLL;Z_SOLO;_CRT_SECURE_NO_WARNINGS;_WINSOCK_DEPRECATED_NO_WARNINGS;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+    <Midl>
+      <AdditionalIncludeDirectories>C:\Projects\DSMapping\DSD12 Official\medusa-vs26;C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
+      <HeaderFileName>%(Filename).h</HeaderFileName>
+      <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
+      <InterfaceIdentifierFileName>%(Filename)_i.c</InterfaceIdentifierFileName>
+      <ProxyFileName>%(Filename)_p.c</ProxyFileName>
+    </Midl>
+    <Lib>
+      <AdditionalOptions>%(AdditionalOptions) /machine:X86</AdditionalOptions>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Projects\DSMapping\New GCQL\libnet\CMakeLists.txt">
+      <UseUtf8Encoding>Always</UseUtf8Encoding>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Building Custom Rule C:/Projects/DSMapping/New GCQL/libnet/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SC:/Projects/DSMapping/New GCQL/legacy_updater" "-BC:/Projects/DSMapping/New GCQL/build/legacy_updater_x86" --check-stamp-file "C:/Projects/DSMapping/New GCQL/build/legacy_updater_x86/libnet/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">C:\Projects\DSMapping\New GCQL\build\legacy_updater_x86\libnet\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Building Custom Rule C:/Projects/DSMapping/New GCQL/libnet/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SC:/Projects/DSMapping/New GCQL/legacy_updater" "-BC:/Projects/DSMapping/New GCQL/build/legacy_updater_x86" --check-stamp-file "C:/Projects/DSMapping/New GCQL/build/legacy_updater_x86/libnet/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">C:\Projects\DSMapping\New GCQL\build\legacy_updater_x86\libnet\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'">Building Custom Rule C:/Projects/DSMapping/New GCQL/libnet/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SC:/Projects/DSMapping/New GCQL/legacy_updater" "-BC:/Projects/DSMapping/New GCQL/build/legacy_updater_x86" --check-stamp-file "C:/Projects/DSMapping/New GCQL/build/legacy_updater_x86/libnet/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'">%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'">C:\Projects\DSMapping\New GCQL\build\legacy_updater_x86\libnet\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|Win32'">false</LinkObjects>
+      <Message Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'">Building Custom Rule C:/Projects/DSMapping/New GCQL/libnet/CMakeLists.txt</Message>
+      <Command Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'">setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SC:/Projects/DSMapping/New GCQL/legacy_updater" "-BC:/Projects/DSMapping/New GCQL/build/legacy_updater_x86" --check-stamp-file "C:/Projects/DSMapping/New GCQL/build/legacy_updater_x86/libnet/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal &amp; call :cmErrorLevel %errorlevel% &amp; goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd</Command>
+      <AdditionalInputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'">%(AdditionalInputs)</AdditionalInputs>
+      <Outputs Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'">C:\Projects\DSMapping\New GCQL\build\legacy_updater_x86\libnet\CMakeFiles\generate.stamp</Outputs>
+      <LinkObjects Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|Win32'">false</LinkObjects>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\Assert.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\Error.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\ExceptionHandler.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\Log.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\Profile.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\SafeThread.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\Broker.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\BrokerArchive.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\BrokerCache.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\BrokerFolder.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\ClassKey.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\Factory.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\FactoryTypes.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\Widget.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\WidgetWrap.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\Archive.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\Dictionary.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\File.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileArchive.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileChange.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileDisk.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileFIFO.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileMap.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileMemory.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileMemoryBlocked.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FindFile.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\Path.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\Stream.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\Property.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\PropertyClass.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\PropertyList.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\Type.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\TypeCopy.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\Value.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Resource\Collection.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Resource\Resource.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Resource\ResourceLink.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Resource\Text.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Atomic.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\BitIterator.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Buffer.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Codec.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\ColorFormat.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Constant.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\CriticalSection.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Event.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Exception.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Expression.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\FIFOBuffer.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Library.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\LZW.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\MD5.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Mutex.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Process.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Progress.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\RandomNumber.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Referenced.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\RegExpM.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Registry.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Settings.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\String.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\StringBuffer.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\StringHash.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Thread.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\ThreadPool.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Time.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Timer.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\TimerWheel.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\UniqueNumber.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\UUE.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\ZLIB.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\System\CommandTarget.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\System\Keyboard.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\System\Locale.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\System\LocalizedString.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\Client.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\FileSocket.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\LogClient.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\MirrorClient.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\Network.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\ProfilerClient.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\Socket.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\SocketList.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\GCQ\MasterClient.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\GCQ\MetaClient.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\GCQ\MetaClientCommand.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\GCQ\MetaClientMID.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\GCQ\ProcessClient.cpp" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\frontend.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\memory.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\regerror.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\regexp.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\regsub.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\report.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\widechar.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\adler32.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\compress.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\crc32.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\deflate.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\inffast.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\inflate.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\inftrees.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\trees.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\uncompr.c" />
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\zutil.c" />
+  </ItemGroup>
+  <ItemGroup />
+  <ItemGroup>
+    <ProjectReference Include="C:\Projects\DSMapping\New GCQL\build\legacy_updater_x86\ZERO_CHECK.vcxproj">
+      <Project>{F68B0163-FFF0-3DBB-8480-90E51AF6B7C2}</Project>
+      <Name>ZERO_CHECK</Name>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <ImportGroup Label="ExtensionTargets">
+  </ImportGroup>
+</Project>

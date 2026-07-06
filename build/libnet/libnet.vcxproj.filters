@@ -1,0 +1,361 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\Assert.cpp">
+      <Filter>Debug</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\Error.cpp">
+      <Filter>Debug</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\ExceptionHandler.cpp">
+      <Filter>Debug</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\Log.cpp">
+      <Filter>Debug</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\Profile.cpp">
+      <Filter>Debug</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Debug\SafeThread.cpp">
+      <Filter>Debug</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\Broker.cpp">
+      <Filter>Factory</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\BrokerArchive.cpp">
+      <Filter>Factory</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\BrokerCache.cpp">
+      <Filter>Factory</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\BrokerFolder.cpp">
+      <Filter>Factory</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\ClassKey.cpp">
+      <Filter>Factory</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\Factory.cpp">
+      <Filter>Factory</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\FactoryTypes.cpp">
+      <Filter>Factory</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\Widget.cpp">
+      <Filter>Factory</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Factory\WidgetWrap.cpp">
+      <Filter>Factory</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\Archive.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\Dictionary.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\File.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileArchive.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileChange.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileDisk.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileFIFO.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileMap.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileMemory.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FileMemoryBlocked.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\FindFile.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\Path.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\File\Stream.cpp">
+      <Filter>File</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\Property.cpp">
+      <Filter>Reflection</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\PropertyClass.cpp">
+      <Filter>Reflection</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\PropertyList.cpp">
+      <Filter>Reflection</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\Type.cpp">
+      <Filter>Reflection</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\TypeCopy.cpp">
+      <Filter>Reflection</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Reflection\Value.cpp">
+      <Filter>Reflection</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Resource\Collection.cpp">
+      <Filter>Resource</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Resource\Resource.cpp">
+      <Filter>Resource</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Resource\ResourceLink.cpp">
+      <Filter>Resource</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Resource\Text.cpp">
+      <Filter>Resource</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Atomic.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\BitIterator.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Buffer.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Codec.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\ColorFormat.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Constant.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\CriticalSection.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Event.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Exception.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Expression.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\FIFOBuffer.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Library.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\LZW.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\MD5.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Mutex.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Process.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Progress.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\RandomNumber.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Referenced.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\RegExpM.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Registry.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Settings.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\String.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\StringBuffer.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\StringHash.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Thread.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\ThreadPool.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Time.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\Timer.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\TimerWheel.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\UniqueNumber.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\UUE.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Standard\ZLIB.cpp">
+      <Filter>Standard</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\System\CommandTarget.cpp">
+      <Filter>System</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\System\Keyboard.cpp">
+      <Filter>System</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\System\Locale.cpp">
+      <Filter>System</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\System\LocalizedString.cpp">
+      <Filter>System</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\Client.cpp">
+      <Filter>Network</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\FileSocket.cpp">
+      <Filter>Network</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\LogClient.cpp">
+      <Filter>Network</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\MirrorClient.cpp">
+      <Filter>Network</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\Network.cpp">
+      <Filter>Network</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\ProfilerClient.cpp">
+      <Filter>Network</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\Socket.cpp">
+      <Filter>Network</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\Network\SocketList.cpp">
+      <Filter>Network</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\GCQ\MasterClient.cpp">
+      <Filter>GCQ</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\GCQ\MetaClient.cpp">
+      <Filter>GCQ</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\GCQ\MetaClientCommand.cpp">
+      <Filter>GCQ</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\GCQ\MetaClientMID.cpp">
+      <Filter>GCQ</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\GCQ\ProcessClient.cpp">
+      <Filter>GCQ</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\frontend.c">
+      <Filter>ThirdParty\re2</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\memory.c">
+      <Filter>ThirdParty\re2</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\regerror.c">
+      <Filter>ThirdParty\re2</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\regexp.c">
+      <Filter>ThirdParty\re2</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\regsub.c">
+      <Filter>ThirdParty\re2</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\report.c">
+      <Filter>ThirdParty\re2</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\re2\widechar.c">
+      <Filter>ThirdParty\re2</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\adler32.c">
+      <Filter>ThirdParty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\compress.c">
+      <Filter>ThirdParty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\crc32.c">
+      <Filter>ThirdParty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\deflate.c">
+      <Filter>ThirdParty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\inffast.c">
+      <Filter>ThirdParty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\inflate.c">
+      <Filter>ThirdParty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\inftrees.c">
+      <Filter>ThirdParty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\trees.c">
+      <Filter>ThirdParty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\uncompr.c">
+      <Filter>ThirdParty\zlib</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Projects\DSMapping\DSD12 Official\medusa-vs26\ThirdParty\zlib\zutil.c">
+      <Filter>ThirdParty\zlib</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="C:\Projects\DSMapping\New GCQL\libnet\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Debug">
+      <UniqueIdentifier>{A324A5D0-9945-3585-B399-7BDE8036978E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Factory">
+      <UniqueIdentifier>{48D84556-B188-3C4C-82E7-548E440524B0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="File">
+      <UniqueIdentifier>{21B177E6-6038-3F3A-8644-B0620E718D4A}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="GCQ">
+      <UniqueIdentifier>{9DFA41D8-09D9-3526-8ADE-0F725F2ABBB2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Network">
+      <UniqueIdentifier>{55E4E6A7-0296-38A8-BF04-764CB1201C8C}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Reflection">
+      <UniqueIdentifier>{661B0410-0DE2-3FEF-8883-C0DAB1076822}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Resource">
+      <UniqueIdentifier>{A63B9809-028C-351C-B8D8-E80DDE73D684}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Standard">
+      <UniqueIdentifier>{E550117E-A4A2-3FD1-B51B-B1C0051116D0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="System">
+      <UniqueIdentifier>{FFEE0FF7-E1AF-36FA-A47C-C3140E97FD77}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ThirdParty">
+      <UniqueIdentifier>{2F59F413-2330-336C-8616-0650233BBC86}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ThirdParty\re2">
+      <UniqueIdentifier>{060E2E27-382C-34E4-901F-619012D3AF48}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ThirdParty\zlib">
+      <UniqueIdentifier>{D8DAE84E-451D-3D45-9EEC-19220D418424}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

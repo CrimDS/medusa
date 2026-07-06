@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/gamecq">
+    <file alias="theme.qss">C:/Projects/DSMapping/New GCQL/app/res/theme.qss</file>
+    <file alias="theme_ember.qss">C:/Projects/DSMapping/New GCQL/app/res/theme_ember.qss</file>
+  </qresource>
+</RCC>
+
